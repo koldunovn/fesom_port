@@ -1,6 +1,8 @@
 #ifndef FESOM_CONSTANTS_H
 #define FESOM_CONSTANTS_H
 
+#include "fesom_types.h"
+
 /* Physical constants — FRESH_START.md §17. */
 #define FESOM_PI         3.14159265358979
 #define FESOM_RAD        (FESOM_PI / 180.0)
@@ -42,6 +44,16 @@
 #define FESOM_PHASE1_A_VER     1.0e-4   /* background momentum vertical visc [m²/s] */
 #define FESOM_PHASE1_C_D       0.0025   /* bottom-drag coefficient                  */
 
+/* Horizontal viscosity opt_visc=5 (visc_filt_bcksct). Pi namelist.dyn defaults.
+   FRESH_START.md §14.7 explicitly warns: visc_gamma0 = 0.003, NOT 0.03. */
+#define FESOM_PHASE1_VISC_GAMMA0       0.003
+#define FESOM_PHASE1_VISC_GAMMA1       0.1
+#define FESOM_PHASE1_VISC_GAMMA2       0.285
+/* Pi default is 1.5 ("easy backscatter" returns 50% extra of smoothed
+   energy). User asked to set this to 1.0 for now → no backscatter return,
+   pure smoothing. */
+#define FESOM_PHASE1_VISC_EASYBSRETURN 1.0
+
 /* PP mixing — defaults from oce_modules.F90:25-78 */
 #define FESOM_PHASE1_MIX_COEFF_PP   0.01    /* PP scaling coefficient                  */
 #define FESOM_PHASE1_INSTABMIX_KV   0.1     /* convective-adjustment Kv [m²/s]         */
@@ -58,9 +70,10 @@
 #define FESOM_PHASE1_ALPHA     1.0
 #define FESOM_PHASE1_THETA     1.0
 
-/* Timestep — pi run uses step_per_day=36 → dt = 86400/36 = 2400 s (per
-   work_pi/namelist.config). Phase 1 keeps it as a compile-time constant. */
-#define FESOM_PHASE1_DT        2400.0
+/* Timestep — runtime-mutable so callers (e.g. CLI in main) can adjust
+   without rebuild. Default 2400 s = pi step_per_day=36; CORE2 needs ≤500-600 s. */
+extern real_t fesom_phase1_dt;
+#define FESOM_PHASE1_DT  fesom_phase1_dt
 
 /* CG SSH solver defaults — MOD_DYN.F90:13-25. */
 #define FESOM_PHASE1_SOLTOL    1.0e-5

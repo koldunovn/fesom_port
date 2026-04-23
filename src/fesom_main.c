@@ -202,12 +202,17 @@ static void print_sanity(const fesom_mesh *m)
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <mesh_dir> [output_dir]\n", argv[0]);
+        fprintf(stderr, "usage: %s <mesh_dir> [output_dir] [dt_seconds] [nsteps] [snap_every]\n",
+                argv[0]);
         return 2;
     }
     const char *mesh_dir = argv[1];
-    const char *out_dir  = (argc >= 3) ? argv[2] : NULL;
+    const char *out_dir  = (argc >= 3 && argv[2][0] != '\0') ? argv[2] : NULL;
+    if (argc >= 4) fesom_phase1_dt = (real_t)atof(argv[3]);
+    int nsteps_cli     = (argc >= 5) ? atoi(argv[4]) : 0;
+    int snap_every_cli = (argc >= 6) ? atoi(argv[5]) : 0;
     if (out_dir) printf("[fesom_port] snapshots → %s/snap_NNNNNN.nc\n", out_dir);
+    printf("[fesom_port] dt = %.1f s\n", (double)fesom_phase1_dt);
 
     fesom_mpi mpi;
     fesom_mpi_init(&mpi, argc, argv);
@@ -637,9 +642,9 @@ int main(int argc, char **argv)
         fesom_step_ctx ctx = { .stiff = &stiff,
                                .solver = &solver,
                                .tra_sc = &tra_sc };
-        const int nsteps = 500;
-        const int print_every = 25;
-        const int snap_every  = 25;
+        const int nsteps      = (nsteps_cli > 0)     ? nsteps_cli     : 500;
+        const int snap_every  = (snap_every_cli > 0) ? snap_every_cli : 25;
+        const int print_every = snap_every;
         printf("[fesom_port] timestep loop: %d steps, dt=%.0f s, print every %d, snapshot every %d\n",
                nsteps, FESOM_PHASE1_DT, print_every, snap_every);
         if (out_dir) {

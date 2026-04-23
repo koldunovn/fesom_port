@@ -354,6 +354,110 @@ void fesom_update_vel(const struct fesom_mesh *mesh,
 }
 
 /*===========================================================================
+ * visc_filt_bcksct (oce_dyn.F90:278-426) — opt_visc=5 with easy backscatter
+ *===========================================================================*/
+
+void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
+                            struct fesom_dyn        *dyn)
+{
+    const int E    = mesh->elem2D;
+    const int Eedg = mesh->edge2D;
+    const int nl   = mesh->nl;
+    const real_t dt = (real_t)FESOM_PHASE1_DT;
+    const real_t g0 = (real_t)FESOM_PHASE1_VISC_GAMMA0;
+    const real_t g1 = (real_t)FESOM_PHASE1_VISC_GAMMA1;
+    const real_t g2 = (real_t)FESOM_PHASE1_VISC_GAMMA2;
+    const real_t bsret = (real_t)FESOM_PHASE1_VISC_EASYBSRETURN;
+
+    /* Zero the four work arrays (lines 316-322). */
+    memset(dyn->u_b, 0, (size_t)E * (size_t)nl * sizeof(real_t));
+    memset(dyn->v_b, 0, (size_t)E * (size_t)nl * sizeof(real_t));
+    memset(dyn->u_c, 0, (size_t)mesh->nod2D * (size_t)nl * sizeof(real_t));
+    memset(dyn->v_c, 0, (size_t)mesh->nod2D * (size_t)nl * sizeof(real_t));
+
+    /* Edge loop — accumulate per-element viscous updates (lines 327-361).
+       Skip boundary edges (Fortran: myList_edge2D > edge2D_in; serial: el2 < 0). */
+    for (int ed = 0; ed < Eedg; ++ed) {
+        int el1 = mesh->edge_tri[2*ed + 0];
+        int el2 = mesh->edge_tri[2*ed + 1];
+        if (el1 < 0 || el2 < 0) continue;       /* boundary edge */
+
+        real_t a1 = mesh->elem_area[el1];
+        real_t a2 = mesh->elem_area[el2];
+        real_t len = sqrt(a1 + a2);
+
+        int nu1 = mesh->ulevels[el1] - 1;
+        int nu2 = mesh->ulevels[el2] - 1;
+        int nzmin = (nu1 > nu2) ? nu1 : nu2;       /* maxval(ulevels) */
+        int nl1   = mesh->nlevels[el1] - 1;
+        int nl2   = mesh->nlevels[el2] - 1;
+        int nzmax = (nl1 < nl2) ? nl1 : nl2;       /* minval(nlevels) - 1 */
+
+        for (int nz = nzmin; nz < nzmax; ++nz) {
+            real_t u1 = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 0]
+                       - dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 0];
+            real_t v1 = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 1]
+                       - dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 1];
+            real_t mag2 = u1*u1 + v1*v1;
+            real_t mag  = sqrt(mag2);
+            real_t vi_inner = (g1 * mag > g2 * mag2) ? g1 * mag : g2 * mag2;
+            real_t vi = dt * (g0 > vi_inner ? g0 : vi_inner) * len;
+            real_t du = u1 * vi;
+            real_t dv = v1 * vi;
+            dyn->u_b[FESOM_ELEM3D(el1, nz, nl)] -= du / a1;
+            dyn->v_b[FESOM_ELEM3D(el1, nz, nl)] -= dv / a1;
+            dyn->u_b[FESOM_ELEM3D(el2, nz, nl)] += du / a2;
+            dyn->v_b[FESOM_ELEM3D(el2, nz, nl)] += dv / a2;
+        }
+    }
+
+    /* Smooth U_b → U_c at nodes (area-weighted mean of surrounding cells).
+       Same neighbour traversal as compute_vel_nodes. */
+    for (int n = 0; n < mesh->nod2D; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        int o0 = mesh->nod_in_elem2D_offsets[n];
+        int o1 = mesh->nod_in_elem2D_offsets[n + 1];
+        for (int nz = nu1; nz < nl1; ++nz) {
+            real_t tot = 0.0, tu = 0.0, tv = 0.0;
+            for (int k = o0; k < o1; ++k) {
+                int e = mesh->nod_in_elem2D[k];
+                real_t a = mesh->elem_area[e];
+                tot += a;
+                tu  += dyn->u_b[FESOM_ELEM3D(e, nz, nl)] * a;
+                tv  += dyn->v_b[FESOM_ELEM3D(e, nz, nl)] * a;
+            }
+            if (tot > 0.0) {
+                dyn->u_c[FESOM_NODE3D(n, nz, nl)] = tu / tot;
+                dyn->v_c[FESOM_NODE3D(n, nz, nl)] = tv / tot;
+            }
+        }
+    }
+
+    /* Apply: uv_rhs += u_b − easybsreturn · mean(u_c at 3 vertices)
+       (lines 418-422 — non-split-explicit branch, what we use in Phase 2). */
+    for (int e = 0; e < E; ++e) {
+        int n0 = mesh->elem_nodes[3*e + 0];
+        int n1 = mesh->elem_nodes[3*e + 1];
+        int n2 = mesh->elem_nodes[3*e + 2];
+        int nu1 = mesh->ulevels[e] - 1;
+        int nle = mesh->nlevels[e] - 1;
+        for (int nz = nu1; nz < nle; ++nz) {
+            real_t uc_mean = (dyn->u_c[FESOM_NODE3D(n0, nz, nl)]
+                            + dyn->u_c[FESOM_NODE3D(n1, nz, nl)]
+                            + dyn->u_c[FESOM_NODE3D(n2, nz, nl)]) / 3.0;
+            real_t vc_mean = (dyn->v_c[FESOM_NODE3D(n0, nz, nl)]
+                            + dyn->v_c[FESOM_NODE3D(n1, nz, nl)]
+                            + dyn->v_c[FESOM_NODE3D(n2, nz, nl)]) / 3.0;
+            dyn->uv_rhs[FESOM_ELEMVEC(e, nz, nl) + 0]
+                += dyn->u_b[FESOM_ELEM3D(e, nz, nl)] - bsret * uc_mean;
+            dyn->uv_rhs[FESOM_ELEMVEC(e, nz, nl) + 1]
+                += dyn->v_b[FESOM_ELEM3D(e, nz, nl)] - bsret * vc_mean;
+        }
+    }
+}
+
+/*===========================================================================
  * compute_hbar_ale (oce_ale.F90:1974-2116)
  *
  *   ssh_rhs_old = 0

@@ -20,11 +20,17 @@ void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
     d->w           = calloc(n_nl,   sizeof(real_t));
     d->w_i         = calloc(n_nl,   sizeof(real_t));
     d->uvnode      = calloc(n_nl * 2, sizeof(real_t));
+    size_t e_nl = (size_t)mesh->elem2D * (size_t)mesh->nl;
+    d->u_b = calloc(e_nl, sizeof(real_t));
+    d->v_b = calloc(e_nl, sizeof(real_t));
+    d->u_c = calloc(n_nl, sizeof(real_t));
+    d->v_c = calloc(n_nl, sizeof(real_t));
     d->eta_n       = calloc(n,      sizeof(real_t));
     d->d_eta       = calloc(n,      sizeof(real_t));
     d->ssh_rhs     = calloc(n,      sizeof(real_t));
     d->ssh_rhs_old = calloc(n,      sizeof(real_t));
     FESOM_CHECK(d->uv && d->uv_rhs && d->uv_rhsAB && d->w && d->w_i && d->uvnode
+             && d->u_b && d->v_b && d->u_c && d->v_c
              && d->eta_n && d->d_eta && d->ssh_rhs && d->ssh_rhs_old,
              "fesom_dyn alloc: out of memory");
 }
@@ -37,6 +43,10 @@ void fesom_dyn_free(fesom_dyn *d)
     free(d->w);
     free(d->w_i);
     free(d->uvnode);
+    free(d->u_b);
+    free(d->v_b);
+    free(d->u_c);
+    free(d->v_c);
     free(d->eta_n);
     free(d->d_eta);
     free(d->ssh_rhs);

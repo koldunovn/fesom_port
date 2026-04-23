@@ -38,7 +38,10 @@ int fesom_timestep(int                          step_n,
     /*  4. momentum RHS (Coriolis AB2 + SSH gradient + PGF)  */
     fesom_compute_vel_rhs(mesh, aux, dyn, /*is_first_step=*/(step_n == 1));
 
-    /*  5. implicit vertical viscosity TDMA  */
+    /*  5. horizontal viscosity (opt_visc=5 with backscatter) — FRESH_START.md §5  */
+    fesom_visc_filt_bcksct(mesh, dyn);
+
+    /*  6. implicit vertical viscosity TDMA  */
     fesom_impl_vert_visc(mesh, aux, forcing, dyn);
 
     /*  6. SSH RHS (linfs)  */

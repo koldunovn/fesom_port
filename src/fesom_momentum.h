@@ -67,4 +67,20 @@ void fesom_update_vel(const struct fesom_mesh *mesh,
 void fesom_compute_hbar(const struct fesom_mesh *mesh,
                         struct fesom_dyn        *dyn);
 
+/*
+ * Horizontal harmonic viscosity with easy backscatter (opt_visc=5).
+ * Mirror of visc_filt_bcksct (oce_dyn.F90:278-426).
+ *   Per non-boundary edge:
+ *     vi = dt · max(γ₀, max(γ₁·|du|, γ₂·|du|²)) · sqrt(Σ elem_area)
+ *     u_b[el(1)] -= u1·vi/area(el1);  u_b[el(2)] += u1·vi/area(el2)
+ *   Smooth u_b → u_c at nodes (area-weighted mean of surrounding cells).
+ *   uv_rhs += u_b − easybsreturn · mean(u_c at 3 vertices).
+ *
+ * Inserted between compute_vel_rhs and impl_vert_visc (FRESH_START.md §5).
+ * Skipped at non-boundary edges (Fortran tests myList_edge2D > edge2D_in;
+ * we use edge_tri[2*e + 1] >= 0, equivalent for serial).
+ */
+void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
+                            struct fesom_dyn        *dyn);
+
 #endif /* FESOM_MOMENTUM_H */

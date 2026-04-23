@@ -41,6 +41,13 @@ typedef struct fesom_dyn {
                            by PP mixing (Fortran tracers%data%uvnode is held
                            in dynamics%uvnode). */
 
+    /* Work arrays for visc_filt_bcksct (opt_visc=5). Mirror of
+       dynamics%work%u_b/v_b/u_c/v_c (MOD_DYN.F90 t_dyn_work). */
+    real_t *u_b;        /* [elem2D * nl] per-element raw harmonic-visc update */
+    real_t *v_b;
+    real_t *u_c;        /* [nod2D  * nl] node-smoothed visc-update            */
+    real_t *v_c;
+
     int AB_order;   /* fixed at 2 in Phase 1 */
 } fesom_dyn;
 
