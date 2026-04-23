@@ -71,10 +71,9 @@ int fesom_timestep(int                          step_n,
     fesom_ale_thickness_linfs(mesh);
     fesom_ale_vert_vel_linfs(mesh, dyn);
 
-    /* 12. tracer advection: T then S (each with init_tracers_AB → upwind →
-          ALE reconstruction).  */
-    fesom_tracer_advect_one(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);
-    fesom_tracer_advect_one(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
+    /* 12. tracer advection: T then S, FCT (central HO + QR4C vert + Zalesak). */
+    fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);
+    fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
 
     /* 13. commit thickness: hnode := hnode_new, helem from vertex mean.  */
     fesom_ale_commit_thickness(mesh);

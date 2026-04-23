@@ -79,4 +79,16 @@ void fesom_tracer_compute_fct_LO(fesom_tracer_adv_scratch *sc,
                                  const struct fesom_mesh  *mesh,
                                  const struct fesom_tracers *tracers);
 
+/*
+ * Run one full FCT step for one tracer (uses central HO horizontal + QR4C
+ * vertical + Zalesak limiter, then ALE reconstruction). Same calling
+ * convention as fesom_tracer_advect_one. The flag-free version still uses
+ * upwind; this one is the FCT replacement.
+ */
+void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
+                                 int                       tr_idx,
+                                 const struct fesom_mesh  *mesh,
+                                 const struct fesom_dyn   *dyn,
+                                 struct fesom_tracers     *tracers);
+
 #endif /* FESOM_TRACER_ADV_H */

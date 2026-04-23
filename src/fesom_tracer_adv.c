@@ -291,6 +291,218 @@ static void adv_tra_hor_upw1(const struct fesom_mesh *mesh,
     }
 }
 
+/*--- adv_tra_hor_central (interim Phase 2 high-order) --------------------
+ * Central-difference horizontal flux. Two-sided face value Tmean = 0.5(T1+T2).
+ * Equivalent to FESOM's MFCT (oce_adv_tra_hor.F90:546-834) with the
+ * edge_up_dn_grad correction zeroed out — i.e., zero-gradient interpretation.
+ *
+ * Phase 2 interim choice: full MFCT pulls in tracer_gradient_elements +
+ * fill_up_dn_grad + a per-edge upwind/downwind triangle index that we
+ * haven't ported yet. Central is 2nd-order vs MFCT's 3rd-order with
+ * upwind blend, but it is a valid HO scheme for FCT — the antidiffusive
+ * flux (HO − LO) it produces is correctly limited by Zalesak.
+ *
+ * When init_zero is FALSE, this writes (HO − flux_existing); for FCT
+ * use, callers run upwind with init_zero=true first, then central with
+ * init_zero=false to obtain the antidiffusive horizontal flux.
+ */
+static void adv_tra_hor_central(const struct fesom_mesh *mesh,
+                                const struct fesom_dyn  *dyn,
+                                const real_t            *ttf,
+                                int                      init_zero,
+                                real_t                  *flux)
+{
+    const int E    = mesh->edge2D;
+    const int nl   = mesh->nl;
+
+    if (init_zero) {
+        memset(flux, 0, (size_t)E * (size_t)nl * sizeof(real_t));
+    }
+
+    for (int e = 0; e < E; ++e) {
+        int n1  = mesh->edges[2*e + 0];
+        int n2  = mesh->edges[2*e + 1];
+        int el1 = mesh->edge_tri[2*e + 0];
+        int el2 = mesh->edge_tri[2*e + 1];
+
+        int nu1 = (el1 >= 0) ? mesh->ulevels[el1] - 1 : 0;
+        int nl1 = (el1 >= 0) ? mesh->nlevels[el1] - 1 : 0;
+        int nu2 = (el2 >= 0) ? mesh->ulevels[el2] - 1 : 0;
+        int nl2 = (el2 >= 0) ? mesh->nlevels[el2] - 1 : 0;
+
+        real_t dx1 = (el1 >= 0) ? mesh->edge_cross_dxdy[4*e + 0] : 0.0;
+        real_t dy1 = (el1 >= 0) ? mesh->edge_cross_dxdy[4*e + 1] : 0.0;
+        real_t dx2 = (el2 >= 0) ? mesh->edge_cross_dxdy[4*e + 2] : 0.0;
+        real_t dy2 = (el2 >= 0) ? mesh->edge_cross_dxdy[4*e + 3] : 0.0;
+
+        int nl12 = (el2 >= 0) ? ((nl1 < nl2) ? nl1 : nl2) : 0;
+        int nu12 = (nu1 > nu2) ? nu1 : nu2;
+
+        /* Same 5-zone structure as upwind (oce_adv_tra_hor.F90:167-249).
+         * Only the per-layer flux formula differs:
+         *   upwind   : flux = -0.5 [T1·(v+|v|) + T2·(v-|v|)]
+         *   central  : flux = -v · 0.5(T1+T2)
+         * The "− flux" writeback for init_zero=false yields the antidiffusive
+         * flux when called after the upwind pass. */
+
+        /* (A) el1-only zone above shared layers */
+        for (int nz = nu1; nz < nu12; ++nz) {
+            real_t u  = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 0];
+            real_t v  = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 1];
+            real_t h  = mesh->helem[FESOM_ELEM3D(el1, nz, nl)];
+            real_t vflux = (-v*dx1 + u*dy1) * h;
+            real_t T1 = ttf[FESOM_NODE3D(n1, nz, nl)];
+            real_t T2 = ttf[FESOM_NODE3D(n2, nz, nl)];
+            real_t hi = -vflux * 0.5 * (T1 + T2);
+            flux[FESOM_NODE3D(e, nz, nl)] = hi - flux[FESOM_NODE3D(e, nz, nl)];
+        }
+        /* (B) el2-only zone above shared */
+        if (el2 >= 0) {
+            for (int nz = nu2; nz < nu12; ++nz) {
+                real_t u  = dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 0];
+                real_t v  = dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 1];
+                real_t h  = mesh->helem[FESOM_ELEM3D(el2, nz, nl)];
+                real_t vflux = (v*dx2 - u*dy2) * h;
+                real_t T1 = ttf[FESOM_NODE3D(n1, nz, nl)];
+                real_t T2 = ttf[FESOM_NODE3D(n2, nz, nl)];
+                real_t hi = -vflux * 0.5 * (T1 + T2);
+                flux[FESOM_NODE3D(e, nz, nl)] = hi - flux[FESOM_NODE3D(e, nz, nl)];
+            }
+        }
+        /* (C) Both segments — interior */
+        for (int nz = nu12; nz < nl12; ++nz) {
+            real_t u1 = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 0];
+            real_t v1 = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 1];
+            real_t h1 = mesh->helem[FESOM_ELEM3D(el1, nz, nl)];
+            real_t u2 = dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 0];
+            real_t v2 = dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 1];
+            real_t h2 = mesh->helem[FESOM_ELEM3D(el2, nz, nl)];
+            real_t vflux = (-v1*dx1 + u1*dy1) * h1
+                         + ( v2*dx2 - u2*dy2) * h2;
+            real_t T1 = ttf[FESOM_NODE3D(n1, nz, nl)];
+            real_t T2 = ttf[FESOM_NODE3D(n2, nz, nl)];
+            real_t hi = -vflux * 0.5 * (T1 + T2);
+            flux[FESOM_NODE3D(e, nz, nl)] = hi - flux[FESOM_NODE3D(e, nz, nl)];
+        }
+        /* (D) el1-only remaining */
+        for (int nz = nl12; nz < nl1; ++nz) {
+            real_t u  = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 0];
+            real_t v  = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 1];
+            real_t h  = mesh->helem[FESOM_ELEM3D(el1, nz, nl)];
+            real_t vflux = (-v*dx1 + u*dy1) * h;
+            real_t T1 = ttf[FESOM_NODE3D(n1, nz, nl)];
+            real_t T2 = ttf[FESOM_NODE3D(n2, nz, nl)];
+            real_t hi = -vflux * 0.5 * (T1 + T2);
+            flux[FESOM_NODE3D(e, nz, nl)] = hi - flux[FESOM_NODE3D(e, nz, nl)];
+        }
+        /* (E) el2-only remaining */
+        if (el2 >= 0) {
+            for (int nz = nl12; nz < nl2; ++nz) {
+                real_t u  = dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 0];
+                real_t v  = dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 1];
+                real_t h  = mesh->helem[FESOM_ELEM3D(el2, nz, nl)];
+                real_t vflux = (v*dx2 - u*dy2) * h;
+                real_t T1 = ttf[FESOM_NODE3D(n1, nz, nl)];
+                real_t T2 = ttf[FESOM_NODE3D(n2, nz, nl)];
+                real_t hi = -vflux * 0.5 * (T1 + T2);
+                flux[FESOM_NODE3D(e, nz, nl)] = hi - flux[FESOM_NODE3D(e, nz, nl)];
+            }
+        }
+    }
+}
+
+/*--- adv_tra_ver_qr4c (oce_adv_tra_ver.F90:332-434) -----------------------
+ * Vertical 4th-order quadratic reconstruction with upwind blend.
+ *   num_ord ∈ [0, 1]: fraction of pure 4th-order (1.0 = full 4th-order,
+ *                     0.0 = full upwind-blend). Pi config sets it to 1.
+ *
+ * For Phase 1 (no partial cells, no cavity), Z_3d_n[nz, n] = mesh->Z[nz] and
+ * zbar_3d_n[nz, n] = mesh->zbar[nz] for all n.
+ *
+ * Sign convention (cf. FRESH_START.md §14.5): vertical W is positive UPWARD.
+ * Surface flux = -ttf·W·area  (W>0 advects ttf out of the surface layer).
+ *
+ * When init_zero is FALSE, this writes (HO_flux - flux_existing); for FCT
+ * use, callers run upwind first with init_zero=true, then QR4C with
+ * init_zero=false to obtain the antidiffusive vertical flux.
+ */
+static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
+                             const struct fesom_dyn  *dyn,
+                             const real_t            *ttf,
+                             real_t                   num_ord,
+                             int                      init_zero,
+                             real_t                  *flux)
+{
+    const int N  = mesh->nod2D;
+    const int nl = mesh->nl;
+    const real_t *W = dyn->w;       /* w_e ≡ w in Phase 1 — see fesom_dyn.h */
+
+    if (init_zero) {
+        memset(flux, 0, (size_t)N * (size_t)nl * sizeof(real_t));
+    }
+
+    for (int n = 0; n < N; ++n) {
+        int nzmin = mesh->ulevels_nod2D[n] - 1;
+        int nzmax = mesh->nlevels_nod2D[n] - 1;
+        if (nzmax <= nzmin) continue;
+
+        /* Surface (Fortran nz=nzmin): -ttf·W·area - flux_existing */
+        {
+            int nz = nzmin;
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            flux[k] = -ttf[k] * W[k] * mesh->area[k] - flux[k];
+        }
+        /* 2nd layer (nzmin+1): centred differences. Guard for shallow cols. */
+        if (nzmax - nzmin >= 2) {
+            int nz = nzmin + 1;
+            real_t Tup = ttf[FESOM_NODE3D(n, nz - 1, nl)];
+            real_t Tdn = ttf[FESOM_NODE3D(n, nz,     nl)];
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            flux[k] = -0.5 * (Tup + Tdn) * W[k] * mesh->area[k] - flux[k];
+        }
+        /* Bottom - 1 (nzmax-1): centred differences. Same as second-layer. */
+        if (nzmax - nzmin >= 2) {
+            int nz = nzmax - 1;
+            real_t Tup = ttf[FESOM_NODE3D(n, nz - 1, nl)];
+            real_t Tdn = ttf[FESOM_NODE3D(n, nz,     nl)];
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            flux[k] = -0.5 * (Tup + Tdn) * W[k] * mesh->area[k] - flux[k];
+        }
+        /* Bottom (nzmax): zero flux, less existing. */
+        {
+            int nz = nzmax;
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            flux[k] = 0.0 - flux[k];
+        }
+        /* Interior (nzmin+2 .. nzmax-2 inclusive): 4th-order quadratic. */
+        for (int nz = nzmin + 2; nz <= nzmax - 2; ++nz) {
+            real_t Z_um1 = mesh->Z[nz - 1];
+            real_t Z_u   = mesh->Z[nz];
+            real_t Z_dn  = mesh->Z[nz + 1];
+            real_t Z_um2 = mesh->Z[nz - 2];
+            real_t Tum1 = ttf[FESOM_NODE3D(n, nz - 1, nl)];
+            real_t Tu   = ttf[FESOM_NODE3D(n, nz,     nl)];
+            real_t Tdn  = ttf[FESOM_NODE3D(n, nz + 1, nl)];
+            real_t Tum2 = ttf[FESOM_NODE3D(n, nz - 2, nl)];
+
+            real_t qc = (Tum1 - Tu)  / (Z_um1 - Z_u);
+            real_t qu = (Tu   - Tdn) / (Z_u   - Z_dn);
+            real_t qd = (Tum2 - Tum1)/ (Z_um2 - Z_um1);
+
+            real_t zb = mesh->zbar[nz];
+            real_t Tmean1 = Tu  + (2.0*qc + qu) * (zb - Z_u  ) / 3.0;
+            real_t Tmean2 = Tum1 + (2.0*qc + qd) * (zb - Z_um1) / 3.0;
+            real_t w_iface = W[FESOM_NODE3D(n, nz, nl)];
+            real_t Tmean = (w_iface + fabs(w_iface)) * Tmean1
+                         + (w_iface - fabs(w_iface)) * Tmean2;
+            real_t a = mesh->area[FESOM_NODE3D(n, nz, nl)];
+            real_t hi = (-0.5 * (1.0 - num_ord) * Tmean
+                       - num_ord * 0.5 * (Tmean1 + Tmean2) * w_iface) * a;
+            flux[FESOM_NODE3D(n, nz, nl)] = hi - flux[FESOM_NODE3D(n, nz, nl)];
+        }
+    }
+}
+
 /*--- adv_tra_ver_upw1 (oce_adv_tra_ver.F90:244-328) -----------------------*/
 static void adv_tra_ver_upw1(const struct fesom_mesh *mesh,
                              const struct fesom_dyn  *dyn,
@@ -403,6 +615,424 @@ static void ale_reconstruct(const struct fesom_mesh *mesh,
             }
         }
     }
+}
+
+/*--- Zalesak limiter (oce_adv_tra_fct.F90:72-500) -------------------------
+ * Inputs:
+ *   ttf:    tracer at step n (=values BEFORE advection)
+ *   lo:     fct_LO (low-order upwind solution, advanced one step)
+ *   adf_h:  HO−LO antidiffusive horizontal flux (in/out — in: anti-diff;
+ *                                                       out: limited)
+ *   adf_v:  HO−LO antidiffusive vertical flux   (in/out)
+ *
+ * Workspace (in scratch):
+ *   fct_ttf_min/max  (writes per-node admissible-increment bounds)
+ *   fct_plus/minus   (limiter factors)
+ *   fct_aux          (per-element max/min, reused as Fortran AUX(:,:,:))
+ *
+ * Algorithm:
+ *   a1. fct_ttf_max = max(LO, ttf), fct_ttf_min = min(LO, ttf)   per node
+ *   a2. AUX[1] = max over 3 vertices of fct_ttf_max,
+ *       AUX[2] = min                                              per element
+ *   a3. tvert_max = max over surrounding cells of AUX[1],
+ *       tvert_min = min                                            per node
+ *   a4. fct_ttf_max[surface] = tvert_max[surface] − LO,
+ *       fct_ttf_max[middle ] = max over (nz-1, nz, nz+1) − LO,
+ *       fct_ttf_max[bottom ] = tvert_max[bottom] − LO              (and min)
+ *   b1. fct_plus  = Σ (max(0, +adf_v[nz]) + max(0, −adf_v[nz+1]))  per node
+ *                 + Σ over edges of max(0, ±adf_h)
+ *       fct_minus = same with min instead of max
+ *   b2. flux  = fct_plus  · dt / areasvol / hnode_new + flux_eps
+ *       fct_plus  = min(1, fct_ttf_max / flux)
+ *       (similar for fct_minus, with −flux_eps)
+ *   b3. Limiting (vertical):
+ *         surface: ae = (adf_v ≥ 0 ? fct_plus[nz] : fct_minus[nz])
+ *         interior: ae = adf_v ≥ 0 ? min(fct_minus[nz-1], fct_plus[nz])
+ *                                   : min(fct_plus[nz-1],  fct_minus[nz])
+ *         adf_v *= ae
+ *       Limiting (horizontal): adf_h ≥ 0 ? min(fct_plus[n1],fct_minus[n2])
+ *                                         : min(fct_minus[n1],fct_plus[n2])
+ *         adf_h *= ae
+ */
+static void oce_tra_adv_fct(fesom_tracer_adv_scratch *sc,
+                            const struct fesom_mesh  *mesh,
+                            const real_t             *ttf,
+                            real_t                   *adf_h,
+                            real_t                   *adf_v)
+{
+    const int N    = mesh->nod2D;
+    const int E    = mesh->elem2D;
+    const int Eedg = mesh->edge2D;
+    const int nl   = mesh->nl;
+    const real_t dt        = (real_t)FESOM_PHASE1_DT;
+    const real_t flux_eps  = 1e-16;
+    const real_t bignumber = 1e3;
+
+    real_t *fct_ttf_min = sc->fct_ttf_min;
+    real_t *fct_ttf_max = sc->fct_ttf_max;
+    real_t *fct_plus    = sc->fct_plus;
+    real_t *fct_minus   = sc->fct_minus;
+    real_t *AUX         = sc->fct_aux;     /* [E * nl * 2] : (max=0, min=1) */
+    const real_t *LO    = sc->fct_LO;
+
+    /* a1. Per-node max/min between LO and ttf. */
+    for (int n = 0; n < N; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t a = LO[k], b = ttf[k];
+            fct_ttf_max[k] = (a > b) ? a : b;
+            fct_ttf_min[k] = (a < b) ? a : b;
+        }
+    }
+
+    /* a2. Per-element max/min over 3 vertices. Pad below cell's nlevels with
+       ±bignumber so the per-node tvert step never picks a stale layer. */
+    for (int e = 0; e < E; ++e) {
+        int n0 = mesh->elem_nodes[3*e + 0];
+        int n1 = mesh->elem_nodes[3*e + 1];
+        int n2 = mesh->elem_nodes[3*e + 2];
+        int nu1 = mesh->ulevels[e] - 1;
+        int nle = mesh->nlevels[e] - 1;
+        for (int nz = nu1; nz < nle; ++nz) {
+            real_t a0 = fct_ttf_max[FESOM_NODE3D(n0, nz, nl)];
+            real_t a1 = fct_ttf_max[FESOM_NODE3D(n1, nz, nl)];
+            real_t a2 = fct_ttf_max[FESOM_NODE3D(n2, nz, nl)];
+            real_t mx = a0; if (a1 > mx) mx = a1; if (a2 > mx) mx = a2;
+            real_t b0 = fct_ttf_min[FESOM_NODE3D(n0, nz, nl)];
+            real_t b1 = fct_ttf_min[FESOM_NODE3D(n1, nz, nl)];
+            real_t b2 = fct_ttf_min[FESOM_NODE3D(n2, nz, nl)];
+            real_t mn = b0; if (b1 < mn) mn = b1; if (b2 < mn) mn = b2;
+            AUX[FESOM_ELEM3D(e, nz, nl)*2 + 0] = mx;
+            AUX[FESOM_ELEM3D(e, nz, nl)*2 + 1] = mn;
+        }
+        for (int nz = nle; nz < nl - 1; ++nz) {
+            AUX[FESOM_ELEM3D(e, nz, nl)*2 + 0] = -bignumber;
+            AUX[FESOM_ELEM3D(e, nz, nl)*2 + 1] = +bignumber;
+        }
+    }
+
+    /* a3. Per-node max/min over surrounding cells (cluster). Use a per-node
+       small buffer for tvert_max/min — allocated once, reused per node. */
+    real_t *tvert_max = malloc((size_t)N * (size_t)nl * sizeof(real_t));
+    real_t *tvert_min = malloc((size_t)N * (size_t)nl * sizeof(real_t));
+    FESOM_CHECK(tvert_max && tvert_min, "FCT: oom (tvert)");
+    for (int n = 0; n < N; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        int o0 = mesh->nod_in_elem2D_offsets[n];
+        int o1 = mesh->nod_in_elem2D_offsets[n + 1];
+        for (int nz = nu1; nz < nl1; ++nz) {
+            int e0 = mesh->nod_in_elem2D[o0];
+            real_t mx = AUX[FESOM_ELEM3D(e0, nz, nl)*2 + 0];
+            real_t mn = AUX[FESOM_ELEM3D(e0, nz, nl)*2 + 1];
+            for (int k = o0 + 1; k < o1; ++k) {
+                int e = mesh->nod_in_elem2D[k];
+                real_t a = AUX[FESOM_ELEM3D(e, nz, nl)*2 + 0];
+                real_t b = AUX[FESOM_ELEM3D(e, nz, nl)*2 + 1];
+                if (a > mx) mx = a;
+                if (b < mn) mn = b;
+            }
+            tvert_max[FESOM_NODE3D(n, nz, nl)] = mx;
+            tvert_min[FESOM_NODE3D(n, nz, nl)] = mn;
+        }
+    }
+
+    /* a4. Per-node admissible increment relative to LO.
+          Includes vertical 3-layer cluster max/min (nz-1, nz, nz+1). */
+    for (int n = 0; n < N; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        if (nu1 >= nl1) continue;
+
+        /* Surface */
+        {
+            int nz = nu1;
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            fct_ttf_max[k] = tvert_max[k] - LO[k];
+            fct_ttf_min[k] = tvert_min[k] - LO[k];
+        }
+        /* Interior */
+        for (int nz = nu1 + 1; nz < nl1 - 1; ++nz) {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t mxA = tvert_max[FESOM_NODE3D(n, nz - 1, nl)];
+            real_t mxB = tvert_max[FESOM_NODE3D(n, nz,     nl)];
+            real_t mxC = tvert_max[FESOM_NODE3D(n, nz + 1, nl)];
+            real_t mnA = tvert_min[FESOM_NODE3D(n, nz - 1, nl)];
+            real_t mnB = tvert_min[FESOM_NODE3D(n, nz,     nl)];
+            real_t mnC = tvert_min[FESOM_NODE3D(n, nz + 1, nl)];
+            real_t mx = mxA; if (mxB > mx) mx = mxB; if (mxC > mx) mx = mxC;
+            real_t mn = mnA; if (mnB < mn) mn = mnB; if (mnC < mn) mn = mnC;
+            fct_ttf_max[k] = mx - LO[k];
+            fct_ttf_min[k] = mn - LO[k];
+        }
+        /* Bottom layer (nl1 - 1) */
+        if (nl1 - 1 > nu1) {
+            int nz = nl1 - 1;
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            fct_ttf_max[k] = tvert_max[k] - LO[k];
+            fct_ttf_min[k] = tvert_min[k] - LO[k];
+        }
+    }
+    free(tvert_max);
+    free(tvert_min);
+
+    /* b1. Sum positive/negative antidiffusive contributions per node.
+       Vertical: from adf_v[nz] (in) and adf_v[nz+1] (out — flipped sign). */
+    for (int n = 0; n < N; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            fct_plus [k] = 0.0;
+            fct_minus[k] = 0.0;
+        }
+    }
+    for (int n = 0; n < N; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            real_t fv_top  = adf_v[FESOM_NODE3D(n, nz,     nl)];
+            real_t fv_bot  = adf_v[FESOM_NODE3D(n, nz + 1, nl)];
+            real_t pos = (fv_top > 0.0 ? fv_top : 0.0)
+                       + (-fv_bot > 0.0 ? -fv_bot : 0.0);
+            real_t neg = (fv_top < 0.0 ? fv_top : 0.0)
+                       + (-fv_bot < 0.0 ? -fv_bot : 0.0);
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            fct_plus [k] += pos;
+            fct_minus[k] += neg;
+        }
+    }
+    /* Horizontal — per edge */
+    for (int e = 0; e < Eedg; ++e) {
+        int n1  = mesh->edges[2*e + 0];
+        int n2  = mesh->edges[2*e + 1];
+        int el1 = mesh->edge_tri[2*e + 0];
+        int el2 = mesh->edge_tri[2*e + 1];
+
+        int nl1 = (el1 >= 0) ? mesh->nlevels[el1] - 1 : 0;
+        int nu1 = (el1 >= 0) ? mesh->ulevels[el1] - 1 : 0;
+        int nl2 = (el2 >= 0) ? mesh->nlevels[el2] - 1 : 0;
+        int nu2 = (el2 >= 0) ? mesh->ulevels[el2] - 1 : 0;
+
+        int nl12 = (nl1 > nl2) ? nl1 : nl2;
+        int nu12 = nu1;
+        if (el2 >= 0 && nu2 < nu12) nu12 = nu2;
+
+        for (int nz = nu12; nz < nl12; ++nz) {
+            real_t f = adf_h[FESOM_NODE3D(e, nz, nl)];
+            size_t k1 = FESOM_NODE3D(n1, nz, nl);
+            size_t k2 = FESOM_NODE3D(n2, nz, nl);
+            fct_plus [k1] += (f > 0.0 ? f : 0.0);
+            fct_minus[k1] += (f < 0.0 ? f : 0.0);
+            fct_plus [k2] += (-f > 0.0 ? -f : 0.0);
+            fct_minus[k2] += (-f < 0.0 ? -f : 0.0);
+        }
+    }
+
+    /* b2. Per-node limiter factors. */
+    for (int n = 0; n < N; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t a = mesh->areasvol[k];
+            real_t hnod_new = mesh->hnode_new[k];
+            if (a <= 0.0 || hnod_new <= 0.0) {
+                fct_plus[k]  = 1.0;
+                fct_minus[k] = 1.0;
+                continue;
+            }
+            real_t flux_pos = fct_plus[k]  * dt / a / hnod_new + flux_eps;
+            real_t ratio_pos = fct_ttf_max[k] / flux_pos;
+            fct_plus[k] = (ratio_pos < 1.0 ? ratio_pos : 1.0);
+
+            real_t flux_neg = fct_minus[k] * dt / a / hnod_new - flux_eps;
+            real_t ratio_neg = fct_ttf_min[k] / flux_neg;
+            fct_minus[k] = (ratio_neg < 1.0 ? ratio_neg : 1.0);
+        }
+    }
+    /* (Serial: no exchange_nod for fct_plus/minus.) */
+
+    /* b3. Apply limits — vertical first, then horizontal. */
+    for (int n = 0; n < N; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        if (nu1 >= nl1) continue;
+        /* surface interface (nz = nu1) */
+        {
+            int nz = nu1;
+            real_t f = adf_v[FESOM_NODE3D(n, nz, nl)];
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t ae = (f >= 0.0) ? fct_plus[k] : fct_minus[k];
+            adf_v[FESOM_NODE3D(n, nz, nl)] = ae * f;
+        }
+        /* interior interfaces */
+        for (int nz = nu1 + 1; nz < nl1; ++nz) {
+            real_t f = adf_v[FESOM_NODE3D(n, nz, nl)];
+            real_t ae;
+            if (f >= 0.0) {
+                real_t a = fct_minus[FESOM_NODE3D(n, nz - 1, nl)];
+                real_t b = fct_plus [FESOM_NODE3D(n, nz,     nl)];
+                ae = (a < b) ? a : b;
+            } else {
+                real_t a = fct_plus [FESOM_NODE3D(n, nz - 1, nl)];
+                real_t b = fct_minus[FESOM_NODE3D(n, nz,     nl)];
+                ae = (a < b) ? a : b;
+            }
+            adf_v[FESOM_NODE3D(n, nz, nl)] = ae * f;
+        }
+        /* bottom flux is 0 by construction */
+    }
+    /* Horizontal */
+    for (int e = 0; e < Eedg; ++e) {
+        int n1  = mesh->edges[2*e + 0];
+        int n2  = mesh->edges[2*e + 1];
+        int el1 = mesh->edge_tri[2*e + 0];
+        int el2 = mesh->edge_tri[2*e + 1];
+
+        int nl1 = (el1 >= 0) ? mesh->nlevels[el1] - 1 : 0;
+        int nu1 = (el1 >= 0) ? mesh->ulevels[el1] - 1 : 0;
+        int nl2 = (el2 >= 0) ? mesh->nlevels[el2] - 1 : 0;
+        int nu2 = (el2 >= 0) ? mesh->ulevels[el2] - 1 : 0;
+
+        int nl12 = (nl1 > nl2) ? nl1 : nl2;
+        int nu12 = nu1;
+        if (el2 >= 0 && nu2 < nu12) nu12 = nu2;
+
+        for (int nz = nu12; nz < nl12; ++nz) {
+            real_t f = adf_h[FESOM_NODE3D(e, nz, nl)];
+            real_t ae;
+            if (f >= 0.0) {
+                real_t a = fct_plus [FESOM_NODE3D(n1, nz, nl)];
+                real_t b = fct_minus[FESOM_NODE3D(n2, nz, nl)];
+                ae = (a < b) ? a : b;
+            } else {
+                real_t a = fct_minus[FESOM_NODE3D(n1, nz, nl)];
+                real_t b = fct_plus [FESOM_NODE3D(n2, nz, nl)];
+                ae = (a < b) ? a : b;
+            }
+            adf_h[FESOM_NODE3D(e, nz, nl)] = ae * f;
+        }
+    }
+}
+
+/*--- flux2dtracer with use_lo=true (oce_adv_tra_driver.F90:451-572) -------
+ * Adds the LO contribution to dttf_v then accumulates the (now-limited)
+ * antidiffusive fluxes into dttf_h and dttf_v.
+ *
+ *   dttf_v[nz, n] += −ttf·hnode + LO·hnode_new          (LO transition)
+ *   dttf_v[nz, n] += (flux_v[nz] − flux_v[nz+1]) · dt / areasvol
+ *   dttf_h[nz, n1] += flux_h · dt / areasvol[n1]
+ *   dttf_h[nz, n2] −= flux_h · dt / areasvol[n2]
+ */
+static void flux2dtracer_fct(const struct fesom_mesh *mesh,
+                             const real_t            *ttf,
+                             const real_t            *lo,
+                             const real_t            *flux_h,
+                             const real_t            *flux_v,
+                             real_t                  *dttf_h,
+                             real_t                  *dttf_v)
+{
+    const int N  = mesh->nod2D;
+    const int E  = mesh->edge2D;
+    const int nl = mesh->nl;
+    const real_t dt = (real_t)FESOM_PHASE1_DT;
+
+    /* Vertical: LO transition + antidiffusive accumulation. */
+    for (int n = 0; n < N; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            dttf_v[k] += -ttf[k] * mesh->hnode    [k]
+                       +  lo[k] * mesh->hnode_new[k];
+        }
+        for (int nz = nu1; nz < nl1; ++nz) {
+            real_t a = mesh->areasvol[FESOM_NODE3D(n, nz, nl)];
+            if (a <= 0.0) continue;
+            real_t f_top = flux_v[FESOM_NODE3D(n, nz,     nl)];
+            real_t f_bot = flux_v[FESOM_NODE3D(n, nz + 1, nl)];
+            dttf_v[FESOM_NODE3D(n, nz, nl)] += (f_top - f_bot) * dt / a;
+        }
+    }
+
+    /* Horizontal */
+    for (int e = 0; e < E; ++e) {
+        int n1  = mesh->edges[2*e + 0];
+        int n2  = mesh->edges[2*e + 1];
+        int el1 = mesh->edge_tri[2*e + 0];
+        int el2 = mesh->edge_tri[2*e + 1];
+
+        int nl1 = (el1 >= 0) ? mesh->nlevels[el1] - 1 : 0;
+        int nu1 = (el1 >= 0) ? mesh->ulevels[el1] - 1 : 0;
+        int nl2 = (el2 >= 0) ? mesh->nlevels[el2] - 1 : 0;
+        int nu2 = (el2 >= 0) ? mesh->ulevels[el2] - 1 : 0;
+
+        int nl12 = (nl1 > nl2) ? nl1 : nl2;
+        int nu12 = nu1;
+        if (el2 >= 0 && nu2 > 0 && nu2 < nu12) nu12 = nu2;
+
+        for (int nz = nu12; nz < nl12; ++nz) {
+            real_t f  = flux_h[FESOM_NODE3D(e, nz, nl)];
+            real_t a1 = mesh->areasvol[FESOM_NODE3D(n1, nz, nl)];
+            real_t a2 = mesh->areasvol[FESOM_NODE3D(n2, nz, nl)];
+            if (a1 > 0.0) dttf_h[FESOM_NODE3D(n1, nz, nl)] += f * dt / a1;
+            if (a2 > 0.0) dttf_h[FESOM_NODE3D(n2, nz, nl)] -= f * dt / a2;
+        }
+    }
+}
+
+/*--- Public FCT entry: full FCT step for one tracer ------------------------*/
+void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
+                                 int                       tr_idx,
+                                 const struct fesom_mesh  *mesh,
+                                 const struct fesom_dyn   *dyn,
+                                 struct fesom_tracers     *tracers)
+{
+    const int N    = mesh->nod2D;
+    const int nl   = mesh->nl;
+
+    /* 1. init_tracers_AB (zero del_ttf*, fill valuesAB, save valuesold) */
+    init_tracers_AB_one(tr_idx, mesh, tracers, sc);
+
+    real_t *vals  = tracers->data[tr_idx].values;
+    real_t *ttfAB = tracers->data[tr_idx].valuesAB;
+
+    /* 2. LO upwind fluxes from current `values` (NOT valuesAB).
+       Match Fortran do_oce_adv_tra:115 which calls hor_upw1 with `ttf`. */
+    adv_tra_hor_upw1(mesh, dyn, vals, sc->adv_flux_hor);
+    adv_tra_ver_upw1(mesh, dyn, vals, sc->adv_flux_ver);
+
+    /* 3. fct_LO from upwind (advance one step of upwind solution). */
+    fesom_tracer_compute_fct_LO(sc, tr_idx, mesh, tracers);
+
+    /* 4. High-order flux on top of LO (init_zero=false → adv_flux := HO − LO).
+       Use valuesAB for the high-order computation per Fortran:309/331. */
+    adv_tra_hor_central(mesh, dyn, ttfAB, /*init_zero=*/0, sc->adv_flux_hor);
+    adv_tra_ver_qr4c   (mesh, dyn, ttfAB, /*num_ord=*/1.0, /*init_zero=*/0, sc->adv_flux_ver);
+
+    /* 5. Zalesak limit the antidiffusive fluxes. */
+    oce_tra_adv_fct(sc, mesh, vals, sc->adv_flux_hor, sc->adv_flux_ver);
+
+    /* 6. flux2dtracer with LO (include the LO transition + limited HO). */
+    flux2dtracer_fct(mesh, vals, sc->fct_LO,
+                     sc->adv_flux_hor, sc->adv_flux_ver,
+                     sc->del_ttf_advhoriz, sc->del_ttf_advvert);
+
+    /* 7. del_ttf := del_ttf_advhoriz + del_ttf_advvert */
+    for (int n = 0; n < N; ++n) {
+        for (int nz = 0; nz < nl; ++nz) {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            tracers->del_ttf[k] = sc->del_ttf_advhoriz[k]
+                                + sc->del_ttf_advvert [k];
+        }
+    }
+
+    /* 8. ALE reconstruction. With FCT use_lo=true the math reduces to
+       T_new = LO + limited_antidiff/areasvol/hnode_new — see fesom_tracer_adv.h */
+    ale_reconstruct(mesh, vals, tracers->del_ttf);
 }
 
 /*--- Public entry: one full upwind step for one tracer --------------------*/
