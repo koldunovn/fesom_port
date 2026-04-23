@@ -61,6 +61,7 @@ add_executable(fesom_port
   src/fesom_forcing_analytical.c
   src/fesom_io.c
   src/fesom_constants.c
+  src/fesom_phc.c
 )
 target_include_directories(fesom_port PRIVATE src ${NC_INCDIR})
 target_link_libraries(fesom_port PRIVATE m ${NC_LIBS})

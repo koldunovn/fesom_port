@@ -10,6 +10,7 @@
 #include "fesom_mesh.h"
 #include "fesom_momentum.h"
 #include "fesom_mpi.h"
+#include "fesom_phc.h"
 #include "fesom_pp.h"
 #include "fesom_ssh.h"
 #include "fesom_step.h"
@@ -202,7 +203,7 @@ static void print_sanity(const fesom_mesh *m)
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <mesh_dir> [output_dir] [dt_seconds] [nsteps] [snap_every]\n",
+        fprintf(stderr, "usage: %s <mesh_dir> [output_dir] [dt_seconds] [nsteps] [snap_every] [phc_nc_path]\n",
                 argv[0]);
         return 2;
     }
@@ -211,8 +212,10 @@ int main(int argc, char **argv)
     if (argc >= 4) fesom_phase1_dt = (real_t)atof(argv[3]);
     int nsteps_cli     = (argc >= 5) ? atoi(argv[4]) : 0;
     int snap_every_cli = (argc >= 6) ? atoi(argv[5]) : 0;
+    const char *phc_path = (argc >= 7 && argv[6][0] != '\0') ? argv[6] : NULL;
     if (out_dir) printf("[fesom_port] snapshots → %s/snap_NNNNNN.nc\n", out_dir);
     printf("[fesom_port] dt = %.1f s\n", (double)fesom_phase1_dt);
+    if (phc_path) printf("[fesom_port] PHC IC source: %s\n", phc_path);
 
     fesom_mpi mpi;
     fesom_mpi_init(&mpi, argc, argv);
@@ -611,14 +614,22 @@ int main(int argc, char **argv)
                lo_off, (double)lo_dev);
     }
 
-    /* Phase 2 visualisation aid: add a Gaussian +5°C T blob in the North
-       Atlantic-ish region. The wind-driven flow will advect and deform it. */
-    fesom_ic_tracer_T_blob(&mesh, &tracers,
-                           /*lon0_deg=*/ -45.0,
-                           /*lat0_deg=*/  40.0,
-                           /*sigma_deg=*/ 10.0,
-                           /*sigma_z=*/  300.0,
-                           /*amp_C=*/      5.0);
+    /* Phase 3 step 21: load PHC IC if a path was given. Replaces the
+       constant T=10 / S=35 IC. PHC files are in-situ T (CF
+       standard_name=sea_water_temperature) — t_insitu=1 triggers ptheta
+       conversion. */
+    if (phc_path) {
+        fesom_phc_load_ic(phc_path, &mesh, &tracers, /*t_insitu=*/ 1);
+    } else {
+        /* Phase 2 visualisation aid: add a Gaussian +5°C T blob in the North
+           Atlantic-ish region. The wind-driven flow will advect and deform it. */
+        fesom_ic_tracer_T_blob(&mesh, &tracers,
+                               /*lon0_deg=*/ -45.0,
+                               /*lat0_deg=*/  40.0,
+                               /*sigma_deg=*/ 10.0,
+                               /*sigma_z=*/  300.0,
+                               /*amp_C=*/      5.0);
+    }
 
     /* Phase 2 step 17: analytical wind forcing (Slice A — constant zonal
        cosine pattern, no thermal). Should drive an Ekman drift on top of
