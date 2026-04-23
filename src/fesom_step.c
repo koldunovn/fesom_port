@@ -70,9 +70,12 @@ int fesom_timestep(int                          step_n,
 
     /* 11. ALE step (linfs):
          hnode_new := hnode (no thickness motion)
-         w        := vert. divergence integration  */
+         w        := vert. divergence integration
+         CFLz + wsplit: split w → w_e (explicit, for tracers) and w_i (implicit) */
     fesom_ale_thickness_linfs(mesh);
     fesom_ale_vert_vel_linfs(mesh, dyn);
+    fesom_ale_compute_cflz(mesh, dyn);
+    fesom_ale_compute_wvel_split(mesh, dyn);
 
     /* 12. tracer advection: T then S, FCT (central HO + QR4C vert + Zalesak). */
     fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);

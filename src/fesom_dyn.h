@@ -25,12 +25,11 @@ typedef struct fesom_dyn {
     real_t *uv_rhs;
     real_t *uv_rhsAB;
     real_t *w;
-    real_t *w_i;        /* implicit part of w (compute_Wvel_split). Zero in
-                           Phase 1 because wsplit only kicks in when CFL_z >
-                           wsplit_maxcfl; with no forcing that never triggers,
-                           so w_i stays at the calloc'd zero — bit-identical to
-                           Fortran behaviour for stable cases (compute_Wvel_split
-                           sets w_i=0 in the else branch, oce_ale.F90:3065). */
+    real_t *w_e;        /* explicit part of w (for tracer advection)         */
+    real_t *w_i;        /* implicit part of w (for impl_vert_visc)
+                           When CFL_z[nz,n] ≤ wsplit_maxcfl: w_e = w, w_i = 0
+                           (compute_Wvel_split, oce_ale.F90:3026-3074).       */
+    real_t *cfl_z;      /* [nod2D * nl] vertical CFL at interfaces            */
     real_t *eta_n;
     real_t *d_eta;
     real_t *ssh_rhs;

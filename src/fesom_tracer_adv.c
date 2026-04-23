@@ -435,7 +435,9 @@ static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
 {
     const int N  = mesh->nod2D;
     const int nl = mesh->nl;
-    const real_t *W = dyn->w;       /* w_e ≡ w in Phase 1 — see fesom_dyn.h */
+    /* Tracer advection uses the EXPLICIT part of w (w_e). When wsplit is
+       not triggered (CFL ≤ maxcfl) compute_Wvel_split sets w_e = w. */
+    const real_t *W = dyn->w_e;
 
     if (init_zero) {
         memset(flux, 0, (size_t)N * (size_t)nl * sizeof(real_t));
@@ -511,8 +513,8 @@ static void adv_tra_ver_upw1(const struct fesom_mesh *mesh,
 {
     const int N  = mesh->nod2D;
     const int nl = mesh->nl;
-    /* w_e = w in Phase 1 (no wsplit firing — see fesom_dyn.h). */
-    const real_t *W = dyn->w;
+    /* Use explicit-W (w_e). compute_Wvel_split sets w_e = w when CFL ≤ maxcfl. */
+    const real_t *W = dyn->w_e;
 
     memset(flux, 0, (size_t)N * (size_t)nl * sizeof(real_t));
 

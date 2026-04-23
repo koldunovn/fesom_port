@@ -44,6 +44,11 @@
 #define FESOM_PHASE1_A_VER     1.0e-4   /* background momentum vertical visc [m²/s] */
 #define FESOM_PHASE1_C_D       0.0025   /* bottom-drag coefficient                  */
 
+/* wsplit — use_wsplit=true in pi/CORE2 namelists (MOD_DYN.F90:135 default is
+   false, but work_pi/namelist.dyn turns it on). wsplit_maxcfl=1.0. */
+#define FESOM_PHASE1_USE_WSPLIT       1
+#define FESOM_PHASE1_WSPLIT_MAXCFL    1.0
+
 /* Horizontal viscosity opt_visc=5 (visc_filt_bcksct). Pi namelist.dyn defaults.
    FRESH_START.md §14.7 explicitly warns: visc_gamma0 = 0.003, NOT 0.03. */
 #define FESOM_PHASE1_VISC_GAMMA0       0.003
