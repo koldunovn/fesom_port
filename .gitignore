@@ -1,0 +1,8 @@
+build/
+*.o
+*.obj
+core
+core.*
+.vscode/
+.idea/
+compile_commands.json
