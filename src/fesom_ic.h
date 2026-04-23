@@ -34,4 +34,18 @@ void fesom_ic_tracers_constant(const struct fesom_mesh *mesh,
                                struct fesom_tracers    *tracers,
                                real_t T_val, real_t S_val);
 
+/*
+ * fesom_ic_tracer_T_blob:
+ *   Add a Gaussian temperature anomaly centred at geographic (lon0, lat0)
+ *   with horizontal e-folding sigma_deg degrees and vertical e-folding
+ *   sigma_z metres. Maximum amplitude amp_C added at the surface centre,
+ *   tapering with horizontal distance and depth. Operates additively on
+ *   every wet layer.
+ */
+void fesom_ic_tracer_T_blob(const struct fesom_mesh *mesh,
+                            struct fesom_tracers    *tracers,
+                            real_t lon0_deg, real_t lat0_deg,
+                            real_t sigma_deg, real_t sigma_z,
+                            real_t amp_C);
+
 #endif /* FESOM_IC_H */

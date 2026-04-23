@@ -28,10 +28,18 @@ struct fesom_tracers;
  * allocates the scratch arrays. fesom_tracer_adv_free frees them.
  */
 typedef struct fesom_tracer_adv_scratch {
-    real_t *adv_flux_hor;        /* [edge2D * (nl-1)] */
-    real_t *adv_flux_ver;        /* [nod2D  * nl]     */
-    real_t *del_ttf_advhoriz;    /* [nod2D  * (nl-1)] (we allocate nl for symmetry) */
-    real_t *del_ttf_advvert;     /* [nod2D  * (nl-1)] */
+    real_t *adv_flux_hor;        /* [edge2D * nl]  (HO flux when FCT, else upwind) */
+    real_t *adv_flux_ver;        /* [nod2D  * nl]  (idem)                          */
+    real_t *del_ttf_advhoriz;    /* [nod2D  * nl]                                  */
+    real_t *del_ttf_advvert;     /* [nod2D  * nl]                                  */
+
+    /* FCT workspace (Phase 2 step 14). All sized stride-nl per node/element. */
+    real_t *fct_LO;              /* [nod2D  * nl]  low-order upwind solution */
+    real_t *fct_ttf_min;         /* [nod2D  * nl]  Zalesak min bound         */
+    real_t *fct_ttf_max;         /* [nod2D  * nl]  Zalesak max bound         */
+    real_t *fct_plus;            /* [nod2D  * nl]  positive limiter factor   */
+    real_t *fct_minus;           /* [nod2D  * nl]  negative limiter factor   */
+    real_t *fct_aux;             /* [elem2D * nl * 2]  per-element max/min   */
 } fesom_tracer_adv_scratch;
 
 void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
@@ -57,5 +65,18 @@ void fesom_tracer_advect_one(fesom_tracer_adv_scratch *sc,
                              const struct fesom_mesh  *mesh,
                              const struct fesom_dyn   *dyn,
                              struct fesom_tracers     *tracers);
+
+/*
+ * Compute the FCT low-order solution from existing upwind fluxes.
+ * Assumes sc->adv_flux_hor / adv_flux_ver hold UPWIND (LO) fluxes
+ * — i.e., adv_tra_hor_upw1 / adv_tra_ver_upw1 just ran with init_zero=true.
+ * Mirror of oce_adv_tra_driver.F90:118-236 (FCT branch of do_oce_adv_tra).
+ *   fct_LO[nz, n] = (T*hnode + (Σ_h flux_hor + (flux_ver[nz] - flux_ver[nz+1]))
+ *                                 * dt/areasvol) / hnode_new
+ */
+void fesom_tracer_compute_fct_LO(fesom_tracer_adv_scratch *sc,
+                                 int                       tr_idx,
+                                 const struct fesom_mesh  *mesh,
+                                 const struct fesom_tracers *tracers);
 
 #endif /* FESOM_TRACER_ADV_H */

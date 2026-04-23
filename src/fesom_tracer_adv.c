@@ -50,12 +50,21 @@ void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
     size_t e_full = (size_t)mesh->edge2D * (size_t)mesh->nl;   /* edge × nl (stride nl, last slot unused) */
     size_t n_full = (size_t)mesh->nod2D  * (size_t)mesh->nl;
 
-    sc->adv_flux_hor     = calloc(e_full, sizeof(real_t));
-    sc->adv_flux_ver     = calloc(n_full, sizeof(real_t));
-    sc->del_ttf_advhoriz = calloc(n_full, sizeof(real_t));
-    sc->del_ttf_advvert  = calloc(n_full, sizeof(real_t));
+    sc->adv_flux_hor     = calloc(e_full,         sizeof(real_t));
+    sc->adv_flux_ver     = calloc(n_full,         sizeof(real_t));
+    sc->del_ttf_advhoriz = calloc(n_full,         sizeof(real_t));
+    sc->del_ttf_advvert  = calloc(n_full,         sizeof(real_t));
+    sc->fct_LO           = calloc(n_full,         sizeof(real_t));
+    sc->fct_ttf_min      = calloc(n_full,         sizeof(real_t));
+    sc->fct_ttf_max      = calloc(n_full,         sizeof(real_t));
+    sc->fct_plus         = calloc(n_full,         sizeof(real_t));
+    sc->fct_minus        = calloc(n_full,         sizeof(real_t));
+    sc->fct_aux          = calloc((size_t)mesh->elem2D * (size_t)mesh->nl * 2,
+                                  sizeof(real_t));
     FESOM_CHECK(sc->adv_flux_hor && sc->adv_flux_ver
-             && sc->del_ttf_advhoriz && sc->del_ttf_advvert,
+             && sc->del_ttf_advhoriz && sc->del_ttf_advvert
+             && sc->fct_LO && sc->fct_ttf_min && sc->fct_ttf_max
+             && sc->fct_plus && sc->fct_minus && sc->fct_aux,
              "tracer adv scratch: out of memory");
 }
 
@@ -65,7 +74,85 @@ void fesom_tracer_adv_free(fesom_tracer_adv_scratch *sc)
     free(sc->adv_flux_ver);
     free(sc->del_ttf_advhoriz);
     free(sc->del_ttf_advvert);
+    free(sc->fct_LO);
+    free(sc->fct_ttf_min);
+    free(sc->fct_ttf_max);
+    free(sc->fct_plus);
+    free(sc->fct_minus);
+    free(sc->fct_aux);
     memset(sc, 0, sizeof(*sc));
+}
+
+/*--- compute_fct_LO --------------------------------------------------------
+ * Mirror of oce_adv_tra_driver.F90:118-236 (FCT branch).
+ * Pre: adv_flux_hor / adv_flux_ver hold UPWIND fluxes for the chosen tracer
+ *      (i.e., adv_tra_hor_upw1 + adv_tra_ver_upw1 just ran with init_zero=true).
+ *
+ * Step 1: zero fct_LO, then accumulate horizontal flux divergence per node:
+ *           fct_LO[nz, n1] += adv_flux_hor[nz, e]
+ *           fct_LO[nz, n2] -= adv_flux_hor[nz, e]
+ * Step 2: per-node finalisation:
+ *           fct_LO[nz, n] = (T*hnode + (fct_LO + (vflux[nz] - vflux[nz+1]))
+ *                                    * dt/areasvol) / hnode_new
+ */
+void fesom_tracer_compute_fct_LO(fesom_tracer_adv_scratch *sc,
+                                 int                       tr_idx,
+                                 const struct fesom_mesh  *mesh,
+                                 const struct fesom_tracers *tracers)
+{
+    const int N    = mesh->nod2D;
+    const int E    = mesh->edge2D;
+    const int nl   = mesh->nl;
+    const real_t dt = (real_t)FESOM_PHASE1_DT;
+    const real_t *T = tracers->data[tr_idx].values;
+
+    /* Step 1a: zero fct_LO */
+    memset(sc->fct_LO, 0, (size_t)N * (size_t)nl * sizeof(real_t));
+
+    /* Step 1b: accumulate horizontal flux divergence per node.
+       Range matches oce_adv_tra_driver.F90:170 — nu12 to nl12. */
+    for (int e = 0; e < E; ++e) {
+        int n1  = mesh->edges[2*e + 0];
+        int n2  = mesh->edges[2*e + 1];
+        int el1 = mesh->edge_tri[2*e + 0];
+        int el2 = mesh->edge_tri[2*e + 1];
+
+        int nl1 = (el1 >= 0) ? mesh->nlevels[el1] - 1 : 0;
+        int nu1 = (el1 >= 0) ? mesh->ulevels[el1] - 1 : 0;
+        int nl2 = (el2 >= 0) ? mesh->nlevels[el2] - 1 : 0;
+        int nu2 = (el2 >= 0) ? mesh->ulevels[el2] - 1 : 0;
+
+        int nl12 = (nl1 > nl2) ? nl1 : nl2;
+        int nu12 = nu1;
+        if (nu2 > nu12) nu12 = nu2;
+
+        for (int nz = nu12; nz < nl12; ++nz) {
+            real_t f = sc->adv_flux_hor[FESOM_NODE3D(e, nz, nl)];
+            sc->fct_LO[FESOM_NODE3D(n1, nz, nl)] += f;
+            sc->fct_LO[FESOM_NODE3D(n2, nz, nl)] -= f;
+        }
+    }
+
+    /* Step 2: per-node finalisation */
+    for (int n = 0; n < N; ++n) {
+        int nu1 = mesh->ulevels_nod2D[n] - 1;
+        int nl1 = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = nu1; nz < nl1; ++nz) {
+            size_t k = FESOM_NODE3D(n, nz, nl);
+            real_t a = mesh->areasvol[k];
+            real_t hnod_old = mesh->hnode    [k];
+            real_t hnod_new = mesh->hnode_new[k];
+            if (hnod_new <= 0.0 || a <= 0.0) {
+                sc->fct_LO[k] = 0.0;
+                continue;
+            }
+            real_t f_top = sc->adv_flux_ver[FESOM_NODE3D(n, nz,     nl)];
+            real_t f_bot = sc->adv_flux_ver[FESOM_NODE3D(n, nz + 1, nl)];
+            real_t numer = T[k] * hnod_old
+                         + (sc->fct_LO[k] + (f_top - f_bot)) * dt / a;
+            sc->fct_LO[k] = numer / hnod_new;
+        }
+    }
 }
 
 /*--- init_tracers_AB (oce_tracer_mod.F90:13-145, AB2 path) ----------------*/

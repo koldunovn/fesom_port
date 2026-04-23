@@ -1,8 +1,10 @@
 #include "fesom_ic.h"
+#include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_mesh.h"
 #include "fesom_tracers.h"
 
+#include <math.h>
 #include <string.h>
 
 void fesom_ic_thickness(const struct fesom_mesh *mesh_in,
@@ -66,6 +68,54 @@ void fesom_ic_tracers_constant(const struct fesom_mesh *mesh,
             size_t idx = FESOM_NODE3D(n, nz, nl);
             T[idx] = T_val;
             S[idx] = S_val;
+        }
+    }
+}
+
+void fesom_ic_tracer_T_blob(const struct fesom_mesh *mesh,
+                            struct fesom_tracers    *tracers,
+                            real_t lon0_deg, real_t lat0_deg,
+                            real_t sigma_deg, real_t sigma_z,
+                            real_t amp_C)
+{
+    const int nl = mesh->nl;
+    real_t *T = tracers->data[FESOM_TRACER_T].values;
+
+    /* Wrap lon0 to [-180, 180) for distance compatibility. */
+    while (lon0_deg >= 180.0)  lon0_deg -= 360.0;
+    while (lon0_deg <  -180.0) lon0_deg += 360.0;
+
+    const real_t inv_sig2_h = 1.0 / (sigma_deg * sigma_deg);
+    const real_t inv_sig2_z = 1.0 / (sigma_z   * sigma_z);
+
+    for (int n = 0; n < mesh->nod2D; ++n) {
+        real_t lon = (real_t)mesh->geo_coord_nod2D[2*n + 0] / FESOM_RAD;
+        real_t lat = (real_t)mesh->geo_coord_nod2D[2*n + 1] / FESOM_RAD;
+        /* Wrap node lon similarly */
+        while (lon >= 180.0)  lon -= 360.0;
+        while (lon <  -180.0) lon += 360.0;
+
+        real_t dlon = lon - lon0_deg;
+        if (dlon >  180.0) dlon -= 360.0;
+        if (dlon < -180.0) dlon += 360.0;
+        real_t dlat = lat - lat0_deg;
+
+        /* Cheap small-circle correction so the patch isn't grossly
+           stretched at high lats. */
+        real_t cos_lat0 = cos(lat0_deg * FESOM_RAD);
+        real_t r2_h = (dlon*cos_lat0)*(dlon*cos_lat0)*inv_sig2_h
+                    + dlat*dlat*inv_sig2_h;
+
+        if (r2_h > 16.0) continue;       /* skip beyond 4 sigma horizontally */
+
+        real_t prof_h = exp(-0.5 * r2_h);
+
+        int nzmin = mesh->ulevels_nod2D[n] - 1;
+        int nzmax = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = nzmin; nz < nzmax; ++nz) {
+            real_t z = (real_t)mesh->Z[nz];      /* Z negative downward */
+            real_t prof_z = exp(-0.5 * z*z * inv_sig2_z);
+            T[FESOM_NODE3D(n, nz, nl)] += amp_C * prof_h * prof_z;
         }
     }
 }

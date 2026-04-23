@@ -6,3 +6,4 @@ core.*
 .vscode/
 .idea/
 compile_commands.json
+runs/

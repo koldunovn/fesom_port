@@ -4,7 +4,9 @@
 #include "fesom_dyn.h"
 #include "fesom_eos.h"
 #include "fesom_forcing.h"
+#include "fesom_forcing_analytical.h"
 #include "fesom_ic.h"
+#include "fesom_io.h"
 #include "fesom_mesh.h"
 #include "fesom_momentum.h"
 #include "fesom_mpi.h"
@@ -200,10 +202,12 @@ static void print_sanity(const fesom_mesh *m)
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <mesh_dir>\n", argv[0]);
+        fprintf(stderr, "usage: %s <mesh_dir> [output_dir]\n", argv[0]);
         return 2;
     }
     const char *mesh_dir = argv[1];
+    const char *out_dir  = (argc >= 3) ? argv[2] : NULL;
+    if (out_dir) printf("[fesom_port] snapshots → %s/snap_NNNNNN.nc\n", out_dir);
 
     fesom_mpi mpi;
     fesom_mpi_init(&mpi, argc, argv);
@@ -235,6 +239,8 @@ int main(int argc, char **argv)
     /* Phase 1 step 3: initial conditions. */
     fesom_ic_thickness(&mesh, &mesh, &dyn);
     fesom_ic_tracers_constant(&mesh, &tracers, 10.0, 35.0);
+    /* (Phase 2 T blob is added below, AFTER the IC/rest-state sanity tests so
+       those still see the unperturbed constant field.) */
 
     /* IC sanity: T/S at probe node 0 should be exactly 10 / 35 in valid layers,
        and 0 below. Column sum of hnode at probe node 0 should equal
@@ -568,19 +574,80 @@ int main(int argc, char **argv)
                "T deviations = %d (max %.3e),  S deviations = %d (max %.3e)\n",
                t_off, (double)t_dev, s_off, (double)s_dev);
     }
+    /* Slice 14a sanity: compute fct_LO from the upwind fluxes and verify it
+       equals the input T (=10) at machine ε. The upwind fluxes from the call
+       above are still in tra_sc.adv_flux_*; re-run upwind on the current T and
+       check the LO solution. */
+    {
+        /* Reset T to exact 10/35 in case the previous advect_one introduced
+           round-off. (The fct_LO test is about the LO formula itself.) */
+        for (int n = 0; n < mesh.nod2D; ++n) {
+            int nzmax = mesh.nlevels_nod2D[n] - 1;
+            for (int nz = 0; nz < nzmax; ++nz) {
+                size_t k = FESOM_NODE3D(n, nz, mesh.nl);
+                tracers.data[FESOM_TRACER_T].values[k] = 10.0;
+            }
+        }
+        /* Re-run upwind fluxes (UV=W=0 → all fluxes 0) and compute fct_LO. */
+        fesom_tracer_advect_one(&tra_sc, FESOM_TRACER_T, &mesh, &dyn, &tracers);
+        fesom_tracer_compute_fct_LO(&tra_sc, FESOM_TRACER_T, &mesh, &tracers);
+        real_t lo_dev = 0.0;
+        int    lo_off = 0;
+        for (int n = 0; n < mesh.nod2D; ++n) {
+            int nzmax = mesh.nlevels_nod2D[n] - 1;
+            for (int nz = 0; nz < nzmax; ++nz) {
+                real_t d = fabs(tra_sc.fct_LO[FESOM_NODE3D(n, nz, mesh.nl)] - 10.0);
+                if (d > 0) ++lo_off;
+                if (d > lo_dev) lo_dev = d;
+            }
+        }
+        printf("[fesom_port] FCT LO sanity (UV=W=0, T=10): "
+               "fct_LO≠10 count=%d  max|fct_LO-10|=%.3e\n",
+               lo_off, (double)lo_dev);
+    }
 
-    /* Phase 1 step 12: timestep driver loop.
-       100 steps with zero forcing on the IC (T=10, S=35, UV=0). With a
-       literally-correct port and zero forcing, the rest state must persist —
-       max|uv|, max|η|, max|w| stay at machine ε; T/S stay at 10/35. */
+    /* Phase 2 visualisation aid: add a Gaussian +5°C T blob in the North
+       Atlantic-ish region. The wind-driven flow will advect and deform it. */
+    fesom_ic_tracer_T_blob(&mesh, &tracers,
+                           /*lon0_deg=*/ -45.0,
+                           /*lat0_deg=*/  40.0,
+                           /*sigma_deg=*/ 10.0,
+                           /*sigma_z=*/  300.0,
+                           /*amp_C=*/      5.0);
+
+    /* Phase 2 step 17: analytical wind forcing (Slice A — constant zonal
+       cosine pattern, no thermal). Should drive an Ekman drift on top of
+       the rest state from IC. */
+    fesom_forcing_set_analytical(&mesh, &forcing,
+                                 /*tau0     = */ 0.05,    /* N/m² */
+                                 /*Ly_factor= */ 2.0);    /* one cosine over 90° */
+    {
+        real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
+        for (int e = 1; e < mesh.elem2D; ++e) {
+            real_t t = forcing.stress_surf[2*e + 0];
+            if (t < tx_min) tx_min = t;
+            if (t > tx_max) tx_max = t;
+        }
+        printf("[fesom_port] analytical forcing: stress_surf_x ∈ [%+.3e, %+.3e] N/m²\n",
+               (double)tx_min, (double)tx_max);
+    }
+
+    /* Phase 1 step 12 / Phase 2 driver loop. */
     {
         fesom_step_ctx ctx = { .stiff = &stiff,
                                .solver = &solver,
                                .tra_sc = &tra_sc };
-        const int nsteps = 100;
-        const int print_every = 10;
-        printf("[fesom_port] timestep loop: %d steps, dt=%.0f s, print every %d\n",
-               nsteps, FESOM_PHASE1_DT, print_every);
+        const int nsteps = 500;
+        const int print_every = 25;
+        const int snap_every  = 25;
+        printf("[fesom_port] timestep loop: %d steps, dt=%.0f s, print every %d, snapshot every %d\n",
+               nsteps, FESOM_PHASE1_DT, print_every, snap_every);
+        if (out_dir) {
+            char path[1024];
+            snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, 0);
+            fesom_io_write_snapshot(path, 0, FESOM_PHASE1_DT,
+                                    &mesh, &dyn, &tracers, &aux);
+        }
         printf("  step    iters    max|uv|       max|eta|      max|w|        "
                "min(T)    max(T)    min(S)    max(S)\n");
         for (int n = 1; n <= nsteps; ++n) {
@@ -623,6 +690,12 @@ int main(int argc, char **argv)
                     printf("[fesom_port] BLOWUP detected at step %d — aborting\n", n);
                     break;
                 }
+            }
+            if (out_dir && (n % snap_every == 0)) {
+                char path[1024];
+                snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
+                fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT,
+                                        &mesh, &dyn, &tracers, &aux);
             }
         }
     }
