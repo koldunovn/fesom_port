@@ -255,6 +255,52 @@ int main(int argc, char **argv)
      * (corruption recovery). Aborts on mismatch. */
     fesom_halo_identity_test(&mpi);
 
+    /* MESH-METADATA CONSISTENCY DIAGNOSTIC.
+     * For each rank that holds GID_PROBE locally (myDim or eDim), print
+     * area[L,0], areasvol[L,0], and the surrounding-element count so the
+     * OWNER's value can be compared to the NEIGHBOR's halo computation.
+     * If they differ → mesh metadata is inconsistent across ranks (the
+     * suspected source of remaining partition-boundary drift). */
+    if (mpi.npes > 1) {
+        /* Pick 5 GIDs from rank 0's halo (eDim) — these are guaranteed to be
+         * interior on some neighbour ranks and halo on rank 0. Broadcast the
+         * list, then every rank prints OWN/HALO entries for those GIDs. */
+        int probe_gids[5] = { -1, -1, -1, -1, -1 };
+        if (mpi.mype == 0 && mesh.eDim_nod2D >= 5) {
+            int stride = mesh.eDim_nod2D / 5;
+            if (stride < 1) stride = 1;
+            for (int p = 0; p < 5; ++p) {
+                int slot = mesh.myDim_nod2D + p * stride;
+                if (slot < mesh.myDim_nod2D + mesh.eDim_nod2D)
+                    probe_gids[p] = mpi.myList_nod2D[slot] - 1;
+            }
+        }
+        MPI_Bcast(probe_gids, 5, MPI_INT, 0, mpi.MPI_COMM_FESOM);
+
+        int N_alloc = mesh.myDim_nod2D + mesh.eDim_nod2D;
+        for (int p = 0; p < 5; ++p) {
+            int gid = probe_gids[p];
+            if (gid < 0 || gid >= mesh.nod2D) continue;
+            for (int i = 0; i < N_alloc; ++i) {
+                if (mpi.myList_nod2D[i] - 1 != gid) continue;
+                int is_owner = (i < mesh.myDim_nod2D);
+                int o0 = mesh.nod_in_elem2D_offsets[i];
+                int o1 = mesh.nod_in_elem2D_offsets[i + 1];
+                fprintf(stderr,
+                    "[probe rank %d] gid=%d local=%d %-4s nlev=%d "
+                    "area[0]=%.10e areasvol[0]=%.10e nsurround=%d\n",
+                    mpi.mype, gid, i,
+                    is_owner ? "OWN" : "HALO",
+                    mesh.nlevels_nod2D[i],
+                    (double)mesh.area[i * mesh.nl + 0],
+                    (double)mesh.areasvol[i * mesh.nl + 0],
+                    o1 - o0);
+                fflush(stderr);
+                break;
+            }
+        }
+    }
+
     print_sanity(&mesh);
 
     /* Phase 1 step 2: allocate the rest of the model state. All zeros until
