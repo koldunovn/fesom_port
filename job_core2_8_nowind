@@ -1,0 +1,42 @@
+#!/bin/bash
+#SBATCH --job-name=fesom_port_8_nowind
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=8
+#SBATCH --ntasks=8
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/core2_8r_nowind/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/core2_8r_nowind/slurm.%j.err
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+
+ulimit -s 204800
+
+OUT_DIR=/work/ab0995/a270088/port/core2_8r_nowind
+mkdir -p "$OUT_DIR"
+
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+DT=500
+NSTEPS=200
+SNAP_EVERY=50
+
+export FESOM_PRINT_EVERY=10
+export FESOM_NO_WIND=1
+JRA55_YEAR=1958
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+EXITCODE=$?
+date
+
+echo "Exit code: $EXITCODE"
+echo "Tail of run.log:"
+tail -30 "$OUT_DIR/run.log"
+echo "Tail of run.err:"
+tail -10 "$OUT_DIR/run.err"
+exit $EXITCODE
