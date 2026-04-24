@@ -160,13 +160,17 @@ void fesom_tracer_compute_fct_LO(fesom_tracer_adv_scratch *sc,
     }
 }
 
-/*--- init_tracers_AB (oce_tracer_mod.F90:13-145, AB2 path) ----------------*/
+/*--- init_tracers_AB (oce_tracer_mod.F90:13-145, AB2 path) ----------------
+ * All loops cover myDim_nod2D + eDim_nod2D (literal Fortran port).
+ * Using myDim alone leaves halo entries of valuesAB / valuesold stale, which
+ * makes the high-order horizontal advection read wrong tracer values on
+ * halo endpoints of boundary edges → partition-dependent tracer drift. */
 static void init_tracers_AB_one(int tr_idx,
                                 const struct fesom_mesh *mesh,
                                 struct fesom_tracers    *tracers,
                                 fesom_tracer_adv_scratch *sc)
 {
-    const int N  = mesh->myDim_nod2D;
+    const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int nl = mesh->nl;
     const real_t eps = 1.0e-9;
     const real_t c_old = -(0.5 + eps);
