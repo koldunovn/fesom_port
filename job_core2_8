@@ -3,7 +3,7 @@
 #SBATCH -p compute
 #SBATCH --ntasks-per-node=8
 #SBATCH --ntasks=8
-#SBATCH --time=00:20:00
+#SBATCH --time=02:00:00
 #SBATCH -A ab0995
 #SBATCH -o /work/ab0995/a270088/port/core2_8r/slurm.%j.out
 #SBATCH -e /work/ab0995/a270088/port/core2_8r/slurm.%j.err
@@ -20,9 +20,10 @@ BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
 MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
 PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
 
+# One model month at dt=500s = 5184 steps. Snapshots every day (173 steps).
 DT=500
-NSTEPS=10
-SNAP_EVERY=0    # 0 disables snapshots — focus on step output only
+NSTEPS=5184
+SNAP_EVERY=173
 JRA55_YEAR=1958
 
 date
