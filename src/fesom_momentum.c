@@ -483,7 +483,11 @@ void fesom_compute_hbar(const struct fesom_mesh *mesh,
 {
     const int N  = mesh->myDim_nod2D;
     const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
-    const int E  = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    /* Fortran oce_ale.F90:2014 uses `do ed=1, myDim_edge2D` only.
+     * Iterating eDim_edge2D too would double-count contributions to interior
+     * boundary nodes (the same physical edge is processed by the owner's
+     * myDim loop too) → small per-step drift → CG NaN after ~85-95 steps. */
+    const int E  = mesh->myDim_edge2D;
     const int nl = mesh->nl;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
 

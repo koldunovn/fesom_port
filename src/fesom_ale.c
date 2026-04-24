@@ -81,12 +81,17 @@ void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
 
     /* Step 1: zero w everywhere (all local nodes) */
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
-    int EG = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    /* Fortran vert_vel_ale (oce_ale.F90:2200) iterates `do ed=1, myDim_edge2D`
+     * only. The earlier "myDim+eDim" was wrong — iterating halo edges adds
+     * contributions to interior boundary nodes that the owner's loop also
+     * adds → small per-step error → CG NaN after ~85 steps. */
+    int EG = mesh->myDim_edge2D;
     memset(dyn->w, 0, (size_t)N * (size_t)nl * sizeof(real_t));
 
-    /* Step 2: edge-flux accumulation. Loop over all local edges (interior +
-     * halo) — Fortran does the same; the halo-side contributions get fixed
-     * up by exchange_nod(w) afterward. */
+    /* Step 2: edge-flux accumulation. Each interior boundary node receives
+     * contributions from all its incident edges via this rank's myDim_edge2D
+     * (the partition replicates cross-rank edges); exchange_nod(w) afterward
+     * refreshes halo entries with their owners' values. */
     for (int ed = 0; ed < EG; ++ed) {
         int n1 = mesh->edges[2*ed + 0];
         int n2 = mesh->edges[2*ed + 1];

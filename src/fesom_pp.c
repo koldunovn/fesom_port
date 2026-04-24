@@ -86,7 +86,12 @@ void fesom_pp_mixing(const struct fesom_mesh *mesh,
                      const struct fesom_dyn  *dyn,
                      struct fesom_aux        *aux)
 {
-    const int N  = mesh->myDim_nod2D;
+    /* Fortran oce_ale_mixing_pp.F90:41,72 iterates `myDim+eDim_nod2D` for the
+     * Kv loops (compute Kv at all local nodes, including halo). The element
+     * Av loop reads Kv at all 3 vertices — if halo Kv is stale (only myDim
+     * computed locally), Av on boundary elements is wrong → wrong vertical
+     * mixing → tracer divergence at partition boundaries → S explosion. */
+    const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int E  = mesh->myDim_elem2D;
     const int nl = mesh->nl;
     const real_t mix_coeff = (real_t)FESOM_PHASE1_MIX_COEFF_PP;
@@ -149,7 +154,10 @@ void fesom_mo_convect(const struct fesom_mesh *mesh,
 {
     if (!FESOM_PHASE1_USE_INSTABMIX) return;
 
-    const int N  = mesh->myDim_nod2D;
+    /* Fortran oce_mo_conv.F90:36,79 iterates `myDim+eDim_nod2D` for the Kv
+     * loop. The Av loop reads Kv at element vertices, so halo Kv must be
+     * locally fresh — same reasoning as pp_mixing. */
+    const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int E  = mesh->myDim_elem2D;
     const int nl = mesh->nl;
     const real_t imix_kv = (real_t)FESOM_PHASE1_INSTABMIX_KV;

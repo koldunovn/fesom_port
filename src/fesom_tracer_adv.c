@@ -106,7 +106,7 @@ void fesom_tracer_compute_fct_LO(fesom_tracer_adv_scratch *sc,
                                  const struct fesom_tracers *tracers)
 {
     const int N    = mesh->myDim_nod2D;
-    const int E    = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    const int E    = mesh->myDim_edge2D;   /* Fortran adv loops are myDim only */
     const int nl   = mesh->nl;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
     const real_t *T = tracers->data[tr_idx].values;
@@ -200,7 +200,7 @@ static void adv_tra_hor_upw1(const struct fesom_mesh *mesh,
                              const real_t            *ttf,
                              real_t                  *flux)
 {
-    const int E    = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    const int E    = mesh->myDim_edge2D;   /* Fortran adv loops are myDim only */
     const int nl   = mesh->nl;
 
     /* Zero the flux array (l_init_zero=.true.) — lines 91-107 */
@@ -317,7 +317,7 @@ static void adv_tra_hor_central(const struct fesom_mesh *mesh,
                                 int                      init_zero,
                                 real_t                  *flux)
 {
-    const int E    = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    const int E    = mesh->myDim_edge2D;   /* Fortran adv loops are myDim only */
     const int nl   = mesh->nl;
 
     if (init_zero) {
@@ -557,7 +557,7 @@ static void flux2dtracer_upwind(const struct fesom_mesh *mesh,
                                 real_t                  *dttf_v)
 {
     const int N  = mesh->myDim_nod2D;
-    const int E  = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    const int E  = mesh->myDim_edge2D;   /* Fortran adv loops are myDim only */
     const int nl = mesh->nl;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
 
@@ -669,7 +669,7 @@ static void oce_tra_adv_fct(fesom_tracer_adv_scratch *sc,
 {
     const int N    = mesh->myDim_nod2D;
     const int E    = mesh->myDim_elem2D;
-    const int Eedg = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    const int Eedg = mesh->myDim_edge2D;   /* Fortran FCT loops are myDim only */
     const int nl   = mesh->nl;
     const real_t dt        = (real_t)FESOM_PHASE1_DT;
     const real_t flux_eps  = 1e-16;
@@ -954,7 +954,7 @@ static void flux2dtracer_fct(const struct fesom_mesh *mesh,
                              real_t                  *dttf_v)
 {
     const int N  = mesh->myDim_nod2D;
-    const int E  = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    const int E  = mesh->myDim_edge2D;   /* Fortran adv loops are myDim only */
     const int nl = mesh->nl;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
 

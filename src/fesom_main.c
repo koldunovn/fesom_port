@@ -726,7 +726,10 @@ skip_rest_state:
                                .partit = &mpi };
         const int nsteps      = (nsteps_cli > 0)     ? nsteps_cli     : 500;
         const int snap_every  = (snap_every_cli > 0) ? snap_every_cli : 25;
-        const int print_every = snap_every;
+        /* FESOM_PRINT_EVERY env override — useful for tracking instability
+         * onset without changing snapshot cadence. Defaults to snap_every. */
+        const char *pe_env = getenv("FESOM_PRINT_EVERY");
+        const int print_every = (pe_env && atoi(pe_env) > 0) ? atoi(pe_env) : snap_every;
         printf("[fesom_port] timestep loop: %d steps, dt=%.0f s, print every %d, snapshot every %d\n",
                nsteps, FESOM_PHASE1_DT, print_every, snap_every);
         if (out_dir) {
