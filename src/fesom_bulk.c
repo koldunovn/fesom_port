@@ -6,8 +6,10 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
+#include "fesom_halo.h"
 #include "fesom_jra55.h"
 #include "fesom_mesh.h"
+#include "fesom_partit.h"
 #include "fesom_tracers.h"
 
 #include <math.h>
@@ -220,7 +222,8 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
                         const struct fesom_mesh   *mesh,
                         const struct fesom_dyn    *dyn,
                         const struct fesom_tracers *tracers,
-                        struct fesom_forcing       *forcing)
+                        struct fesom_forcing       *forcing,
+                        struct fesom_partit        *partit)
 {
     int N = mesh->myDim_nod2D;
     int E = mesh->myDim_elem2D;
@@ -276,6 +279,19 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
         real_t mag = sqrt(dux*dux + dvy*dvy) * BULK_RHOAIR;
         forcing->stress_node_surf[2*n + 0] = cd * mag * dux;
         forcing->stress_node_surf[2*n + 1] = cd * mag * dvy;
+    }
+
+    /* Halo-exchange node-side fields written above so the element
+     * interpolation below sees correct values at halo vertices. Without this,
+     * partition-boundary element stress is interpolated against stale or
+     * uninitialised halo entries → spurious wind torque on boundary triangles
+     * → blow-up during momentum step. heat_flux/water_flux are read by
+     * tracer_diff for myDim only, but exchange them too for any future kernel
+     * that touches them at halo. */
+    if (partit && partit->npes > 1) {
+        fesom_halo_exchange(forcing->stress_node_surf, FESOM_HALO_NOD2D, 1, 2, partit);
+        fesom_halo_exchange(forcing->heat_flux,        FESOM_HALO_NOD2D, 1, 1, partit);
+        fesom_halo_exchange(forcing->water_flux,       FESOM_HALO_NOD2D, 1, 1, partit);
     }
 
     /* Interpolate node stress → element stress (mean of 3 vertices). The

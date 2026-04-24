@@ -8,6 +8,7 @@ struct fesom_jra55;
 struct fesom_dyn;
 struct fesom_tracers;
 struct fesom_forcing;
+struct fesom_partit;
 
 /*
  * NCAR bulk formulae (Large & Yeager 2004/2009) and open-water flux assembly.
@@ -39,6 +40,7 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
                         const struct fesom_mesh   *mesh,
                         const struct fesom_dyn    *dyn,
                         const struct fesom_tracers *tracers,
-                        struct fesom_forcing       *forcing);
+                        struct fesom_forcing       *forcing,
+                        struct fesom_partit        *partit);
 
 #endif /* FESOM_BULK_H */

@@ -63,7 +63,8 @@ void fesom_solverinfo_free(fesom_solverinfo *si);
  * current stiffness values. Mirror of ssh_solve_preconditioner
  * (solver.F90:31-95).
  */
-void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh);
+void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
+                              struct fesom_partit *partit);
 
 /*
  * Build the SSH RHS into dyn->ssh_rhs (linfs branch). Mirror of

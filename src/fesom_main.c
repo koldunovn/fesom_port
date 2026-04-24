@@ -204,6 +204,12 @@ static void print_sanity(const fesom_mesh *m)
 
 int main(int argc, char **argv)
 {
+    /* Force line buffering so SLURM-redirected stdout/stderr show progress
+     * immediately rather than waiting for a 4KB block. Critical for diagnosing
+     * hangs. */
+    setvbuf(stdout, NULL, _IOLBF, 0);
+    setvbuf(stderr, NULL, _IOLBF, 0);
+
     if (argc < 2) {
         fprintf(stderr, "usage: %s <mesh_dir> [output_dir] [dt_seconds] [nsteps] [snap_every] [phc_nc_path] [jra55_year]\n",
                 argv[0]);
@@ -381,7 +387,7 @@ int main(int argc, char **argv)
     fesom_ssh_stiff   stiff;
     fesom_solverinfo  solver;
     fesom_ssh_stiff_alloc_and_build(&stiff, &mesh);
-    fesom_ssh_preconditioner(&stiff, &mesh);
+    fesom_ssh_preconditioner(&stiff, &mesh, &mpi);
     fesom_solverinfo_alloc(&solver, &mesh);
     solver.partit = &mpi;
 
@@ -630,7 +636,7 @@ skip_rest_state:
        standard_name=sea_water_temperature) — t_insitu=1 triggers ptheta
        conversion. */
     if (phc_path) {
-        fesom_phc_load_ic(phc_path, &mesh, &tracers, /*t_insitu=*/ 1);
+        fesom_phc_load_ic(phc_path, &mesh, &tracers, /*t_insitu=*/ 1, &mpi);
     } else {
         /* Phase 2 visualisation aid: add a Gaussian +5°C T blob in the North
            Atlantic-ish region. The wind-driven flow will advect and deform it. */
@@ -679,7 +685,7 @@ skip_rest_state:
            IC (UV=0); T_oc from initial T field. */
         fesom_jra55_step(&jra, &mesh, jra55_year, /*daynew=*/1, /*timenew=*/0.0);
         fesom_compute_vel_nodes(&mesh, &dyn);
-        fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing);
+        fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &mpi);
         real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
         for (int e = 1; e < mesh.myDim_elem2D; ++e) {
             real_t t = forcing.stress_surf[2*e + 0];
@@ -725,7 +731,10 @@ skip_rest_state:
                nsteps, FESOM_PHASE1_DT, print_every, snap_every);
         if (out_dir) {
             char path[1024];
-            snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, 0);
+            if (mpi.npes > 1)
+                snprintf(path, sizeof(path), "%s/snap_%06d_r%05d.nc", out_dir, 0, mpi.mype);
+            else
+                snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, 0);
             fesom_io_write_snapshot(path, 0, FESOM_PHASE1_DT,
                                     &mesh, &dyn, &tracers, &aux);
         }
@@ -746,7 +755,7 @@ skip_rest_state:
                 daynew  = (int)floor(t_sec / 86400.0) + 1;
                 timenew = t_sec - (daynew - 1) * 86400.0;
                 fesom_jra55_step(&jra, &mesh, jra55_year, daynew, (real_t)timenew);
-                fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing);
+                fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &mpi);
             }
             if (use_sr) {
                 /* Convert daynew → month_now (1..12), non-leap year. */
@@ -764,8 +773,17 @@ skip_rest_state:
                                       jra55_year, month_now, update_monthly_flag);
                 month_prev = month_now;
             }
+            /* Per-step heartbeat on rank 0 — independent of print_every so
+             * we always see SOMETHING happening even if the model is hung
+             * inside a single step. */
+            if (mpi.mype == 0) {
+                fprintf(stderr, "[step %d] entering fesom_timestep\n", n);
+            }
             int iters = fesom_timestep(n, &ctx, &mesh, &aux, &dyn,
                                        &tracers, &forcing);
+            if (mpi.mype == 0) {
+                fprintf(stderr, "[step %d] done — %d CG iters\n", n, iters);
+            }
             if (n == 1 || n % print_every == 0 || n == nsteps) {
                 real_t uv_max = 0.0, eta_max = 0.0, w_max = 0.0;
                 size_t te = (size_t)(mesh.myDim_elem2D + mesh.eDim_elem2D + mesh.eXDim_elem2D) * (size_t)mesh.nl * 2;
@@ -800,13 +818,20 @@ skip_rest_state:
                        (double)T_min, (double)T_max,
                        (double)S_min, (double)S_max);
                 if (uv_max > 5.0 || !(uv_max == uv_max)) {
-                    printf("[fesom_port] BLOWUP detected at step %d — aborting\n", n);
-                    break;
+                    fprintf(stderr, "[fesom_port] rank %d: BLOWUP detected at step %d "
+                            "(uv_max=%.3e, eta_max=%.3e, w_max=%.3e) — aborting all ranks\n",
+                            mpi.mype, n, (double)uv_max, (double)eta_max, (double)w_max);
+                    fflush(stderr);
+                    fflush(stdout);
+                    MPI_Abort(mpi.MPI_COMM_FESOM, 99);
                 }
             }
             if (out_dir && (n % snap_every == 0)) {
                 char path[1024];
-                snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
+                if (mpi.npes > 1)
+                    snprintf(path, sizeof(path), "%s/snap_%06d_r%05d.nc", out_dir, n, mpi.mype);
+                else
+                    snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
                 fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT,
                                         &mesh, &dyn, &tracers, &aux);
             }

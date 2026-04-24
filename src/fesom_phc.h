@@ -5,6 +5,7 @@
 
 struct fesom_mesh;
 struct fesom_tracers;
+struct fesom_partit;
 
 /*
  * Read PHC3.0 (or any FESOM-compatible 3D-IC NetCDF) and apply to the
@@ -34,6 +35,7 @@ struct fesom_tracers;
 void fesom_phc_load_ic(const char                  *path,
                        const struct fesom_mesh     *mesh,
                        struct fesom_tracers        *tracers,
-                       int                          t_insitu);
+                       int                          t_insitu,
+                       struct fesom_partit         *partit);
 
 #endif /* FESOM_PHC_H */

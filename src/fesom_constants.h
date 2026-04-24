@@ -82,6 +82,6 @@ extern real_t fesom_phase1_dt;
 
 /* CG SSH solver defaults — MOD_DYN.F90:13-25. */
 #define FESOM_PHASE1_SOLTOL    1.0e-5
-#define FESOM_PHASE1_MAXITER   2000
+#define FESOM_PHASE1_MAXITER   500
 
 #endif /* FESOM_CONSTANTS_H */

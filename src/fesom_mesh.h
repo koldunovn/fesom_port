@@ -62,6 +62,8 @@ typedef struct fesom_mesh {
     real_t *metric_factor;    /* [elem2D]   tan(rotated lat)/R_earth, m⁻¹ */
     real_t *coriolis;         /* [elem2D]   2Ω sin(geographic lat at centroid), s⁻¹ */
     real_t *coriolis_node;    /* [nod2D]    2Ω sin(geographic lat), s⁻¹ */
+    real_t *elem_center_x;    /* [elem2D]   centroid x in rotated radians (cyclic-aware) */
+    real_t *elem_center_y;    /* [elem2D]   centroid y in rotated radians */
 
     /* Edge geometry */
     real_t *edge_dxdy;        /* [edge2D * 2]  node2 − node1 in rotated radians */

@@ -5,10 +5,13 @@
  */
 #include "fesom_phc.h"
 #include "fesom_constants.h"
+#include "fesom_halo.h"
 #include "fesom_mesh.h"
+#include "fesom_partit.h"
 #include "fesom_tracers.h"
 
 #include <math.h>
+#include <mpi.h>
 #include <netcdf.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -250,31 +253,62 @@ static void load_one_variable(int ncid, const char *varname,
     free(ncdata);
 }
 
-/*--- extrap_nod3D (gen_support.F90:400-507, serial subset) ---------------
- * Two-phase fill: horizontal extension from any valid neighbour in
- * adjacent elements, repeated until no more dummy values at the surface;
- * then vertical fill from the layer above. */
-static void extrap_nod3D(const struct fesom_mesh *mesh, real_t *arr)
+/*--- extrap_nod3D (gen_support.F90:400-507) ---------------
+ * Literal port. MPI variant: each rank fills its own myDim nodes, then
+ * exchange_nod is called between sweeps so other ranks' progress propagates
+ * across partition boundaries. The outer-loop continuation test is a
+ * GLOBAL max via MPI_Allreduce — without this, ranks stop independently
+ * and a coastal node whose only valid PHC source lives on another rank
+ * keeps its dummy → cleanup converts to 0 → wrong density → eta blow-up. */
+static void extrap_nod3D(const struct fesom_mesh *mesh,
+                         struct fesom_partit     *partit,
+                         real_t                  *arr)
 {
-    const int N  = mesh->myDim_nod2D;
-    const int nl = mesh->nl;
+    const int N       = mesh->myDim_nod2D;
+    const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int nl      = mesh->nl;
 
-    real_t *work = malloc((size_t)N * sizeof(real_t));
+    /* work_array sized for full local extent — Fortran line 418. Reads at
+     * `work[enodes(j)]` may index halo nodes (eDim) which need valid values. */
+    real_t *work = malloc((size_t)N_alloc * sizeof(real_t));
     FESOM_CHECK(work, "extrap_nod3D: oom");
 
-    /* Outer loop: keep extrapolating until surface layer is fully filled. */
+    /* Initial halo exchange so halo entries of arr reflect owner state.
+     * Fortran line 419: `call exchange_nod(arr, partit)` before the outer loop. */
+    if (partit && partit->npes > 1) {
+        for (int nz = 0; nz < nl; ++nz) {
+            /* Pack a layer slice, exchange, unpack. arr is laid out as
+             * [node][nz] in row-major C; we'd prefer a strided exchange
+             * but our halo module operates on contiguous per-entity buffers.
+             * Here we exchange the whole 3D array layer-by-layer using a
+             * temporary scalar field, which is cheap (PHC IC is one-shot). */
+            real_t *layer = malloc((size_t)N_alloc * sizeof(real_t));
+            for (int n = 0; n < N_alloc; ++n)
+                layer[n] = arr[FESOM_NODE3D(n, nz, nl)];
+            fesom_halo_exchange(layer, FESOM_HALO_NOD2D, 1, 1, partit);
+            for (int n = 0; n < N_alloc; ++n)
+                arr[FESOM_NODE3D(n, nz, nl)] = layer[n];
+            free(layer);
+        }
+    }
+
     int iter_outer = 0;
     while (iter_outer < 200) {
         ++iter_outer;
-        real_t glob_max = arr[FESOM_NODE3D(0, 0, nl)];
+        real_t loc_max = arr[FESOM_NODE3D(0, 0, nl)];
         for (int n = 1; n < N; ++n) {
             real_t v = arr[FESOM_NODE3D(n, 0, nl)];
-            if (v > glob_max) glob_max = v;
+            if (v > loc_max) loc_max = v;
+        }
+        real_t glob_max = loc_max;
+        if (partit && partit->npes > 1) {
+            MPI_Allreduce(&loc_max, &glob_max, 1, MPI_DOUBLE, MPI_MAX,
+                          partit->MPI_COMM_FESOM);
         }
         if (glob_max <= 0.99 * PHC_DUMMY) break;
 
         for (int nz = 0; nz < nl - 1; ++nz) {
-            for (int n = 0; n < N; ++n) work[n] = arr[FESOM_NODE3D(n, nz, nl)];
+            for (int n = 0; n < N_alloc; ++n) work[n] = arr[FESOM_NODE3D(n, nz, nl)];
             int success = 1;
             int sweep = 0;
             while (success && sweep < 200) {
@@ -292,6 +326,7 @@ static void extrap_nod3D(const struct fesom_mesh *mesh, real_t *arr)
                         if (nz > mesh->nlevels[el] - 1) continue;
                         for (int j = 0; j < 3; ++j) {
                             int v = mesh->elem_nodes[3*el + j];
+                            if (v < 0 || v >= N_alloc) continue;
                             if (work[v] < 0.99 * PHC_DUMMY &&
                                 mesh->nlevels_nod2D[v] - 1 > nz) {
                                 val += work[v];
@@ -307,15 +342,40 @@ static void extrap_nod3D(const struct fesom_mesh *mesh, real_t *arr)
             }
             for (int n = 0; n < N; ++n) arr[FESOM_NODE3D(n, nz, nl)] = work[n];
         }
+
+        /* Cross-rank propagation between outer iterations — Fortran line 484. */
+        if (partit && partit->npes > 1) {
+            for (int nz = 0; nz < nl; ++nz) {
+                real_t *layer = malloc((size_t)N_alloc * sizeof(real_t));
+                for (int n = 0; n < N_alloc; ++n)
+                    layer[n] = arr[FESOM_NODE3D(n, nz, nl)];
+                fesom_halo_exchange(layer, FESOM_HALO_NOD2D, 1, 1, partit);
+                for (int n = 0; n < N_alloc; ++n)
+                    arr[FESOM_NODE3D(n, nz, nl)] = layer[n];
+                free(layer);
+            }
+        }
     }
 
-    /* Vertical fill — layer below inherits from layer above when dummy. */
+    /* Vertical fill — Fortran lines 491-498. */
     for (int n = 0; n < N; ++n) {
         int nl1 = mesh->nlevels_nod2D[n] - 1;
         for (int nz = 1; nz < nl1; ++nz) {
             if (arr[FESOM_NODE3D(n, nz, nl)] > 0.99 * PHC_DUMMY) {
                 arr[FESOM_NODE3D(n, nz, nl)] = arr[FESOM_NODE3D(n, nz - 1, nl)];
             }
+        }
+    }
+    /* Final exchange — Fortran line 502. */
+    if (partit && partit->npes > 1) {
+        for (int nz = 0; nz < nl; ++nz) {
+            real_t *layer = malloc((size_t)N_alloc * sizeof(real_t));
+            for (int n = 0; n < N_alloc; ++n)
+                layer[n] = arr[FESOM_NODE3D(n, nz, nl)];
+            fesom_halo_exchange(layer, FESOM_HALO_NOD2D, 1, 1, partit);
+            for (int n = 0; n < N_alloc; ++n)
+                arr[FESOM_NODE3D(n, nz, nl)] = layer[n];
+            free(layer);
         }
     }
 
@@ -326,7 +386,8 @@ static void extrap_nod3D(const struct fesom_mesh *mesh, real_t *arr)
 void fesom_phc_load_ic(const char                  *path,
                        const struct fesom_mesh     *mesh,
                        struct fesom_tracers        *tracers,
-                       int                          t_insitu)
+                       int                          t_insitu,
+                       struct fesom_partit         *partit)
 {
     int ncid;
     NC_CHECK(nc_open(path, NC_NOWRITE, &ncid));
@@ -419,8 +480,8 @@ void fesom_phc_load_ic(const char                  *path,
     NC_CHECK(nc_close(ncid));
 
     /* Extrapolate to fill any remaining dummy-tagged ocean nodes. */
-    extrap_nod3D(mesh, T);
-    extrap_nod3D(mesh, S);
+    extrap_nod3D(mesh, partit, T);
+    extrap_nod3D(mesh, partit, S);
 
     /* Final cleanup (Fortran do_ic3d lines 536-557): replace remaining dummy
        with 0, zero-out below nlevels_nod2D, K → C if T > 100. */

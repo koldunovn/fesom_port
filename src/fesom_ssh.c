@@ -41,7 +41,13 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
      * where ssh_stiff is sized myDim_nod2D. */
     const int N         = mesh->myDim_nod2D;
     const int N_alloc   = mesh->myDim_nod2D + mesh->eDim_nod2D;
-    const int E         = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    /* Loop over INTERIOR edges only — Fortran oce_ale.F90:1517 has
+     * `do ed=1,myDim_edge2D` with the comment "!! Attention". Edges in eDim
+     * belong to a neighbour rank and are accumulated by the owner. The owner's
+     * interior loop adds to its myDim row; the same row is in our eDim_nod2D
+     * (halo), where we don't have a matrix row. So skipping halo edges here
+     * exactly matches Fortran. */
+    const int E         = mesh->myDim_edge2D;
     memset(S, 0, sizeof(*S));
     S->dim = N;
     (void)N_alloc;
@@ -122,8 +128,11 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
         int el[2] = { mesh->edge_tri[2*ed + 0], mesh->edge_tri[2*ed + 1] };
         int e_n[2] = { mesh->edges[2*ed + 0], mesh->edges[2*ed + 1] };
         for (int i = 0; i < 2; ++i) {
-            /* Only INTERIOR elements (myDim_elem2D) have elem_nodes valid;
-             * skip halo elements since we have no connectivity for them. */
+            /* For ed in myDim_edge2D, the FESOM partition guarantees both
+             * adjacent triangles are in myDim_elem2D — so gradient_sca and
+             * elem_nodes (both sized myDim_elem2D in Fortran) are always
+             * safe to read. Skip true boundary (-1) and any element id past
+             * myDim_elem2D as defensive (would indicate partition oddity). */
             if (el[i] < 0 || el[i] >= mesh->myDim_elem2D) continue;
             int en[3] = { mesh->elem_nodes[3*el[i] + 0],
                           mesh->elem_nodes[3*el[i] + 1],
@@ -208,18 +217,24 @@ void fesom_ssh_stiff_free(fesom_ssh_stiff *S)
  * Preconditioner: ssh_solve_preconditioner (solver.F90:31-95)
  *===========================================================================*/
 
-void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh)
+void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
+                              struct fesom_partit *partit)
 {
-    const int N = mesh->myDim_nod2D;
+    const int N       = mesh->myDim_nod2D;
+    const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
 
-    /* Collect diagonal values; in MPI we'd halo-exchange. In serial, all
-       neighbour columns are local rows so diag_values is just the same array. */
-    real_t *diag_values = malloc((size_t)N * sizeof(real_t));
+    /* Collect diagonal values. Sized for full local extent because column
+     * indices in `S->colind` can refer to halo nodes (n >= N), and the
+     * preconditioner formula reads diag_values[node] for every off-diagonal.
+     * Halo entries are filled by halo exchange below (solver.F90 mirrors). */
+    real_t *diag_values = calloc((size_t)N_alloc, sizeof(real_t));
     FESOM_CHECK(diag_values, "preconditioner: out of memory");
     for (int row = 0; row < N; ++row) {
         diag_values[row] = S->values[S->rowptr[row]];   /* diag at offset 0 */
     }
-    /* (Serial: no exchange_nod call — would do diag_values for halo nodes.) */
+    if (partit && partit->npes > 1) {
+        fesom_halo_exchange(diag_values, FESOM_HALO_NOD2D, 1, 1, partit);
+    }
 
     /* MITgcm-style symmetric preconditioner (solver.F90:77-86):
      *   pr[diag]                 = 1 / diag(row)
@@ -248,7 +263,13 @@ void fesom_compute_ssh_rhs_linfs(const struct fesom_mesh *mesh,
 {
     const int N  = mesh->myDim_nod2D;
     const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
-    const int E  = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    /* Fortran oce_ale.F90:1862 uses `do ed=1, myDim_edge2D` only. The edge
+     * partition replicates each cross-rank edge in BOTH neighbour ranks'
+     * myDim_edge2D, so each interior endpoint receives full contributions
+     * from its rank alone. exchange_nod at the end of the routine refreshes
+     * halo entries (which were only side-effects of the loop) with owner
+     * values — same pattern as Fortran. */
+    const int E  = mesh->myDim_edge2D;
     const int nl = mesh->nl;
     const real_t alpha = (real_t)FESOM_PHASE1_ALPHA;
     const real_t one_minus_alpha = 1.0 - alpha;
@@ -412,6 +433,10 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
     if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_old);
 
     int iter = 0;
+    int   verbose = (getenv("FESOM_VERBOSE_CG") != NULL);
+    /* Heartbeat from rank 0 every 100 iters regardless of env var, so a
+     * hung CG always shows something in the log. */
+    int   heartbeat_every = 100;
     for (iter = 1; iter <= si->maxiter; ++iter) {
         /* App = A * pp; need pp halo exchanged. */
         if (si->partit && si->partit->npes > 1) EXCH(pp);
@@ -421,6 +446,13 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
         real_t s_aux = 0.0;
         for (int row = 0; row < N; ++row) s_aux += pp[row] * App[row];
         if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_aux);
+        if (s_aux == 0.0 || s_aux != s_aux) {       /* NaN/zero check */
+            if (si->partit == NULL || si->partit->mype == 0) {
+                fprintf(stderr, "[fesom_ssh] CG abort at iter %d: pp·App = %g (s_old=%g)\n",
+                        iter, (double)s_aux, (double)s_old); fflush(stderr);
+            }
+            FESOM_DIE("CG: pp·App is %g — matrix singular or NaN propagated", s_aux);
+        }
         real_t al = s_old / s_aux;
 
         for (int row = 0; row < N; ++row) {
@@ -441,11 +473,36 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
             ALLREDUCE_SUM(sp1);
         }
 
-        if (sqrt(sp1 / (real_t)N_global) < rtol) break;
+        real_t residual = sqrt(sp1 / (real_t)N_global);
+        if ((si->partit == NULL || si->partit->mype == 0)
+            && (verbose ? (iter <= 5 || iter % 50 == 0)
+                        : (iter % heartbeat_every == 0))) {
+            fprintf(stderr, "[fesom_ssh] CG iter %4d: res=%.4e rtol=%.4e\n",
+                    iter, (double)residual, (double)rtol);
+            fflush(stderr);
+        }
+        if (residual < rtol) break;
+        if (residual != residual || residual > 1e30) {       /* NaN/divergence */
+            if (si->partit == NULL || si->partit->mype == 0) {
+                fprintf(stderr,
+                    "[fesom_ssh] CG abort at iter %d: residual=%g (NaN or divergence)\n",
+                    iter, (double)residual); fflush(stderr);
+            }
+            FESOM_DIE("CG residual diverged");
+        }
 
         real_t be = sp0 / s_old;
         s_old = sp0;
         for (int row = 0; row < N; ++row) pp[row] = zz[row] + be * pp[row];
+    }
+    if (iter > si->maxiter) {
+        if (si->partit == NULL || si->partit->mype == 0) {
+            fprintf(stderr, "[fesom_ssh] CG hit maxiter=%d without converging "
+                    "(last residual ~%.4e, rtol=%.4e)\n",
+                    si->maxiter, (double)sqrt(s_old/(real_t)N_global), (double)rtol);
+            fflush(stderr);
+        }
+        FESOM_DIE("CG did not converge");
     }
     if (si->partit && si->partit->npes > 1) EXCH(X);
     si->last_iters = iter;

@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <mpi.h>
 
 /*
  * The Fortran side uses WP=8 (double precision) everywhere — see
@@ -34,9 +35,17 @@ typedef double real_t;
  * doesn't need a richer error model; we'll layer one in if the port
  * survives.
  */
+/* Kill ALL ranks. abort() only kills this process — other MPI ranks
+ * would block forever in collectives. MPI_Abort takes the whole job
+ * down. If MPI isn't initialised yet, fall back to abort(). */
 #define FESOM_DIE(...) do {                                  \
     fprintf(stderr, "[fesom_port FATAL] " __VA_ARGS__);      \
     fprintf(stderr, "\n  at %s:%d\n", __FILE__, __LINE__);   \
+    fflush(stderr);                                          \
+    fflush(stdout);                                          \
+    int _mpi_inited = 0;                                     \
+    MPI_Initialized(&_mpi_inited);                           \
+    if (_mpi_inited) MPI_Abort(MPI_COMM_WORLD, 1);           \
     abort();                                                 \
 } while (0)
 
