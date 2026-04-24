@@ -776,6 +776,31 @@ skip_rest_state:
          * onset without changing snapshot cadence. Defaults to snap_every. */
         const char *pe_env = getenv("FESOM_PRINT_EVERY");
         const int print_every = (pe_env && atoi(pe_env) > 0) ? atoi(pe_env) : snap_every;
+
+        /* Physics-bisect knobs (for MPI drift hunt — developer hint: one of
+         * wind / fluxes / tracer update is amplifying partition-dependent
+         * noise). Each knob is applied every step after bulk+runoff and
+         * before fesom_timestep. */
+        const int freeze_ts = (getenv("FESOM_FREEZE_TS") && atoi(getenv("FESOM_FREEZE_TS")));
+        const int no_wind   = (getenv("FESOM_NO_WIND")   && atoi(getenv("FESOM_NO_WIND")));
+        const int no_hflux  = (getenv("FESOM_NO_HFLUX")  && atoi(getenv("FESOM_NO_HFLUX")));
+        /* Snapshot T,S at IC for FESOM_FREEZE_TS restore. Covers myDim+eDim
+         * so halo copies are also reset — the step writes both. */
+        real_t *T_ic = NULL, *S_ic = NULL;
+        size_t ts_nbytes = 0;
+        if (freeze_ts) {
+            ts_nbytes = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D)
+                      * (size_t)mesh.nl * sizeof(real_t);
+            T_ic = malloc(ts_nbytes); S_ic = malloc(ts_nbytes);
+            FESOM_CHECK(T_ic && S_ic, "FESOM_FREEZE_TS: alloc snapshot");
+            memcpy(T_ic, tracers.data[FESOM_TRACER_T].values, ts_nbytes);
+            memcpy(S_ic, tracers.data[FESOM_TRACER_S].values, ts_nbytes);
+        }
+        if (mpi.mype == 0 && (freeze_ts || no_wind || no_hflux)) {
+            printf("[fesom_port] physics-bisect knobs: FREEZE_TS=%d NO_WIND=%d NO_HFLUX=%d\n",
+                   freeze_ts, no_wind, no_hflux);
+        }
+
         printf("[fesom_port] timestep loop: %d steps, dt=%.0f s, print every %d, snapshot every %d\n",
                nsteps, FESOM_PHASE1_DT, print_every, snap_every);
         if (out_dir) {
@@ -821,6 +846,26 @@ skip_rest_state:
                                       jra55_year, month_now, update_monthly_flag);
                 month_prev = month_now;
             }
+            /* Physics-bisect toggles (env-gated). Applied AFTER bulk+runoff
+             * writes forcing, BEFORE fesom_timestep reads it. */
+            if (no_wind) {
+                int E = mesh.myDim_elem2D + mesh.eDim_elem2D + mesh.eXDim_elem2D;
+                int N = mesh.myDim_nod2D + mesh.eDim_nod2D;
+                memset(forcing.stress_surf,      0, (size_t)E * 2 * sizeof(real_t));
+                memset(forcing.stress_node_surf, 0, (size_t)N * 2 * sizeof(real_t));
+            }
+            if (no_hflux) {
+                int N = mesh.myDim_nod2D + mesh.eDim_nod2D;
+                memset(forcing.heat_flux,    0, (size_t)N * sizeof(real_t));
+                memset(forcing.water_flux,   0, (size_t)N * sizeof(real_t));
+                memset(forcing.virtual_salt, 0, (size_t)N * sizeof(real_t));
+                memset(forcing.relax_salt,   0, (size_t)N * sizeof(real_t));
+            }
+            if (freeze_ts) {
+                memcpy(tracers.data[FESOM_TRACER_T].values, T_ic, ts_nbytes);
+                memcpy(tracers.data[FESOM_TRACER_S].values, S_ic, ts_nbytes);
+            }
+
             /* Per-step heartbeat on rank 0 — independent of print_every so
              * we always see SOMETHING happening even if the model is hung
              * inside a single step. */
@@ -965,6 +1010,7 @@ skip_rest_state:
                                         &mesh, &dyn, &tracers, &aux, &mpi);
             }
         }
+        free(T_ic); free(S_ic);
     }
 
     fesom_tracer_adv_free(&tra_sc);

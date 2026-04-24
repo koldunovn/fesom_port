@@ -20,6 +20,8 @@
 #include "fesom_tracer_diff.h"
 #include "fesom_tracers.h"
 
+#include <stdlib.h>
+
 int fesom_timestep(int                          step_n,
                    const fesom_step_ctx        *ctx,
                    struct fesom_mesh           *mesh,
@@ -121,17 +123,35 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D(dyn->w_e, nl, p);
     fesom_exchange_nod3D(dyn->w_i, nl, p);
 
-    /* 13. tracer advection: T then S. */
-    fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);
-    fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
+    /* 13. tracer advection: T then S.
+     * FESOM_NO_TRADV=1 → skip advection (diagnostic for MPI drift hunt). */
+    static int nt_adv_checked = 0, nt_adv_skip = 0;
+    if (!nt_adv_checked) {
+        const char *e = getenv("FESOM_NO_TRADV");
+        nt_adv_skip = (e && atoi(e));
+        nt_adv_checked = 1;
+    }
+    if (!nt_adv_skip) {
+        fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);
+        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
 
-    fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
-    fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
+        fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
+        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
+    }
 
-    /* 13b. implicit vertical diffusion of tracers + surface heat/water flux BC. */
-    fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers);
-    fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
-    fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
+    /* 13b. implicit vertical diffusion of tracers + surface heat/water flux BC.
+     * FESOM_NO_TRDIFF=1 → skip diffusion. */
+    static int nt_dif_checked = 0, nt_dif_skip = 0;
+    if (!nt_dif_checked) {
+        const char *e = getenv("FESOM_NO_TRDIFF");
+        nt_dif_skip = (e && atoi(e));
+        nt_dif_checked = 1;
+    }
+    if (!nt_dif_skip) {
+        fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers);
+        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
+        fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
+    }
 
     /* 14. commit thickness: hnode := hnode_new, helem from vertex mean. */
     fesom_ale_commit_thickness(mesh);
