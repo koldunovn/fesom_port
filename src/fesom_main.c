@@ -731,12 +731,9 @@ skip_rest_state:
                nsteps, FESOM_PHASE1_DT, print_every, snap_every);
         if (out_dir) {
             char path[1024];
-            if (mpi.npes > 1)
-                snprintf(path, sizeof(path), "%s/snap_%06d_r%05d.nc", out_dir, 0, mpi.mype);
-            else
-                snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, 0);
+            snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, 0);
             fesom_io_write_snapshot(path, 0, FESOM_PHASE1_DT,
-                                    &mesh, &dyn, &tracers, &aux);
+                                    &mesh, &dyn, &tracers, &aux, &mpi);
         }
         printf("  step    iters    max|uv|       max|eta|      max|w|        "
                "min(T)    max(T)    min(S)    max(S)\n");
@@ -828,12 +825,9 @@ skip_rest_state:
             }
             if (out_dir && (n % snap_every == 0)) {
                 char path[1024];
-                if (mpi.npes > 1)
-                    snprintf(path, sizeof(path), "%s/snap_%06d_r%05d.nc", out_dir, n, mpi.mype);
-                else
-                    snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
+                snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
                 fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT,
-                                        &mesh, &dyn, &tracers, &aux);
+                                        &mesh, &dyn, &tracers, &aux, &mpi);
             }
         }
     }

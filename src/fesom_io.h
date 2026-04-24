@@ -7,6 +7,7 @@ struct fesom_mesh;
 struct fesom_dyn;
 struct fesom_tracers;
 struct fesom_aux;
+struct fesom_partit;
 
 /*
  * Write one snapshot of the model state to a NetCDF file.
@@ -43,15 +44,19 @@ struct fesom_aux;
  *     pgf_x, pgf_y (nz_1, elem)    pressure-gradient force, m/s²
  *     Kv (nz_1, nod2), Av (nz_1, elem)   vertical diffusivity / viscosity
  *
+ *   time dimension:
+ *     time = 1 (UNLIMITED, model_time_seconds for this snapshot).
+ *     All time-varying state variables get `time` as the outermost axis so
+ *     `xarray.open_mfdataset("snap_*.nc", concat_dim="time")` produces a
+ *     single dataset spanning all snapshot files.
+ *
  *   global attributes:
  *     step (int)                   timestep counter
  *     dt (double)                  timestep size, s
- *     model_time_seconds (double)  step * dt
  *
- * Storage order: arrays held in C as [node, level] (row-major) get
- * transposed to [level, node] on write so xarray sees the conventional
- * (nz, nod2) ordering (FESOM-style, time-outermost would be added later
- * if we move to one file per run).
+ * Multi-rank: when `partit->npes > 1`, every rank participates in MPI gathers
+ * that ship local-myDim slices to rank 0; only rank 0 opens the file. Single-
+ * rank or NULL partit: rank 0 writes its own data directly.
  */
 void fesom_io_write_snapshot(const char                  *path,
                              int                          step_n,
@@ -59,6 +64,7 @@ void fesom_io_write_snapshot(const char                  *path,
                              const struct fesom_mesh     *mesh,
                              const struct fesom_dyn      *dyn,
                              const struct fesom_tracers  *tracers,
-                             const struct fesom_aux      *aux);
+                             const struct fesom_aux      *aux,
+                             struct fesom_partit         *partit);
 
 #endif /* FESOM_IO_H */
