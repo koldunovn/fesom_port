@@ -80,12 +80,6 @@ typedef struct fesom_partit {
 
     int  myDim_edge2D, eDim_edge2D;
     int *myList_edge2D;
-
-    /* Halo-owner table (built at init): for halo node local index
-     *   i in [myDim_nod2D .. myDim_nod2D+eDim_nod2D),
-     *   halo_owner_nod2D[i - myDim_nod2D] = the rank that owns it.
-     * Used by the halo-identity test in slice 30b. */
-    int *halo_owner_nod2D;
 } fesom_partit;
 
 /* Initialise MPI + read partition files for the supplied mesh directory.

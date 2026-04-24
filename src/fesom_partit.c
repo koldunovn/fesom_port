@@ -208,36 +208,6 @@ static void read_com_info(fesom_partit *p, const char *dist_dir)
 }
 
 /* ------------------------------------------------------------------------ *
- * Build halo_owner table (used by slice 30b identity test).                *
- * For each halo node local index h in [0..eDim_nod2D), find the global ID  *
- * in myList_nod2D[myDim+h] and look up its owner via part[].               *
- * ------------------------------------------------------------------------ */
-static void build_halo_owner(fesom_partit *p)
-{
-    if (p->eDim_nod2D <= 0) {
-        p->halo_owner_nod2D = NULL;
-        return;
-    }
-    p->halo_owner_nod2D = malloc((size_t)p->eDim_nod2D * sizeof(int));
-    FESOM_CHECK(p->halo_owner_nod2D, "fesom_partit: halo_owner alloc");
-    for (int h = 0; h < p->eDim_nod2D; ++h) {
-        int gid = p->myList_nod2D[p->myDim_nod2D + h];   /* 1-based global ID */
-        /* Linear scan of part[] (npes is usually small enough). */
-        int owner = -1;
-        for (int k = 0; k < p->npes; ++k) {
-            if (gid >= p->part[k] && gid < p->part[k + 1]) {
-                owner = k;
-                break;
-            }
-        }
-        if (owner < 0) {
-            FESOM_DIE("fesom_partit: halo gid=%d not found in part[]", gid);
-        }
-        p->halo_owner_nod2D[h] = owner;
-    }
-}
-
-/* ------------------------------------------------------------------------ *
  * Public API                                                                *
  * ------------------------------------------------------------------------ */
 void fesom_partit_init(fesom_partit *p,
@@ -287,7 +257,6 @@ void fesom_partit_init(fesom_partit *p,
     read_rpart   (p, dist_dir);
     read_my_list (p, dist_dir);
     read_com_info(p, dist_dir);
-    build_halo_owner(p);
 
     /* Sanity: per-rank Σ counts. */
     int total_my_n = 0, total_my_e = 0, total_my_ed = 0;
@@ -353,7 +322,6 @@ void fesom_partit_finalize(fesom_partit *p)
     free(p->myList_nod2D);     p->myList_nod2D = NULL;
     free(p->myList_elem2D);    p->myList_elem2D = NULL;
     free(p->myList_edge2D);    p->myList_edge2D = NULL;
-    free(p->halo_owner_nod2D); p->halo_owner_nod2D = NULL;
 
     int finalized = 0;
     MPI_Finalized(&finalized);

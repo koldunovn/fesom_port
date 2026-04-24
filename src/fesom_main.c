@@ -8,6 +8,7 @@
 #include "fesom_forcing_analytical.h"
 #include "fesom_ic.h"
 #include "fesom_io.h"
+#include "fesom_halo.h"
 #include "fesom_jra55.h"
 #include "fesom_mesh.h"
 #include "fesom_sss_runoff.h"
@@ -237,6 +238,11 @@ int main(int argc, char **argv)
      * partit->myDim_* see the right values. For multi-rank these were already
      * read from my_list*.out. */
     fesom_partit_set_global_counts_serial(&mpi, mesh.nod2D, mesh.elem2D, mesh.edge2D);
+
+    /* Phase 4 step 30b: identity test of halo exchange. No-op on 1 rank.
+     * On 2+ ranks: positive test (halo == owning rank), negative test
+     * (corruption recovery). Aborts on mismatch. */
+    fesom_halo_identity_test(&mpi);
 
     print_sanity(&mesh);
 
