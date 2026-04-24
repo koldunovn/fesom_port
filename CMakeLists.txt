@@ -65,6 +65,7 @@ add_executable(fesom_port
   src/fesom_jra55.c
   src/fesom_bulk.c
   src/fesom_tracer_diff.c
+  src/fesom_sss_runoff.c
 )
 target_include_directories(fesom_port PRIVATE src ${NC_INCDIR})
 target_link_libraries(fesom_port PRIVATE m ${NC_LIBS})

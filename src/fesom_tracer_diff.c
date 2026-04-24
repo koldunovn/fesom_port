@@ -53,12 +53,16 @@ static real_t bc_surface(int n,
         bc = -dt * (forcing->heat_flux[n] / vcpw
                    + sval * forcing->water_flux[n] * is_nonlinfs);
     } else if (id == 2) {
-        /*___salinity________________________________________________________*/
-        const real_t virtual_salt   = 0.0;  /* zlevel/zstar only */
-        const real_t relax_salt     = 0.0;  /* Phase 3 step 25 */
+        /*___salinity________________________________________________________
+         * Fortran line 1523:
+         *   bc_surface = dt*(virtual_salt(n) + relax_salt(n)
+         *                    + real_salt_flux(n)*is_nonlinfs)
+         * For linfs (us): virtual_salt is rsss·water_flux balanced;
+         * relax_salt comes from SSS climatology restoring; real_salt_flux is
+         * a sea-ice contribution (still 0 — sea ice not yet ported). */
         const real_t real_salt_flux = 0.0;  /* sea ice */
-        bc = dt * (virtual_salt
-                  + relax_salt
+        bc = dt * (forcing->virtual_salt[n]
+                  + forcing->relax_salt[n]
                   + real_salt_flux * is_nonlinfs);
     }
     return bc;

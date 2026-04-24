@@ -53,6 +53,8 @@ typedef struct fesom_mesh {
     real_t *elem_area;        /* [elem2D]            cell area, m² */
     real_t *area;             /* [nod2D * nl]        upper-edge scalar CV area, m² */
     real_t *areasvol;         /* [nod2D * nl]        "mid" CV area (= area without cavity), m² */
+    real_t  ocean_area;       /* total open-ocean surface area Σ areasvol(ulevels_nod2D(n), n)
+                                  for ulevels_nod2D(n)==1, m² (Fortran oce_mesh.F90:2380-2393) */
 
     /* Per-cell metric */
     real_t *elem_cos;         /* [elem2D]   cos(rotated lat at centroid) */

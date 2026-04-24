@@ -23,6 +23,12 @@ typedef struct fesom_forcing {
     real_t *water_flux;
     real_t *stress_node_surf;
     real_t *stress_surf;
+
+    /* Phase 3 step 25 — SSS restoring + CORE2 runoff (o_ARRAYS in Fortran). */
+    real_t *runoff;          /* [nod2D]  freshwater input from rivers, m/s   */
+    real_t *Ssurf;           /* [nod2D]  monthly SSS climatology, PSU       */
+    real_t *virtual_salt;    /* [nod2D]  rsss·water_flux (linfs only)        */
+    real_t *relax_salt;      /* [nod2D]  surf_relax_S·(Ssurf - S_top)        */
 } fesom_forcing;
 
 void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh);

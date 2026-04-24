@@ -10,6 +10,7 @@
 #include "fesom_io.h"
 #include "fesom_jra55.h"
 #include "fesom_mesh.h"
+#include "fesom_sss_runoff.h"
 #include "fesom_momentum.h"
 #include "fesom_mpi.h"
 #include "fesom_phc.h"
@@ -637,14 +638,32 @@ int main(int argc, char **argv)
     }
 
     /* Phase 3 step 24: JRA55-do daily forcing.
-       If jra55_year > 0, init JRA55 reader + bulk formulae; the timestep loop
-       below calls fesom_jra55_step + fesom_bulk_compute every step.
+       If jra55_year > 0, init JRA55 reader + bulk formulae + SSS restoring +
+       CORE2 runoff; the timestep loop below calls fesom_jra55_step,
+       fesom_bulk_compute, and fesom_sss_runoff_step every step.
        Otherwise fall back to Phase 2 analytical wind. */
     fesom_jra55 jra; int use_jra = 0;
+    fesom_sss_runoff sr; int use_sr = 0;
     if (jra55_year > 0) {
         fesom_jra55_init(&jra, &mesh);
         fesom_jra55_open_year(&jra, &mesh, jra55_year);
         use_jra = 1;
+        /* Phase 3 step 25 paths from work_core/namelist.forcing. */
+        const char *sss_path    = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc";
+        const char *runoff_path = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/CORE2_runoff.nc";
+        fesom_sss_runoff_init(&sr, &mesh, &forcing, sss_path, runoff_path);
+        use_sr = 1;
+        printf("[fesom_port] SSS restoring: %s\n", sss_path);
+        {
+            real_t rmn = forcing.runoff[0], rmx = rmn;
+            for (int k = 1; k < mesh.nod2D; ++k) {
+                if (forcing.runoff[k] < rmn) rmn = forcing.runoff[k];
+                if (forcing.runoff[k] > rmx) rmx = forcing.runoff[k];
+            }
+            printf("[fesom_port] CORE2 runoff:  %s  (range %.4e..%.4e m/s)\n",
+                   runoff_path, (double)rmn, (double)rmx);
+        }
+        printf("[fesom_port] mesh.ocean_area = %.4e m²\n", (double)mesh.ocean_area);
         printf("[fesom_port] JRA55 init: 8 fields opened for year %d, "
                "Nlon=%d Nlat=%d Ntime=%d  cal=%s\n",
                jra55_year,
@@ -706,16 +725,38 @@ int main(int argc, char **argv)
         }
         printf("  step    iters    max|uv|       max|eta|      max|w|        "
                "min(T)    max(T)    min(S)    max(S)\n");
+        /* Cumulative days at the start of each month (non-leap year, since
+           the JRA55 calendar conversion above is gregorian — but for monthly
+           SSS climatology we just need a 1-12 month index). */
+        static const int days_in_month[12] = {
+            31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+        };
+        int month_prev = -1;
         for (int n = 1; n <= nsteps; ++n) {
+            int    daynew  = 1;
+            double timenew = 0.0;
             if (use_jra) {
-                /* daynew = day-of-year (1-based). With dt fixed and starting
-                   at day 1, second 0: time = (n-1)*dt seconds from year start.
-                   daynew = floor(t/86400) + 1 ; timenew = t - (daynew-1)*86400. */
                 double t_sec = (double)(n - 1) * (double)FESOM_PHASE1_DT;
-                int    daynew  = (int)floor(t_sec / 86400.0) + 1;
-                double timenew = t_sec - (daynew - 1) * 86400.0;
+                daynew  = (int)floor(t_sec / 86400.0) + 1;
+                timenew = t_sec - (daynew - 1) * 86400.0;
                 fesom_jra55_step(&jra, &mesh, jra55_year, daynew, (real_t)timenew);
                 fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing);
+            }
+            if (use_sr) {
+                /* Convert daynew → month_now (1..12), non-leap year. */
+                int month_now = 1;
+                int doy_remain = daynew;
+                for (int mi = 0; mi < 12; ++mi) {
+                    if (doy_remain <= days_in_month[mi]) { month_now = mi + 1; break; }
+                    doy_remain -= days_in_month[mi];
+                }
+                /* Fortran update_monthly_flag fires at start (mstep==1) and at
+                   midnight at end of each month. We approximate with: first
+                   step OR month change. */
+                int update_monthly_flag = (n == 1) || (month_now != month_prev);
+                fesom_sss_runoff_step(&sr, &mesh, &tracers, &forcing,
+                                      jra55_year, month_now, update_monthly_flag);
+                month_prev = month_now;
             }
             int iters = fesom_timestep(n, &ctx, &mesh, &aux, &dyn,
                                        &tracers, &forcing);
@@ -811,6 +852,7 @@ int main(int argc, char **argv)
                (double)bmin, (double)bmax);
     }
 
+    if (use_sr)  fesom_sss_runoff_free(&sr);
     if (use_jra) fesom_jra55_free(&jra);
     fesom_forcing_free(&forcing);
     fesom_aux_free    (&aux);

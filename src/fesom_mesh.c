@@ -538,6 +538,14 @@ static void compute_areas(fesom_mesh *m)
         m->area[i]     *= r2;
         m->areasvol[i] *= r2;
     }
+
+    /* ocean_area — Fortran oce_mesh.F90:2380-2393.
+     * Sum of areasvol(ulevels_nod2D(n), n) over open-ocean nodes. */
+    m->ocean_area = 0.0;
+    for (int n = 0; n < m->nod2D; ++n) {
+        if (m->ulevels_nod2D[n] > 1) continue;       /* cavity */
+        m->ocean_area += m->areasvol[FESOM_NODE3D(n, 0, m->nl)];
+    }
 }
 
 /*--- elem/edge centers, cyclic-aware ----------------------------------------
