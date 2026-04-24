@@ -686,8 +686,14 @@ static void oce_tra_adv_fct(fesom_tracer_adv_scratch *sc,
     real_t *AUX         = sc->fct_aux;     /* [E * nl * 2] : (max=0, min=1) */
     const real_t *LO    = sc->fct_LO;
 
-    /* a1. Per-node max/min between LO and ttf. */
-    for (int n = 0; n < N; ++n) {
+    /* a1. Per-node max/min between LO and ttf.
+     * Fortran oce_adv_tra_fct.F90:124 loops myDim+eDim so the halo entries
+     * of fct_ttf_{min,max} match the owner — step a2 reads these values at
+     * halo vertices of owned elements. Using myDim alone leaves halo entries
+     * stale (partition-dependent tracer drift; this is bug 2 behind the
+     * init_tracers_AB fix). */
+    const int N_full_a1 = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    for (int n = 0; n < N_full_a1; ++n) {
         int nu1 = mesh->ulevels_nod2D[n] - 1;
         int nl1 = mesh->nlevels_nod2D[n] - 1;
         for (int nz = nu1; nz < nl1; ++nz) {
