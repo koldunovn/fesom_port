@@ -7,9 +7,11 @@
 #include "fesom_constants.h"
 #include "fesom_forcing.h"
 #include "fesom_mesh.h"
+#include "fesom_partit.h"
 #include "fesom_tracers.h"
 
 #include <math.h>
+#include <mpi.h>
 #include <netcdf.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -256,15 +258,21 @@ void fesom_read_other_NetCDF(const char *file,
 }
 
 /* ------------------------------------------------------------------------ *
- * integrate_nod_2D — gen_support.F90:318-351 (serial: no MPI reduce).      *
+ * integrate_nod_2D — gen_support.F90:318-351                               *
+ * Local sum over interior nodes only, then global Allreduce on multi-rank. *
  * ------------------------------------------------------------------------ */
 static real_t integrate_nod_2D(const real_t *data,
-                               const struct fesom_mesh *mesh)
+                               const struct fesom_mesh *mesh,
+                               struct fesom_partit     *partit)
 {
     real_t lval = 0.0;
     for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         int ul = mesh->ulevels_nod2D[n] - 1;   /* 0-based */
         lval += data[n] * mesh->areasvol[FESOM_NODE3D(n, ul, mesh->nl)];
+    }
+    if (partit && partit->npes > 1) {
+        MPI_Allreduce(MPI_IN_PLACE, &lval, 1, MPI_DOUBLE, MPI_SUM,
+                      partit->MPI_COMM_FESOM);
     }
     return lval;
 }
@@ -318,6 +326,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
                            const struct fesom_mesh    *mesh,
                            const struct fesom_tracers *tracers,
                            struct fesom_forcing       *forcing,
+                           struct fesom_partit        *partit,
                            int yearnew, int month_now,
                            int update_monthly_flag)
 {
@@ -359,7 +368,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
             }
             forcing->virtual_salt[n] = rsss * forcing->water_flux[n];
         }
-        real_t net = integrate_nod_2D(forcing->virtual_salt, mesh) / mesh->ocean_area;
+        real_t net = integrate_nod_2D(forcing->virtual_salt, mesh, partit) / mesh->ocean_area;
         for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             if (mesh->ulevels_nod2D[n] > 1) continue;     /* cavity */
             forcing->virtual_salt[n] -= net;
@@ -376,7 +385,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
             real_t Stop = tracers->data[FESOM_TRACER_S].values[FESOM_NODE3D(n, ul, mesh->nl)];
             forcing->relax_salt[n] = sr->surf_relax_S * (forcing->Ssurf[n] - Stop);
         }
-        real_t net = integrate_nod_2D(forcing->relax_salt, mesh) / mesh->ocean_area;
+        real_t net = integrate_nod_2D(forcing->relax_salt, mesh, partit) / mesh->ocean_area;
         for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             if (mesh->ulevels_nod2D[n] > 1) continue;     /* cavity */
             forcing->relax_salt[n] -= net;
@@ -401,7 +410,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
              *  prec and runoff still have their original sign"). */
             flux[n] = forcing->water_flux[n] + forcing->runoff[n];
         }
-        real_t net = integrate_nod_2D(flux, mesh) / mesh->ocean_area;
+        real_t net = integrate_nod_2D(flux, mesh, partit) / mesh->ocean_area;
         for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             forcing->water_flux[n] += net;
         }

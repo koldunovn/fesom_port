@@ -36,7 +36,9 @@
 #include "fesom_tracer_adv.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
+#include "fesom_halo.h"
 #include "fesom_mesh.h"
+#include "fesom_partit.h"
 #include "fesom_tracers.h"
 
 #include <math.h>
@@ -858,7 +860,18 @@ static void oce_tra_adv_fct(fesom_tracer_adv_scratch *sc,
             fct_minus[k] = (ratio_neg < 1.0 ? ratio_neg : 1.0);
         }
     }
-    /* (Serial: no exchange_nod for fct_plus/minus.) */
+    /* MPI: halo exchange of fct_plus / fct_minus so the limiter ratios are
+     * consistent across rank boundaries. Mirrors Fortran
+     *   call exchange_nod(fct_plus, fct_minus, partit, luse_g2g=.true.)
+     * (oce_adv_tra_fct.F90:401). Without this, the per-edge horizontal
+     * limiter at b3 picks an inconsistent (fct_plus, fct_minus) pair on
+     * each side of a partition boundary, breaking flux limiting and causing
+     * tracer overshoot → density gradient → momentum blowup within a few
+     * steps. Two single-field calls (no 2-field variant in our halo). */
+    if (sc->partit && sc->partit->npes > 1) {
+        fesom_exchange_nod3D(fct_plus,  nl, sc->partit);
+        fesom_exchange_nod3D(fct_minus, nl, sc->partit);
+    }
 
     /* b3. Apply limits — vertical first, then horizontal. */
     for (int n = 0; n < N; ++n) {

@@ -6,6 +6,7 @@
 struct fesom_mesh;
 struct fesom_dyn;
 struct fesom_tracers;
+struct fesom_partit;
 
 /*
  * Phase 1 simple-upwind tracer advection. Literal port of:
@@ -40,6 +41,10 @@ typedef struct fesom_tracer_adv_scratch {
     real_t *fct_plus;            /* [nod2D  * nl]  positive limiter factor   */
     real_t *fct_minus;           /* [nod2D  * nl]  negative limiter factor   */
     real_t *fct_aux;             /* [elem2D * nl * 2]  per-element max/min   */
+
+    /* MPI: partit pointer used by FCT mid-pipeline halo exchange of
+     * fct_plus / fct_minus. Set after init via direct field assignment. */
+    struct fesom_partit *partit;
 } fesom_tracer_adv_scratch;
 
 void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,

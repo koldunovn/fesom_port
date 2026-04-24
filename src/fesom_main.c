@@ -574,6 +574,7 @@ skip_rest_state:
     /* tra_sc allocation runs unconditionally — needed by timestep loop. */
     fesom_tracer_adv_scratch tra_sc;
     fesom_tracer_adv_init(&tra_sc, &mesh);
+    tra_sc.partit = &mpi;       /* used by FCT mid-pipeline exchange */
     if (do_sanity) {
         fesom_tracer_advect_one(&tra_sc, FESOM_TRACER_T, &mesh, &dyn, &tracers);
         fesom_tracer_advect_one(&tra_sc, FESOM_TRACER_S, &mesh, &dyn, &tracers);
@@ -759,7 +760,7 @@ skip_rest_state:
                    midnight at end of each month. We approximate with: first
                    step OR month change. */
                 int update_monthly_flag = (n == 1) || (month_now != month_prev);
-                fesom_sss_runoff_step(&sr, &mesh, &tracers, &forcing,
+                fesom_sss_runoff_step(&sr, &mesh, &tracers, &forcing, &mpi,
                                       jra55_year, month_now, update_monthly_flag);
                 month_prev = month_now;
             }

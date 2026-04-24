@@ -6,6 +6,7 @@
 struct fesom_mesh;
 struct fesom_tracers;
 struct fesom_forcing;
+struct fesom_partit;
 
 /*
  * Phase 3 step 25 — SSS restoring (PHC2_salx) + CORE2 runoff.
@@ -63,6 +64,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
                            const struct fesom_mesh    *mesh,
                            const struct fesom_tracers *tracers,
                            struct fesom_forcing       *forcing,
+                           struct fesom_partit        *partit,
                            int yearnew, int month_now,
                            int update_monthly_flag);
 
