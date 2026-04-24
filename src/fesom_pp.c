@@ -28,7 +28,7 @@
 void fesom_compute_vel_nodes(const struct fesom_mesh *mesh,
                              struct fesom_dyn        *dyn)
 {
-    const int N    = mesh->nod2D;
+    const int N    = mesh->myDim_nod2D;       /* interior only — halo gets exchange */
     const int nl   = mesh->nl;
 
     for (int n = 0; n < N; ++n) {
@@ -86,8 +86,8 @@ void fesom_pp_mixing(const struct fesom_mesh *mesh,
                      const struct fesom_dyn  *dyn,
                      struct fesom_aux        *aux)
 {
-    const int N  = mesh->nod2D;
-    const int E  = mesh->elem2D;
+    const int N  = mesh->myDim_nod2D;
+    const int E  = mesh->myDim_elem2D;
     const int nl = mesh->nl;
     const real_t mix_coeff = (real_t)FESOM_PHASE1_MIX_COEFF_PP;
     const real_t K_bg      = (real_t)FESOM_PHASE1_K_VER;
@@ -149,8 +149,8 @@ void fesom_mo_convect(const struct fesom_mesh *mesh,
 {
     if (!FESOM_PHASE1_USE_INSTABMIX) return;
 
-    const int N  = mesh->nod2D;
-    const int E  = mesh->elem2D;
+    const int N  = mesh->myDim_nod2D;
+    const int E  = mesh->myDim_elem2D;
     const int nl = mesh->nl;
     const real_t imix_kv = (real_t)FESOM_PHASE1_INSTABMIX_KV;
 

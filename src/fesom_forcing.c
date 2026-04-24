@@ -7,8 +7,10 @@
 void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh)
 {
     memset(f, 0, sizeof(*f));
-    size_t n  = (size_t)mesh->nod2D;
-    size_t e2 = (size_t)mesh->elem2D * 2;
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    int E = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    size_t n  = (size_t)N;
+    size_t e2 = (size_t)E * 2;
 
     f->heat_flux        = calloc(n,      sizeof(real_t));
     f->water_flux       = calloc(n,      sizeof(real_t));

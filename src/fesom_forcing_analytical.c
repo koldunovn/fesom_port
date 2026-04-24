@@ -12,10 +12,10 @@ void fesom_forcing_set_analytical(const struct fesom_mesh *mesh,
                                   real_t Ly_factor)
 {
     /* Zero all forcing arrays first (idempotent). */
-    memset(forcing->heat_flux,        0, (size_t)mesh->nod2D * sizeof(real_t));
-    memset(forcing->water_flux,       0, (size_t)mesh->nod2D * sizeof(real_t));
-    memset(forcing->stress_node_surf, 0, (size_t)mesh->nod2D * 2 * sizeof(real_t));
-    memset(forcing->stress_surf,      0, (size_t)mesh->elem2D * 2 * sizeof(real_t));
+    memset(forcing->heat_flux,        0, (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * sizeof(real_t));
+    memset(forcing->water_flux,       0, (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * sizeof(real_t));
+    memset(forcing->stress_node_surf, 0, (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D) * 2 * sizeof(real_t));
+    memset(forcing->stress_surf,      0, (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D) * 2 * sizeof(real_t));
 
     const real_t inv_period = 2.0 / Ly_factor;   /* 2π / (Ly_factor * π) — see header */
 
@@ -23,7 +23,7 @@ void fesom_forcing_set_analytical(const struct fesom_mesh *mesh,
        centroid latitude. Use mesh->geo_coord_nod2D so the wind tracks the
        physical (un-rotated) latitude — otherwise a rotated mesh would
        produce a wind pattern that doesn't align with the equator. */
-    for (int e = 0; e < mesh->elem2D; ++e) {
+    for (int e = 0; e < (mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D); ++e) {
         int n0 = mesh->elem_nodes[3*e + 0];
         int n1 = mesh->elem_nodes[3*e + 1];
         int n2 = mesh->elem_nodes[3*e + 2];
@@ -38,7 +38,7 @@ void fesom_forcing_set_analytical(const struct fesom_mesh *mesh,
        over surrounding elements). impl_vert_visc reads stress_surf at
        elements directly; stress_node_surf is for code paths we haven't
        wired (sea ice, etc.). For Phase 2 keep both consistent. */
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    for (int n = 0; n < (mesh->myDim_nod2D + mesh->eDim_nod2D); ++n) {
         int o0 = mesh->nod_in_elem2D_offsets[n];
         int o1 = mesh->nod_in_elem2D_offsets[n + 1];
         real_t tot_a = 0.0, sx = 0.0, sy = 0.0;

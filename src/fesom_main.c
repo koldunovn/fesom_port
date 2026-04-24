@@ -296,7 +296,7 @@ int main(int argc, char **argv)
     /* Global checks: T should be exactly 10.0 in every valid layer, hbar should be 0. */
     {
         int t_bad = 0, s_bad = 0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             int nzmax = mesh.nlevels_nod2D[n] - 1;
             for (int nz = 0; nz < nzmax; ++nz) {
                 if (tracers.data[FESOM_TRACER_T].values[FESOM_NODE3D(n, nz, mesh.nl)] != 10.0) ++t_bad;
@@ -304,7 +304,7 @@ int main(int argc, char **argv)
             }
         }
         real_t hbar_max = 0.0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             real_t a = fabs(mesh.hbar[n]);
             if (a > hbar_max) hbar_max = a;
         }
@@ -315,7 +315,7 @@ int main(int argc, char **argv)
        (full-cell linfs → trivially equal; verify it nonetheless). */
     {
         real_t maxdiff = 0.0;
-        for (int e = 0; e < mesh.elem2D; ++e) {
+        for (int e = 0; e < mesh.myDim_elem2D; ++e) {
             int nzmax = mesh.nlevels[e] - 1;
             for (int nz = 0; nz < nzmax; ++nz) {
                 real_t hsum = 0.0;
@@ -332,6 +332,12 @@ int main(int argc, char **argv)
                (double)maxdiff);
     }
 
+    /* Phase 4 (MPI): standalone sanity blocks below were designed for 1-rank
+     * serial validation. On multi-rank they would require halo exchanges
+     * between every kernel call (only fesom_step does that) and the parallel
+     * CG (slice 30e). Each test is now gated on `mpi.npes == 1`; kernel
+     * allocations and calls outside the tests still run. */
+    int do_sanity = (mpi.npes == 1);
     /* Phase 1 step 4: JM-EOS + pressure_bv. */
     fesom_pressure_bv(&tracers, &mesh, &aux);
     /* Phase 1 step 5: PGF (linfs + full cells branch). */
@@ -340,9 +346,9 @@ int main(int argc, char **argv)
     /* PGF sanity: at constant T/S, hpressure has no horizontal variation, so
        pgf should be exactly 0 (modulo machine epsilon × the partition-of-unity
        residual we measured ~1e-20). Anything materially larger means a bug. */
-    {
+    if (do_sanity) {
         real_t pgmax = 0.0;
-        size_t total_e = (size_t)mesh.elem2D * (size_t)mesh.nl;
+        size_t total_e = (size_t)(mesh.myDim_elem2D + mesh.eDim_elem2D + mesh.eXDim_elem2D) * (size_t)mesh.nl;
         for (size_t i = 0; i < total_e; ++i) {
             real_t a = fabs(aux.pgf_x[i]);
             if (a > pgmax) pgmax = a;
@@ -358,9 +364,9 @@ int main(int argc, char **argv)
     fesom_ale_vert_vel_linfs(&mesh, &dyn);
 
     /* ALE sanity: with UV ≡ 0, w must be exactly 0. hnode_new must equal hnode. */
-    {
+    if (do_sanity) {
         real_t wmax = 0.0;
-        size_t total = (size_t)mesh.nod2D * (size_t)mesh.nl;
+        size_t total = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * (size_t)mesh.nl;
         for (size_t i = 0; i < total; ++i) {
             real_t a = fabs(dyn.w[i]);
             if (a > wmax) wmax = a;
@@ -377,17 +383,15 @@ int main(int argc, char **argv)
     fesom_ssh_stiff_alloc_and_build(&stiff, &mesh);
     fesom_ssh_preconditioner(&stiff, &mesh);
     fesom_solverinfo_alloc(&solver, &mesh);
+    solver.partit = &mpi;
 
-    /* Stiffness diagonal sanity — should mirror Fortran's "STIFF diag" debug
-       block in init_stiff_mat_ale (lines 1584-1599). All diagonals must be
-       positive (mass term + sum of -gradient² style off-diag couplings; the
-       MITgcm preconditioner only converges if so). */
-    {
+    /* Stiffness diagonal sanity. */
+    if (do_sanity) {
         int neg = 0;
         real_t dmin = stiff.values[stiff.rowptr[0]];
         real_t dmax = dmin;
         real_t mass_min = 1e30, mass_max = -1e30;
-        for (int row = 0; row < mesh.nod2D; ++row) {
+        for (int row = 0; row < mesh.myDim_nod2D; ++row) {
             real_t d = stiff.values[stiff.rowptr[row]];
             if (d < 0.0)  ++neg;
             if (d < dmin) dmin = d;
@@ -402,13 +406,11 @@ int main(int argc, char **argv)
                (double)mass_min, (double)mass_max);
     }
 
-    /* Symmetry check: matrix must be symmetric within machine epsilon for
-       CG to converge. For each (row, col) pair with row<col, find matching
-       (col, row) entry and compare. */
-    {
+    /* Symmetry check. */
+    if (do_sanity) {
         real_t asym_max = 0.0;
         int    asym_pairs = 0;
-        for (int row = 0; row < mesh.nod2D; ++row) {
+        for (int row = 0; row < mesh.myDim_nod2D; ++row) {
             for (int n = stiff.rowptr[row]; n < stiff.rowptr[row+1]; ++n) {
                 int col = stiff.colind[n];
                 if (col <= row) continue;
@@ -431,18 +433,18 @@ int main(int argc, char **argv)
                "missing-pairs = %d\n", (double)asym_max, asym_pairs);
     }
 
-    /* RHS=0 test: solve Ax=0, expect d_eta=0 in 0 iterations.
-       Currently UV=0 and ssh_rhs_old=0, so compute_ssh_rhs gives ssh_rhs=0. */
-    fesom_compute_ssh_rhs_linfs(&mesh, &dyn);
-    {
+    /* RHS=0 test (and the bump-RHS test below): need parallel CG on multi-rank
+     * which is slice 30e. Skip on multi-rank. */
+    if (do_sanity) {
+        fesom_compute_ssh_rhs_linfs(&mesh, &dyn);
         real_t rhs_max = 0.0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             real_t a = fabs(dyn.ssh_rhs[n]);
             if (a > rhs_max) rhs_max = a;
         }
         int iters = fesom_ssh_solve_cg(&stiff, &solver, &mesh, &dyn);
         real_t deta_max = 0.0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             real_t a = fabs(dyn.d_eta[n]);
             if (a > deta_max) deta_max = a;
         }
@@ -451,26 +453,23 @@ int main(int argc, char **argv)
                (double)rhs_max, iters, (double)deta_max);
     }
 
-    /* Bump-RHS test: inject a single non-zero on the RHS and solve.
-       Pick an interior node (rough proxy: max node id minus a quarter) and
-       set ssh_rhs to area*1.0 there. Should converge in O(10-50) iters and
-       give d_eta with the magnitude near 1/diagonal. */
-    {
-        int n_probe = mesh.nod2D / 2;
-        memset(dyn.ssh_rhs, 0, (size_t)mesh.nod2D * sizeof(real_t));
-        memset(dyn.d_eta,   0, (size_t)mesh.nod2D * sizeof(real_t));
+    /* Bump-RHS test. */
+    if (do_sanity) {
+        int n_probe = mesh.myDim_nod2D / 2;
+        memset(dyn.ssh_rhs, 0, (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * sizeof(real_t));
+        memset(dyn.d_eta,   0, (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * sizeof(real_t));
         real_t area_n = mesh.areasvol[FESOM_NODE3D(n_probe, 0, mesh.nl)];
         dyn.ssh_rhs[n_probe] = area_n;          /* unit-amplitude perturbation */
 
         int iters = fesom_ssh_solve_cg(&stiff, &solver, &mesh, &dyn);
         real_t deta_max = 0.0, deta_at_probe = dyn.d_eta[n_probe];
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             real_t a = fabs(dyn.d_eta[n]);
             if (a > deta_max) deta_max = a;
         }
         /* Verify residual: ‖rhs - A x‖ / ‖rhs‖ should be ≤ soltol */
-        real_t *Ax = malloc((size_t)mesh.nod2D * sizeof(real_t));
-        for (int row = 0; row < mesh.nod2D; ++row) {
+        real_t *Ax = malloc((size_t)mesh.myDim_nod2D * sizeof(real_t));
+        for (int row = 0; row < mesh.myDim_nod2D; ++row) {
             real_t s = 0;
             for (int j = stiff.rowptr[row]; j < stiff.rowptr[row+1]; ++j) {
                 s += stiff.values[j] * dyn.d_eta[stiff.colind[j]];
@@ -478,7 +477,7 @@ int main(int argc, char **argv)
             Ax[row] = s;
         }
         real_t res2 = 0, rhs2 = 0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             real_t r = dyn.ssh_rhs[n] - Ax[n];
             res2 += r * r;
             rhs2 += dyn.ssh_rhs[n] * dyn.ssh_rhs[n];
@@ -490,22 +489,17 @@ int main(int argc, char **argv)
                (double)sqrt(res2 / rhs2));
     }
 
-    /* Phase 1 step 8: momentum + rest-state preservation test (FRESH_START.md §20).
-       With T=const, S=const, η=0, UV=0, no wind, no bottom drag (UV=0 → C_d*|U|*U=0):
-         - compute_vel_rhs: AB history zero, no Coriolis (UV=0), no SSH grad, PGF≈0 (PoU)
-                            → uv_rhs ≈ 0
-         - impl_vert_visc:  no wind stress (Phase 1 forcing is zero), no bottom drag
-                            (UV=0), no advection (w_i=0), TDMA on zero RHS → uv_rhs ≈ 0
-         - compute_ssh_rhs: zero UV → zero divergence → ssh_rhs ≈ 0
-         - solve_ssh:       zero RHS → d_eta = 0 (exact short-circuit)
-         - update_vel:      no SSH grad, uv_rhs ≈ 0 → uv stays ≈ 0
-         - compute_hbar:    zero divergence → hbar stays 0
-       Everything must stay below machine epsilon for the literal port to be correct. */
+    /* Phase 1 step 8: momentum + rest-state preservation test.
+     * Skip on multi-rank — the kernels modify state; without the rest of
+     * the timestep machinery + halo exchanges, the resulting state is
+     * inconsistent and the next sanity test sees garbage. */
+    if (!do_sanity) goto skip_rest_state;
+
     fesom_compute_vel_rhs(&mesh, &aux, &dyn, /* is_first_step = */ 1);
     fesom_impl_vert_visc(&mesh, &aux, &forcing, &dyn);
     {
         real_t uvr_max = 0.0;
-        size_t total = (size_t)mesh.elem2D * (size_t)mesh.nl * 2;
+        size_t total = (size_t)(mesh.myDim_elem2D + mesh.eDim_elem2D + mesh.eXDim_elem2D) * (size_t)mesh.nl * 2;
         for (size_t i = 0; i < total; ++i) {
             real_t a = fabs(dyn.uv_rhs[i]);
             if (a > uvr_max) uvr_max = a;
@@ -517,7 +511,7 @@ int main(int argc, char **argv)
     int iters_rest = fesom_ssh_solve_cg(&stiff, &solver, &mesh, &dyn);
     {
         real_t deta_max = 0.0, ssh_max = 0.0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             if (fabs(dyn.d_eta[n])   > deta_max) deta_max = fabs(dyn.d_eta[n]);
             if (fabs(dyn.ssh_rhs[n]) > ssh_max)  ssh_max  = fabs(dyn.ssh_rhs[n]);
         }
@@ -529,13 +523,13 @@ int main(int argc, char **argv)
     fesom_compute_hbar(&mesh, &dyn);
     {
         real_t uv_max = 0.0;
-        size_t te = (size_t)mesh.elem2D * (size_t)mesh.nl * 2;
+        size_t te = (size_t)(mesh.myDim_elem2D + mesh.eDim_elem2D + mesh.eXDim_elem2D) * (size_t)mesh.nl * 2;
         for (size_t i = 0; i < te; ++i) {
             real_t a = fabs(dyn.uv[i]);
             if (a > uv_max) uv_max = a;
         }
         real_t hbar_max = 0.0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             real_t a = fabs(mesh.hbar[n]);
             if (a > hbar_max) hbar_max = a;
         }
@@ -543,11 +537,8 @@ int main(int argc, char **argv)
                "(both must be ≈ 0)\n", (double)uv_max, (double)hbar_max);
     }
 
-    /* Phase 1 step 11: PP mixing + convective adjustment.
-       Sequence: compute_vel_nodes (UV → UVnode), pp_mixing (Kv at nodes,
-       Av at elements), mo_convect (raise Kv/Av where N²<0).
-       With UV=0 and constant T/S: shear=0 → factor=0 → Kv = K_ver, Av = A_ver;
-       no convection (bvfreq=0 → no instabmix). */
+    /* Phase 1 step 11: PP mixing rest-state test. Same caveat — skipped
+     * for multi-rank since state needs halo-exchanges. */
     fesom_compute_vel_nodes(&mesh, &dyn);
     fesom_pp_mixing(&mesh, &dyn, &aux);
     fesom_mo_convect(&mesh, &aux);
@@ -555,7 +546,7 @@ int main(int argc, char **argv)
         real_t kv_min = 1e30, kv_max = -1e30;
         real_t av_min = 1e30, av_max = -1e30;
         int kv_off_bg = 0, av_off_bg = 0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             int nzmax = mesh.nlevels_nod2D[n] - 1;
             for (int nz = 1; nz < nzmax; ++nz) {
                 real_t k = aux.Kv[FESOM_NODE3D(n, nz, mesh.nl)];
@@ -564,7 +555,7 @@ int main(int argc, char **argv)
                 if (fabs(k - FESOM_PHASE1_K_VER) > 1e-15) ++kv_off_bg;
             }
         }
-        for (int e = 0; e < mesh.elem2D; ++e) {
+        for (int e = 0; e < mesh.myDim_elem2D; ++e) {
             int nzmax = mesh.nlevels[e] - 1;
             for (int nz = 1; nz < nzmax; ++nz) {
                 real_t a = aux.Av[FESOM_ELEM3D(e, nz, mesh.nl)];
@@ -579,17 +570,18 @@ int main(int argc, char **argv)
                kv_off_bg, av_off_bg);
     }
 
-    /* Phase 1 step 10: simple upwind tracer advection.
-       With UV=0, W=0, constant T=10, S=35 IC: every flux is zero, so the
-       tracer field must be unchanged bit-for-bit. */
+skip_rest_state:
+    /* tra_sc allocation runs unconditionally — needed by timestep loop. */
     fesom_tracer_adv_scratch tra_sc;
     fesom_tracer_adv_init(&tra_sc, &mesh);
-    fesom_tracer_advect_one(&tra_sc, FESOM_TRACER_T, &mesh, &dyn, &tracers);
-    fesom_tracer_advect_one(&tra_sc, FESOM_TRACER_S, &mesh, &dyn, &tracers);
-    {
+    if (do_sanity) {
+        fesom_tracer_advect_one(&tra_sc, FESOM_TRACER_T, &mesh, &dyn, &tracers);
+        fesom_tracer_advect_one(&tra_sc, FESOM_TRACER_S, &mesh, &dyn, &tracers);
+    }
+    if (do_sanity) {
         int t_off = 0, s_off = 0;
         real_t t_dev = 0.0, s_dev = 0.0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             int nzmax = mesh.nlevels_nod2D[n] - 1;
             for (int nz = 0; nz < nzmax; ++nz) {
                 size_t k = FESOM_NODE3D(n, nz, mesh.nl);
@@ -605,14 +597,9 @@ int main(int argc, char **argv)
                "T deviations = %d (max %.3e),  S deviations = %d (max %.3e)\n",
                t_off, (double)t_dev, s_off, (double)s_dev);
     }
-    /* Slice 14a sanity: compute fct_LO from the upwind fluxes and verify it
-       equals the input T (=10) at machine ε. The upwind fluxes from the call
-       above are still in tra_sc.adv_flux_*; re-run upwind on the current T and
-       check the LO solution. */
-    {
-        /* Reset T to exact 10/35 in case the previous advect_one introduced
-           round-off. (The fct_LO test is about the LO formula itself.) */
-        for (int n = 0; n < mesh.nod2D; ++n) {
+    /* Slice 14a sanity: fct_LO test. */
+    if (do_sanity) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             int nzmax = mesh.nlevels_nod2D[n] - 1;
             for (int nz = 0; nz < nzmax; ++nz) {
                 size_t k = FESOM_NODE3D(n, nz, mesh.nl);
@@ -624,7 +611,7 @@ int main(int argc, char **argv)
         fesom_tracer_compute_fct_LO(&tra_sc, FESOM_TRACER_T, &mesh, &tracers);
         real_t lo_dev = 0.0;
         int    lo_off = 0;
-        for (int n = 0; n < mesh.nod2D; ++n) {
+        for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             int nzmax = mesh.nlevels_nod2D[n] - 1;
             for (int nz = 0; nz < nzmax; ++nz) {
                 real_t d = fabs(tra_sc.fct_LO[FESOM_NODE3D(n, nz, mesh.nl)] - 10.0);
@@ -673,7 +660,7 @@ int main(int argc, char **argv)
         printf("[fesom_port] SSS restoring: %s\n", sss_path);
         {
             real_t rmn = forcing.runoff[0], rmx = rmn;
-            for (int k = 1; k < mesh.nod2D; ++k) {
+            for (int k = 1; k < mesh.myDim_nod2D + mesh.eDim_nod2D; ++k) {
                 if (forcing.runoff[k] < rmn) rmn = forcing.runoff[k];
                 if (forcing.runoff[k] > rmx) rmx = forcing.runoff[k];
             }
@@ -693,13 +680,13 @@ int main(int argc, char **argv)
         fesom_compute_vel_nodes(&mesh, &dyn);
         fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing);
         real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
-        for (int e = 1; e < mesh.elem2D; ++e) {
+        for (int e = 1; e < mesh.myDim_elem2D; ++e) {
             real_t t = forcing.stress_surf[2*e + 0];
             if (t < tx_min) tx_min = t;
             if (t > tx_max) tx_max = t;
         }
         real_t qmin = forcing.heat_flux[0], qmax = qmin;
-        for (int n = 1; n < mesh.nod2D; ++n) {
+        for (int n = 1; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             real_t q = forcing.heat_flux[n];
             if (q < qmin) qmin = q;
             if (q > qmax) qmax = q;
@@ -715,7 +702,7 @@ int main(int argc, char **argv)
                                      /*tau0     = */ 0.05,    /* N/m² */
                                      /*Ly_factor= */ 2.0);    /* one cosine over 90° */
         real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
-        for (int e = 1; e < mesh.elem2D; ++e) {
+        for (int e = 1; e < mesh.myDim_elem2D; ++e) {
             real_t t = forcing.stress_surf[2*e + 0];
             if (t < tx_min) tx_min = t;
             if (t > tx_max) tx_max = t;
@@ -728,7 +715,8 @@ int main(int argc, char **argv)
     {
         fesom_step_ctx ctx = { .stiff = &stiff,
                                .solver = &solver,
-                               .tra_sc = &tra_sc };
+                               .tra_sc = &tra_sc,
+                               .partit = &mpi };
         const int nsteps      = (nsteps_cli > 0)     ? nsteps_cli     : 500;
         const int snap_every  = (snap_every_cli > 0) ? snap_every_cli : 25;
         const int print_every = snap_every;
@@ -779,23 +767,23 @@ int main(int argc, char **argv)
                                        &tracers, &forcing);
             if (n == 1 || n % print_every == 0 || n == nsteps) {
                 real_t uv_max = 0.0, eta_max = 0.0, w_max = 0.0;
-                size_t te = (size_t)mesh.elem2D * (size_t)mesh.nl * 2;
+                size_t te = (size_t)(mesh.myDim_elem2D + mesh.eDim_elem2D + mesh.eXDim_elem2D) * (size_t)mesh.nl * 2;
                 for (size_t i = 0; i < te; ++i) {
                     real_t a = fabs(dyn.uv[i]);
                     if (a > uv_max) uv_max = a;
                 }
-                for (int k = 0; k < mesh.nod2D; ++k) {
+                for (int k = 0; k < mesh.myDim_nod2D; ++k) {
                     real_t a = fabs(dyn.eta_n[k]);
                     if (a > eta_max) eta_max = a;
                 }
-                size_t tn = (size_t)mesh.nod2D * (size_t)mesh.nl;
+                size_t tn = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * (size_t)mesh.nl;
                 for (size_t i = 0; i < tn; ++i) {
                     real_t a = fabs(dyn.w[i]);
                     if (a > w_max) w_max = a;
                 }
                 real_t T_min = 1e30, T_max = -1e30;
                 real_t S_min = 1e30, S_max = -1e30;
-                for (int k = 0; k < mesh.nod2D; ++k) {
+                for (int k = 0; k < mesh.myDim_nod2D; ++k) {
                     int nzmax = mesh.nlevels_nod2D[k] - 1;
                     for (int nz = 0; nz < nzmax; ++nz) {
                         real_t T = tracers.data[FESOM_TRACER_T].values[FESOM_NODE3D(k, nz, mesh.nl)];
@@ -855,7 +843,7 @@ int main(int argc, char **argv)
         real_t rmin = aux.density_m_rho0[0], rmax = rmin;
         real_t pmin = aux.hpressure[0],      pmax = pmin;
         real_t bmin = aux.bvfreq[0],         bmax = bmin;
-        size_t total = (size_t)mesh.nod2D * (size_t)mesh.nl;
+        size_t total = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * (size_t)mesh.nl;
         for (size_t i = 1; i < total; ++i) {
             if (aux.density_m_rho0[i] < rmin) rmin = aux.density_m_rho0[i];
             if (aux.density_m_rho0[i] > rmax) rmax = aux.density_m_rho0[i];

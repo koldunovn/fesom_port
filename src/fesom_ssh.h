@@ -36,6 +36,8 @@ typedef struct fesom_ssh_stiff {
 /*
  * CG solver workspace. Mirror of t_solverinfo (MOD_DYN.F90:13-25).
  */
+struct fesom_partit;
+
 typedef struct fesom_solverinfo {
     int     maxiter;
     real_t  soltol;
@@ -44,6 +46,7 @@ typedef struct fesom_solverinfo {
     real_t *pp;
     real_t *App;
     int     last_iters;     /* iters used by the last solve (diagnostic) */
+    struct fesom_partit *partit;  /* set after fesom_solverinfo_alloc() — used by parallel CG */
 } fesom_solverinfo;
 
 /*--- Lifecycle -------------------------------------------------------------*/

@@ -85,7 +85,7 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
     const real_t *T = tracers->data[FESOM_TRACER_T].values;
     const real_t *S = tracers->data[FESOM_TRACER_S].values;
 
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         int nzmin = mesh->ulevels_nod2D[n] - 1;     /* 1-based → 0-based */
         int nzmax = mesh->nlevels_nod2D[n] - 1;     /* exclusive bound; layers 0..nzmax-1 */
 
@@ -163,7 +163,10 @@ void fesom_pressure_force_linfs_fullcell(const struct fesom_mesh *mesh,
     const int nl       = mesh->nl;
     const real_t inv_r = 1.0 / (real_t)FESOM_DENSITY_0;
 
-    for (int e = 0; e < mesh->elem2D; ++e) {
+    /* Interior elements only — gradient_sca and elem_nodes are sized
+     * myDim_elem2D in the MPI port. The PGF on halo elements arrives via
+     * the elem_area exchange path inside fesom_step's per-step exchanges. */
+    for (int e = 0; e < mesh->myDim_elem2D; ++e) {
         int nzmin = mesh->ulevels[e]   - 1;     /* 1-based → 0-based */
         int nzmax = mesh->nlevels[e]   - 1;     /* exclusive bound  */
         int n0 = mesh->elem_nodes[3*e + 0];

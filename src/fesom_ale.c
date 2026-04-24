@@ -10,20 +10,23 @@
 void fesom_ale_thickness_linfs(struct fesom_mesh *mesh)
 {
     /* hnode_new = hnode in linfs. Memcpy is the literal port. */
-    size_t bytes = (size_t)mesh->nod2D * (size_t)mesh->nl * sizeof(real_t);
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    size_t bytes = (size_t)N * (size_t)mesh->nl * sizeof(real_t);
     memcpy(mesh->hnode_new, mesh->hnode, bytes);
 }
 
 void fesom_ale_commit_thickness(struct fesom_mesh *mesh)
 {
     const int nl = mesh->nl;
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    /* helem on interior elements; halo elements get values via the
+     * exchange in fesom_step. */
+    int Ei = mesh->myDim_elem2D;
     /* hnode := hnode_new */
-    size_t bytes = (size_t)mesh->nod2D * (size_t)nl * sizeof(real_t);
+    size_t bytes = (size_t)N * (size_t)nl * sizeof(real_t);
     memcpy(mesh->hnode, mesh->hnode_new, bytes);
 
-    /* helem := mean of 3 vertex hnode (geometry.rst formula). For linfs this
-       is identical between successive timesteps but we recompute literally. */
-    for (int e = 0; e < mesh->elem2D; ++e) {
+    for (int e = 0; e < Ei; ++e) {
         int nzmin = mesh->ulevels[e]   - 1;
         int nzmax = mesh->nlevels[e]   - 1;
         int n0 = mesh->elem_nodes[3*e + 0];
@@ -76,11 +79,15 @@ void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
 {
     const int nl = mesh->nl;
 
-    /* Step 1: zero w everywhere */
-    memset(dyn->w, 0, (size_t)mesh->nod2D * (size_t)nl * sizeof(real_t));
+    /* Step 1: zero w everywhere (all local nodes) */
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    int EG = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    memset(dyn->w, 0, (size_t)N * (size_t)nl * sizeof(real_t));
 
-    /* Step 2: edge-flux accumulation */
-    for (int ed = 0; ed < mesh->edge2D; ++ed) {
+    /* Step 2: edge-flux accumulation. Loop over all local edges (interior +
+     * halo) — Fortran does the same; the halo-side contributions get fixed
+     * up by exchange_nod(w) afterward. */
+    for (int ed = 0; ed < EG; ++ed) {
         int n1 = mesh->edges[2*ed + 0];
         int n2 = mesh->edges[2*ed + 1];
         int el1 = mesh->edge_tri[2*ed + 0];
@@ -119,8 +126,9 @@ void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
         }
     }
 
-    /* Step 3: cumulative sum bottom → top */
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    /* Step 3: cumulative sum bottom → top (all local nodes; halo nodes will
+     * be re-synced by exchange_nod(w) in the timestep wrapper) */
+    for (int n = 0; n < N; ++n) {
         int nzmin = mesh->ulevels_nod2D[n] - 1;
         int nzmax = mesh->nlevels_nod2D[n] - 1;
         for (int nz = nzmax - 1; nz >= nzmin; --nz) {
@@ -130,7 +138,7 @@ void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
     }
 
     /* Step 4: divide by area(nz, n) → m/s */
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    for (int n = 0; n < N; ++n) {
         int nzmin = mesh->ulevels_nod2D[n] - 1;
         int nzmax = mesh->nlevels_nod2D[n] - 1;
         for (int nz = nzmin; nz < nzmax; ++nz) {
@@ -159,7 +167,7 @@ void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
 void fesom_ale_compute_cflz(const struct fesom_mesh *mesh,
                             struct fesom_dyn        *dyn)
 {
-    const int N  = mesh->nod2D;
+    const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int nl = mesh->nl;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
 
@@ -197,7 +205,7 @@ void fesom_ale_compute_cflz(const struct fesom_mesh *mesh,
 void fesom_ale_compute_wvel_split(const struct fesom_mesh *mesh,
                                   struct fesom_dyn        *dyn)
 {
-    const int N  = mesh->nod2D;
+    const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int nl = mesh->nl;
     const real_t maxcfl     = (real_t)FESOM_PHASE1_WSPLIT_MAXCFL;
     const real_t use_wsplit = (real_t)FESOM_PHASE1_USE_WSPLIT;

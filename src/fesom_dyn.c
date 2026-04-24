@@ -10,9 +10,13 @@ void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
     memset(d, 0, sizeof(*d));
     d->AB_order = FESOM_PHASE1_AB_ORDER;
 
-    size_t e_nl_2 = (size_t)mesh->elem2D * (size_t)mesh->nl * 2;
-    size_t n_nl   = (size_t)mesh->nod2D  * (size_t)mesh->nl;
-    size_t n      = (size_t)mesh->nod2D;
+    /* MPI: size for full local extent (myDim+eDim for nodes,
+     * myDim+eDim+eXDim for elements). */
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    int E = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    size_t e_nl_2 = (size_t)E * (size_t)mesh->nl * 2;
+    size_t n_nl   = (size_t)N * (size_t)mesh->nl;
+    size_t n      = (size_t)N;
 
     d->uv          = calloc(e_nl_2, sizeof(real_t));
     d->uv_rhs      = calloc(e_nl_2, sizeof(real_t));
@@ -22,7 +26,7 @@ void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
     d->w_i         = calloc(n_nl,   sizeof(real_t));
     d->cfl_z       = calloc(n_nl,   sizeof(real_t));
     d->uvnode      = calloc(n_nl * 2, sizeof(real_t));
-    size_t e_nl = (size_t)mesh->elem2D * (size_t)mesh->nl;
+    size_t e_nl = (size_t)E * (size_t)mesh->nl;
     d->u_b = calloc(e_nl, sizeof(real_t));
     d->v_b = calloc(e_nl, sizeof(real_t));
     d->u_c = calloc(n_nl, sizeof(real_t));

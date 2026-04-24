@@ -37,10 +37,13 @@ struct fesom_forcing;
  *   - GM/Redi bolus velocity update
  *   - update_stiff_mat_ale (linfs branch skips it)
  */
+struct fesom_partit;
+
 typedef struct fesom_step_ctx {
     fesom_ssh_stiff           *stiff;
     fesom_solverinfo          *solver;
     fesom_tracer_adv_scratch  *tra_sc;
+    struct fesom_partit       *partit;     /* needed for halo exchanges */
 } fesom_step_ctx;
 
 /*

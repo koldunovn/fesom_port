@@ -19,8 +19,12 @@ void fesom_ic_thickness(const struct fesom_mesh *mesh_in,
 
     const int nl = mesh->nl;
 
-    /* hnode at nodes — full-cell linfs */
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    /* hnode at nodes — full-cell linfs. Loop over interior + halo so every
+     * local node has thickness defined (each rank computes the same value
+     * from its zbar / nlevels independently — no exchange needed). */
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    int E = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    for (int n = 0; n < N; ++n) {
         int nzmin = mesh->ulevels_nod2D[n] - 1;   /* 1-based → 0-based */
         int nzmax = mesh->nlevels_nod2D[n] - 1;   /* exclusive bound  */
         for (int nz = nzmin; nz < nzmax; ++nz) {
@@ -35,7 +39,7 @@ void fesom_ic_thickness(const struct fesom_mesh *mesh_in,
        (1/3) Σ hnode formula since all 3 vertices have the same column thickness
        in the layers where the cell exists. We use the literal Fortran form
        (zbar diff) to mirror init_thickness_ale lines 849-852. */
-    for (int e = 0; e < mesh->elem2D; ++e) {
+    for (int e = 0; e < E; ++e) {
         int nzmin = mesh->ulevels[e] - 1;
         int nzmax = mesh->nlevels[e] - 1;
         for (int nz = nzmin; nz < nzmax; ++nz) {
@@ -44,13 +48,15 @@ void fesom_ic_thickness(const struct fesom_mesh *mesh_in,
         }
     }
 
-    /* hbar / hbar_old / ssh_rhs_old / eta_n / d_eta — at rest */
-    memset(mesh->hbar,        0, (size_t)mesh->nod2D * sizeof(real_t));
-    memset(mesh->hbar_old,    0, (size_t)mesh->nod2D * sizeof(real_t));
-    memset(dyn->eta_n,        0, (size_t)mesh->nod2D * sizeof(real_t));
-    memset(dyn->d_eta,        0, (size_t)mesh->nod2D * sizeof(real_t));
-    memset(dyn->ssh_rhs,      0, (size_t)mesh->nod2D * sizeof(real_t));
-    memset(dyn->ssh_rhs_old,  0, (size_t)mesh->nod2D * sizeof(real_t));
+    /* hbar / hbar_old / ssh_rhs_old / eta_n / d_eta — at rest. Sized
+     * myDim+eDim per rank (allocations updated in fesom_dyn_alloc /
+     * fesom_mesh_alloc_state). */
+    memset(mesh->hbar,        0, (size_t)N * sizeof(real_t));
+    memset(mesh->hbar_old,    0, (size_t)N * sizeof(real_t));
+    memset(dyn->eta_n,        0, (size_t)N * sizeof(real_t));
+    memset(dyn->d_eta,        0, (size_t)N * sizeof(real_t));
+    memset(dyn->ssh_rhs,      0, (size_t)N * sizeof(real_t));
+    memset(dyn->ssh_rhs_old,  0, (size_t)N * sizeof(real_t));
 }
 
 void fesom_ic_tracers_constant(const struct fesom_mesh *mesh,
@@ -61,7 +67,8 @@ void fesom_ic_tracers_constant(const struct fesom_mesh *mesh,
     real_t *T = tracers->data[FESOM_TRACER_T].values;
     real_t *S = tracers->data[FESOM_TRACER_S].values;
 
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    for (int n = 0; n < N; ++n) {
         int nzmin = mesh->ulevels_nod2D[n] - 1;
         int nzmax = mesh->nlevels_nod2D[n] - 1;
         for (int nz = nzmin; nz < nzmax; ++nz) {
@@ -88,7 +95,8 @@ void fesom_ic_tracer_T_blob(const struct fesom_mesh *mesh,
     const real_t inv_sig2_h = 1.0 / (sigma_deg * sigma_deg);
     const real_t inv_sig2_z = 1.0 / (sigma_z   * sigma_z);
 
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    for (int n = 0; n < N; ++n) {
         real_t lon = (real_t)mesh->geo_coord_nod2D[2*n + 0] / FESOM_RAD;
         real_t lat = (real_t)mesh->geo_coord_nod2D[2*n + 1] / FESOM_RAD;
         /* Wrap node lon similarly */

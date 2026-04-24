@@ -222,8 +222,8 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
                         const struct fesom_tracers *tracers,
                         struct fesom_forcing       *forcing)
 {
-    int N = mesh->nod2D;
-    int E = mesh->elem2D;
+    int N = mesh->myDim_nod2D;
+    int E = mesh->myDim_elem2D;
 
     /* For each node compute cd/ce/ch then qsr/qns/emp. */
     for (int n = 0; n < N; ++n) {

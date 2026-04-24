@@ -66,8 +66,11 @@ void fesom_io_write_snapshot(const char                  *path,
                              const struct fesom_tracers  *tracers,
                              const struct fesom_aux      *aux)
 {
-    const int nod2D  = mesh->nod2D;
-    const int elem2D = mesh->elem2D;
+    /* For now: each rank writes its OWN local interior to the NetCDF.
+     * For multi-rank this means N files (one per rank) with non-global
+     * indexing. Slice 30g will replace this with gather-to-rank-0. */
+    const int nod2D  = mesh->myDim_nod2D;
+    const int elem2D = mesh->myDim_elem2D;
     const int nl     = mesh->nl;
     const int n_lay  = nl - 1;
 

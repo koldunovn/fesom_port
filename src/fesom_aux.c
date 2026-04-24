@@ -7,8 +7,10 @@
 void fesom_aux_alloc(fesom_aux *a, const struct fesom_mesh *mesh)
 {
     memset(a, 0, sizeof(*a));
-    size_t n_nl = (size_t)mesh->nod2D  * (size_t)mesh->nl;
-    size_t e_nl = (size_t)mesh->elem2D * (size_t)mesh->nl;
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    int E = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    size_t n_nl = (size_t)N * (size_t)mesh->nl;
+    size_t e_nl = (size_t)E * (size_t)mesh->nl;
 
     a->density_m_rho0 = calloc(n_nl, sizeof(real_t));
     a->hpressure      = calloc(n_nl, sizeof(real_t));

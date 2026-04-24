@@ -303,7 +303,7 @@ void fesom_sss_runoff_init(fesom_sss_runoff       *sr,
                                 /*do_onvert=*/1,
                                 mesh);
         /* Kg/s/m² → m/s (Fortran line 1281) */
-        for (int n = 0; n < mesh->nod2D; ++n) {
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             forcing->runoff[n] = forcing->runoff[n] / 1000.0;
         }
     }
@@ -344,7 +344,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
      * Replicating the Fortran ICEPACK formula (line 378):
      *     water_flux(n) = -(fresh_wa_flux*inv_rhowat) - runoff(n)
      * means subtracting runoff locally so river mouths gain freshwater. */
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         forcing->water_flux[n] -= forcing->runoff[n];
     }
 
@@ -352,7 +352,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
      * subtract global mean to enforce zero net salt flux. */
     if (sr->use_virt_salt) {
         real_t rsss = sr->ref_sss;
-        for (int n = 0; n < mesh->nod2D; ++n) {
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             if (sr->ref_sss_local) {
                 int ul = mesh->ulevels_nod2D[n] - 1;
                 rsss = tracers->data[FESOM_TRACER_S].values[FESOM_NODE3D(n, ul, mesh->nl)];
@@ -360,38 +360,38 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
             forcing->virtual_salt[n] = rsss * forcing->water_flux[n];
         }
         real_t net = integrate_nod_2D(forcing->virtual_salt, mesh) / mesh->ocean_area;
-        for (int n = 0; n < mesh->nod2D; ++n) {
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             if (mesh->ulevels_nod2D[n] > 1) continue;     /* cavity */
             forcing->virtual_salt[n] -= net;
         }
     } else {
-        for (int n = 0; n < mesh->nod2D; ++n) forcing->virtual_salt[n] = 0.0;
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) forcing->virtual_salt[n] = 0.0;
     }
 
     /* Fortran lines 498-524 — relax_salt = surf_relax_S * (Ssurf - S_top),
      * then subtract global mean. Only meaningful where we actually loaded SSS. */
     if (sr->sss_path[0] && sr->sss_month_loaded > 0) {
-        for (int n = 0; n < mesh->nod2D; ++n) {
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             int ul = mesh->ulevels_nod2D[n] - 1;
             real_t Stop = tracers->data[FESOM_TRACER_S].values[FESOM_NODE3D(n, ul, mesh->nl)];
             forcing->relax_salt[n] = sr->surf_relax_S * (forcing->Ssurf[n] - Stop);
         }
         real_t net = integrate_nod_2D(forcing->relax_salt, mesh) / mesh->ocean_area;
-        for (int n = 0; n < mesh->nod2D; ++n) {
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             if (mesh->ulevels_nod2D[n] > 1) continue;     /* cavity */
             forcing->relax_salt[n] -= net;
         }
     } else {
-        for (int n = 0; n < mesh->nod2D; ++n) forcing->relax_salt[n] = 0.0;
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) forcing->relax_salt[n] = 0.0;
     }
 
     /* Fortran lines 544-563 — assemble local 'flux' = E + P + S + R, then
      * subtract its global mean from water_flux to enforce zero net mass.
      * (Without sea ice: a_ice_old = 0 → snow factor (1-a_ice_old)=1.) */
     {
-        real_t *flux = malloc((size_t)mesh->nod2D * sizeof(real_t));
+        real_t *flux = malloc((size_t)mesh->myDim_nod2D * sizeof(real_t));
         FESOM_CHECK(flux, "sss_runoff_step: flux alloc");
-        for (int n = 0; n < mesh->nod2D; ++n) {
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             /* evaporation: in Fortran ice_thermo this is set to the bulk
              * evap (positive up). We store this inside water_flux via bulk
              * already, so the equivalent decomposition for our state is:
@@ -402,7 +402,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
             flux[n] = forcing->water_flux[n] + forcing->runoff[n];
         }
         real_t net = integrate_nod_2D(flux, mesh) / mesh->ocean_area;
-        for (int n = 0; n < mesh->nod2D; ++n) {
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             forcing->water_flux[n] += net;
         }
         free(flux);

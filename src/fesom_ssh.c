@@ -22,8 +22,12 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <mpi.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "fesom_halo.h"
+#include "fesom_partit.h"
 
 /*===========================================================================
  * Stiffness matrix: build CSR + fill values
@@ -32,15 +36,23 @@
 void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
                                      const struct fesom_mesh *mesh)
 {
-    const int N = mesh->nod2D;
-    const int E = mesh->edge2D;
+    /* Stiffness matrix has myDim rows (interior nodes only); column indices
+     * reach into the halo (myDim..myDim+eDim) for SpMV. Mirrors Fortran
+     * where ssh_stiff is sized myDim_nod2D. */
+    const int N         = mesh->myDim_nod2D;
+    const int N_alloc   = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int E         = mesh->myDim_edge2D + mesh->eDim_edge2D;
     memset(S, 0, sizeof(*S));
     S->dim = N;
+    (void)N_alloc;
 
     /* ---- 1. Per-row neighbour count and local-id list ---------------------
      * Fortran lines 1435-1463. n_pos(1, n) = n is set first so the diagonal
      * is the first entry in each row's neighbour list. */
-    int *n_num = calloc((size_t)N, sizeof(int));
+    /* n_num: counter per row in pass 1, and node-id → sparse-position lookup
+     * in pass 2 (used as a sparse hash, so it must be sized for ALL local
+     * nodes — interior + halo — since column indices reach into halo). */
+    int *n_num = calloc((size_t)N_alloc, sizeof(int));
     int  max_neighbors = 12;     /* Fortran uses 12 — same hard cap */
     int *n_pos = calloc((size_t)N * (size_t)max_neighbors, sizeof(int));
     FESOM_CHECK(n_num && n_pos, "ssh_stiff: out of memory (neighbour build)");
@@ -52,12 +64,18 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
     for (int ed = 0; ed < E; ++ed) {
         int n1 = mesh->edges[2*ed + 0];
         int n2 = mesh->edges[2*ed + 1];
-        FESOM_CHECK(n_num[n1] < max_neighbors,
-                    "ssh_stiff: node %d has > %d neighbours", n1, max_neighbors);
-        FESOM_CHECK(n_num[n2] < max_neighbors,
-                    "ssh_stiff: node %d has > %d neighbours", n2, max_neighbors);
-        n_pos[n1 * max_neighbors + n_num[n1]++] = n2;
-        n_pos[n2 * max_neighbors + n_num[n2]++] = n1;
+        /* Only add edges where the row endpoint is INTERIOR (the matrix has
+         * no halo-row entries); the column endpoint can be interior or halo. */
+        if (n1 < N) {
+            FESOM_CHECK(n_num[n1] < max_neighbors,
+                        "ssh_stiff: node %d has > %d neighbours", n1, max_neighbors);
+            n_pos[n1 * max_neighbors + n_num[n1]++] = n2;
+        }
+        if (n2 < N) {
+            FESOM_CHECK(n_num[n2] < max_neighbors,
+                        "ssh_stiff: node %d has > %d neighbours", n2, max_neighbors);
+            n_pos[n2 * max_neighbors + n_num[n2]++] = n1;
+        }
     }
 
     /* ---- 2. Build CSR rowptr (lines 1467-1477) ---------------------------- */
@@ -96,15 +114,17 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
     const real_t factor = (real_t)FESOM_G * (real_t)FESOM_PHASE1_DT
                         * (real_t)FESOM_PHASE1_ALPHA * (real_t)FESOM_PHASE1_THETA;
 
-    /* n_num is reused as a "node-id → sparse-position-in-current-row" lookup,
-     * exactly mirroring the Fortran approach (line 1507 zeros it). */
-    for (int n = 0; n < N; ++n) n_num[n] = 0;
+    /* n_num is reused as a "node-id → sparse-position-in-current-row" lookup
+     * (Fortran line 1507 zeros it). Must reset across the FULL local extent. */
+    for (int n = 0; n < N_alloc; ++n) n_num[n] = 0;
 
     for (int ed = 0; ed < E; ++ed) {
         int el[2] = { mesh->edge_tri[2*ed + 0], mesh->edge_tri[2*ed + 1] };
         int e_n[2] = { mesh->edges[2*ed + 0], mesh->edges[2*ed + 1] };
         for (int i = 0; i < 2; ++i) {
-            if (el[i] < 0) continue;
+            /* Only INTERIOR elements (myDim_elem2D) have elem_nodes valid;
+             * skip halo elements since we have no connectivity for them. */
+            if (el[i] < 0 || el[i] >= mesh->myDim_elem2D) continue;
             int en[3] = { mesh->elem_nodes[3*el[i] + 0],
                           mesh->elem_nodes[3*el[i] + 1],
                           mesh->elem_nodes[3*el[i] + 2] };
@@ -130,12 +150,13 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
                 fy[0] = -fy[0]; fy[1] = -fy[1]; fy[2] = -fy[2];
             }
 
-            /* Row = edges(1, ed) → C e_n[0] */
-            {
+            /* Row = edges(1, ed) → C e_n[0]. Only build matrix entries for
+             * interior rows; halo-row contributions are summed on the
+             * owning rank instead. */
+            if (e_n[0] < N) {
                 int row = e_n[0];
                 int rstart = S->rowptr[row];
                 int rend   = S->rowptr[row + 1];
-                /* Build n_num map for this row's neighbours — Fortran lines 1545-1551 */
                 for (int n = rstart; n < rend; ++n) {
                     n_num[S->colind[n]] = n;
                 }
@@ -144,8 +165,7 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
                     S->values[npos[k]] += fy[k] * factor;
                 }
             }
-            /* Row = edges(2, ed) → C e_n[1], note SUBTRACT (Fortran line 1568) */
-            {
+            if (e_n[1] < N) {
                 int row = e_n[1];
                 int rstart = S->rowptr[row];
                 int rend   = S->rowptr[row + 1];
@@ -190,7 +210,7 @@ void fesom_ssh_stiff_free(fesom_ssh_stiff *S)
 
 void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh)
 {
-    const int N = mesh->nod2D;
+    const int N = mesh->myDim_nod2D;
 
     /* Collect diagonal values; in MPI we'd halo-exchange. In serial, all
        neighbour columns are local rows so diag_values is just the same array. */
@@ -226,14 +246,16 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh)
 void fesom_compute_ssh_rhs_linfs(const struct fesom_mesh *mesh,
                                  struct fesom_dyn        *dyn)
 {
-    const int N  = mesh->nod2D;
-    const int E  = mesh->edge2D;
+    const int N  = mesh->myDim_nod2D;
+    const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int E  = mesh->myDim_edge2D + mesh->eDim_edge2D;
     const int nl = mesh->nl;
     const real_t alpha = (real_t)FESOM_PHASE1_ALPHA;
     const real_t one_minus_alpha = 1.0 - alpha;
+    (void)N;
 
-    /* Zero ssh_rhs (Fortran lines 1854-1856). */
-    memset(dyn->ssh_rhs, 0, (size_t)N * sizeof(real_t));
+    /* Zero ssh_rhs over full local extent. */
+    memset(dyn->ssh_rhs, 0, (size_t)N_alloc * sizeof(real_t));
 
     /* Edge loop — accumulate fluxes into ssh_rhs (lines 1862-1919). */
     for (int ed = 0; ed < E; ++ed) {
@@ -294,7 +316,9 @@ void fesom_solverinfo_alloc(fesom_solverinfo       *si,
     memset(si, 0, sizeof(*si));
     si->maxiter = FESOM_PHASE1_MAXITER;
     si->soltol  = FESOM_PHASE1_SOLTOL;
-    size_t n = (size_t)mesh->nod2D;
+    /* Allocate for full local extent — matrix-vector reads pp at column
+     * indices that may reach into halo. */
+    size_t n = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D);
     si->rr  = calloc(n, sizeof(real_t));
     si->zz  = calloc(n, sizeof(real_t));
     si->pp  = calloc(n, sizeof(real_t));
@@ -341,7 +365,14 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
                        const struct fesom_mesh *mesh,
                        struct fesom_dyn        *dyn)
 {
-    const int    N      = mesh->nod2D;
+    /* Slice 30e — full parallel CG. Each iteration exchanges pp before SpMV,
+     * rr after residual update; reductions use MPI_Allreduce. */
+    /* Helper macro: exchange a nod2D field. */
+    #define EXCH(field) fesom_halo_exchange((field), FESOM_HALO_NOD2D, 1, 1, si->partit)
+    /* All-reduce sum of a single double in-place. */
+    #define ALLREDUCE_SUM(var) MPI_Allreduce(MPI_IN_PLACE, &(var), 1, MPI_DOUBLE, MPI_SUM, si->partit->MPI_COMM_FESOM)
+
+    const int    N      = mesh->myDim_nod2D;
     const real_t soltol = si->soltol;
     real_t      *X      = dyn->d_eta;
     const real_t *rhs   = dyn->ssh_rhs;
@@ -350,68 +381,75 @@ int fesom_ssh_solve_cg(const fesom_ssh_stiff *S,
     real_t       *pp    = si->pp;
     real_t       *App   = si->App;
 
-    /* Initial ‖rhs‖² and tolerance (lines 142-154).
-     * rtol = soltol * sqrt(‖rhs‖² / nod2D) — convergence: ‖rr‖ < rtol*sqrt(nod2D). */
+    /* Initial ‖rhs‖² and tolerance (Fortran solver.F90:142-154). */
     real_t s_old = 0.0;
     for (int row = 0; row < N; ++row) s_old += rhs[row] * rhs[row];
-    real_t rtol = soltol * sqrt(s_old / (real_t)N);
+    if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_old);
+    /* The global problem size for the rtol normalisation must be the GLOBAL
+     * row count, not local (Fortran uses nod2D). */
+    int N_global = (si->partit && si->partit->npes > 1) ? mesh->nod2D : N;
+    real_t rtol = soltol * sqrt(s_old / (real_t)N_global);
 
-    /* Degenerate case: zero RHS → zero solution, no iterations. */
     if (s_old == 0.0) {
         memset(X, 0, (size_t)N * sizeof(real_t));
         si->last_iters = 0;
         return 0;
     }
 
-    /* r0 = rhs - A * X (lines 158-164) */
+    /* r0 = rhs - A * X. Need X halo exchanged before SpMV. */
+    if (si->partit && si->partit->npes > 1) EXCH(X);
     csr_matvec(S, S->values, X, rr, N);
     for (int row = 0; row < N; ++row) rr[row] = rhs[row] - rr[row];
-    /* (serial: skip exchange_nod(rr)) */
+    if (si->partit && si->partit->npes > 1) EXCH(rr);
 
-    /* z0 = M^{-1} r0; pp = z0 (lines 170-175) */
+    /* z0 = M^{-1} r0; pp = z0 */
     csr_matvec(S, S->pr_values, rr, zz, N);
     memcpy(pp, zz, (size_t)N * sizeof(real_t));
 
-    /* s_old = r0·z0 (lines 180-189) */
+    /* s_old = r0·z0 */
     s_old = 0.0;
     for (int row = 0; row < N; ++row) s_old += rr[row] * zz[row];
+    if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_old);
 
     int iter = 0;
     for (iter = 1; iter <= si->maxiter; ++iter) {
-        /* App = A * pp (lines 200-205); serial: skip exchange_nod(pp). */
+        /* App = A * pp; need pp halo exchanged. */
+        if (si->partit && si->partit->npes > 1) EXCH(pp);
         csr_matvec(S, S->values, pp, App, N);
 
-        /* α = s_old / (pp·App) (lines 210-222) */
+        /* α = s_old / (pp·App) */
         real_t s_aux = 0.0;
         for (int row = 0; row < N; ++row) s_aux += pp[row] * App[row];
+        if (si->partit && si->partit->npes > 1) ALLREDUCE_SUM(s_aux);
         real_t al = s_old / s_aux;
 
-        /* X += α pp;  rr -= α App (lines 226-231) */
         for (int row = 0; row < N; ++row) {
             X [row] += al * pp [row];
             rr[row] -= al * App[row];
         }
-        /* (serial: skip exchange_nod(rr)) */
+        if (si->partit && si->partit->npes > 1) EXCH(rr);
 
-        /* z = M^{-1} r (lines 237-241) */
         csr_matvec(S, S->pr_values, rr, zz, N);
 
-        /* sprod[0] = r·z;  sprod[1] = r·r (lines 245-258) */
         real_t sp0 = 0.0, sp1 = 0.0;
         for (int row = 0; row < N; ++row) {
             sp0 += rr[row] * zz[row];
             sp1 += rr[row] * rr[row];
         }
+        if (si->partit && si->partit->npes > 1) {
+            ALLREDUCE_SUM(sp0);
+            ALLREDUCE_SUM(sp1);
+        }
 
-        /* Convergence test (line 264): sqrt(sp1 / nod2D) < rtol */
-        if (sqrt(sp1 / (real_t)N) < rtol) break;
+        if (sqrt(sp1 / (real_t)N_global) < rtol) break;
 
-        /* β = sp0 / s_old; pp = z + β pp (lines 267-275) */
         real_t be = sp0 / s_old;
         s_old = sp0;
         for (int row = 0; row < N; ++row) pp[row] = zz[row] + be * pp[row];
     }
-    /* (serial: skip exchange_nod(X) at end) */
+    if (si->partit && si->partit->npes > 1) EXCH(X);
     si->last_iters = iter;
+    #undef EXCH
+    #undef ALLREDUCE_SUM
     return iter;
 }

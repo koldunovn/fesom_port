@@ -9,7 +9,8 @@ void fesom_tracers_alloc(fesom_tracers *t, const struct fesom_mesh *mesh)
     memset(t, 0, sizeof(*t));
     t->num_tracers = FESOM_NUM_TRACERS;
 
-    size_t n_nl = (size_t)mesh->nod2D * (size_t)mesh->nl;
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    size_t n_nl = (size_t)N * (size_t)mesh->nl;
     for (int k = 0; k < FESOM_NUM_TRACERS; ++k) {
         t->data[k].values    = calloc(n_nl, sizeof(real_t));
         t->data[k].valuesAB  = calloc(n_nl, sizeof(real_t));

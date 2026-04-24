@@ -47,8 +47,11 @@ void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
                            const struct fesom_mesh  *mesh)
 {
     memset(sc, 0, sizeof(*sc));
-    size_t e_full = (size_t)mesh->edge2D * (size_t)mesh->nl;   /* edge × nl (stride nl, last slot unused) */
-    size_t n_full = (size_t)mesh->nod2D  * (size_t)mesh->nl;
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    int E = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    int EG = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    size_t e_full = (size_t)EG * (size_t)mesh->nl;
+    size_t n_full = (size_t)N  * (size_t)mesh->nl;
 
     sc->adv_flux_hor     = calloc(e_full,         sizeof(real_t));
     sc->adv_flux_ver     = calloc(n_full,         sizeof(real_t));
@@ -59,7 +62,7 @@ void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
     sc->fct_ttf_max      = calloc(n_full,         sizeof(real_t));
     sc->fct_plus         = calloc(n_full,         sizeof(real_t));
     sc->fct_minus        = calloc(n_full,         sizeof(real_t));
-    sc->fct_aux          = calloc((size_t)mesh->elem2D * (size_t)mesh->nl * 2,
+    sc->fct_aux          = calloc((size_t)E * (size_t)mesh->nl * 2,
                                   sizeof(real_t));
     FESOM_CHECK(sc->adv_flux_hor && sc->adv_flux_ver
              && sc->del_ttf_advhoriz && sc->del_ttf_advvert
@@ -100,8 +103,8 @@ void fesom_tracer_compute_fct_LO(fesom_tracer_adv_scratch *sc,
                                  const struct fesom_mesh  *mesh,
                                  const struct fesom_tracers *tracers)
 {
-    const int N    = mesh->nod2D;
-    const int E    = mesh->edge2D;
+    const int N    = mesh->myDim_nod2D;
+    const int E    = mesh->myDim_edge2D + mesh->eDim_edge2D;
     const int nl   = mesh->nl;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
     const real_t *T = tracers->data[tr_idx].values;
@@ -161,7 +164,7 @@ static void init_tracers_AB_one(int tr_idx,
                                 struct fesom_tracers    *tracers,
                                 fesom_tracer_adv_scratch *sc)
 {
-    const int N  = mesh->nod2D;
+    const int N  = mesh->myDim_nod2D;
     const int nl = mesh->nl;
     const real_t eps = 1.0e-9;
     const real_t c_old = -(0.5 + eps);
@@ -195,7 +198,7 @@ static void adv_tra_hor_upw1(const struct fesom_mesh *mesh,
                              const real_t            *ttf,
                              real_t                  *flux)
 {
-    const int E    = mesh->edge2D;
+    const int E    = mesh->myDim_edge2D + mesh->eDim_edge2D;
     const int nl   = mesh->nl;
 
     /* Zero the flux array (l_init_zero=.true.) — lines 91-107 */
@@ -312,7 +315,7 @@ static void adv_tra_hor_central(const struct fesom_mesh *mesh,
                                 int                      init_zero,
                                 real_t                  *flux)
 {
-    const int E    = mesh->edge2D;
+    const int E    = mesh->myDim_edge2D + mesh->eDim_edge2D;
     const int nl   = mesh->nl;
 
     if (init_zero) {
@@ -433,7 +436,7 @@ static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
                              int                      init_zero,
                              real_t                  *flux)
 {
-    const int N  = mesh->nod2D;
+    const int N  = mesh->myDim_nod2D;
     const int nl = mesh->nl;
     /* Tracer advection uses the EXPLICIT part of w (w_e). When wsplit is
        not triggered (CFL ≤ maxcfl) compute_Wvel_split sets w_e = w. */
@@ -511,7 +514,7 @@ static void adv_tra_ver_upw1(const struct fesom_mesh *mesh,
                              const real_t            *ttf,
                              real_t                  *flux)
 {
-    const int N  = mesh->nod2D;
+    const int N  = mesh->myDim_nod2D;
     const int nl = mesh->nl;
     /* Use explicit-W (w_e). compute_Wvel_split sets w_e = w when CFL ≤ maxcfl. */
     const real_t *W = dyn->w_e;
@@ -551,8 +554,8 @@ static void flux2dtracer_upwind(const struct fesom_mesh *mesh,
                                 real_t                  *dttf_h,
                                 real_t                  *dttf_v)
 {
-    const int N  = mesh->nod2D;
-    const int E  = mesh->edge2D;
+    const int N  = mesh->myDim_nod2D;
+    const int E  = mesh->myDim_edge2D + mesh->eDim_edge2D;
     const int nl = mesh->nl;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
 
@@ -601,7 +604,7 @@ static void ale_reconstruct(const struct fesom_mesh *mesh,
                             real_t                  *T,
                             real_t                  *del_ttf)
 {
-    const int N  = mesh->nod2D;
+    const int N  = mesh->myDim_nod2D;
     const int nl = mesh->nl;
 
     for (int n = 0; n < N; ++n) {
@@ -662,9 +665,9 @@ static void oce_tra_adv_fct(fesom_tracer_adv_scratch *sc,
                             real_t                   *adf_h,
                             real_t                   *adf_v)
 {
-    const int N    = mesh->nod2D;
-    const int E    = mesh->elem2D;
-    const int Eedg = mesh->edge2D;
+    const int N    = mesh->myDim_nod2D;
+    const int E    = mesh->myDim_elem2D;
+    const int Eedg = mesh->myDim_edge2D + mesh->eDim_edge2D;
     const int nl   = mesh->nl;
     const real_t dt        = (real_t)FESOM_PHASE1_DT;
     const real_t flux_eps  = 1e-16;
@@ -937,8 +940,8 @@ static void flux2dtracer_fct(const struct fesom_mesh *mesh,
                              real_t                  *dttf_h,
                              real_t                  *dttf_v)
 {
-    const int N  = mesh->nod2D;
-    const int E  = mesh->edge2D;
+    const int N  = mesh->myDim_nod2D;
+    const int E  = mesh->myDim_edge2D + mesh->eDim_edge2D;
     const int nl = mesh->nl;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
 
@@ -993,7 +996,7 @@ void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
                                  const struct fesom_dyn   *dyn,
                                  struct fesom_tracers     *tracers)
 {
-    const int N    = mesh->nod2D;
+    const int N    = mesh->myDim_nod2D;
     const int nl   = mesh->nl;
 
     /* 1. init_tracers_AB (zero del_ttf*, fill valuesAB, save valuesold) */
@@ -1044,7 +1047,7 @@ void fesom_tracer_advect_one(fesom_tracer_adv_scratch *sc,
                              const struct fesom_dyn   *dyn,
                              struct fesom_tracers     *tracers)
 {
-    const int N    = mesh->nod2D;
+    const int N    = mesh->myDim_nod2D;
     const int nl   = mesh->nl;
 
     /* 1. init_tracers_AB */

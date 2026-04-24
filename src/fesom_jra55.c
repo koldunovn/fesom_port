@@ -293,7 +293,7 @@ static void nc_read_time_grid(fesom_jra55 *jra,
 static void build_bilin_indices(fesom_jra55_field *flf,
                                 const struct fesom_mesh *mesh)
 {
-    int N = mesh->nod2D;
+    int N = mesh->myDim_nod2D;
     if (!flf->bilin_i) {
         flf->bilin_i = malloc((size_t)N * sizeof(int));
         flf->bilin_j = malloc((size_t)N * sizeof(int));
@@ -453,7 +453,7 @@ static void getcoeffld(fesom_jra55_field *flf,
     }
 
     /* Bilinear horiz interp + build coef_a/coef_b — Fortran 939-997. */
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         int i = flf->bilin_i[n];
         int j = flf->bilin_j[n];
         int ip1 = i + 1;
@@ -538,7 +538,7 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
         "uas", "vas", "huss", "rsds", "rlds", "tas", "prra", "prsn"
     };
 
-    int N = mesh->nod2D;
+    int N = mesh->myDim_nod2D;
     for (int f = 0; f < FESOM_JRA_NFLD; ++f) {
         fesom_jra55_field *flf = &jra->fld[f];
         strncpy(flf->path_prefix, prefixes[f], sizeof(flf->path_prefix) - 1);
@@ -652,7 +652,7 @@ void fesom_jra55_step(fesom_jra55 *jra,
     }
 
     /* data_timeinterp + distribution to physics arrays. */
-    int N = mesh->nod2D;
+    int N = mesh->myDim_nod2D;
     for (int n = 0; n < N; ++n) {
         real_t a_xw  = jra->fld[FESOM_JRA_XWIND].coef_a[n];
         real_t b_xw  = jra->fld[FESOM_JRA_XWIND].coef_b[n];

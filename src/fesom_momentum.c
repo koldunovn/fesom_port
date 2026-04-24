@@ -49,7 +49,7 @@ void fesom_compute_vel_rhs(const struct fesom_mesh *mesh,
                            struct fesom_dyn        *dyn,
                            int                      is_first_step)
 {
-    const int E       = mesh->elem2D;
+    const int E       = mesh->myDim_elem2D;     /* interior only — halo gets exchange */
     const int nl      = mesh->nl;
     const real_t g    = (real_t)FESOM_G;
     const real_t dt   = (real_t)FESOM_PHASE1_DT;
@@ -145,7 +145,7 @@ void fesom_impl_vert_visc(const struct fesom_mesh    *mesh,
                           const struct fesom_forcing *forcing,
                           struct fesom_dyn           *dyn)
 {
-    const int E      = mesh->elem2D;
+    const int E      = mesh->myDim_elem2D;
     const int nl     = mesh->nl;
     const real_t dt  = (real_t)FESOM_PHASE1_DT;
     const real_t Cd  = (real_t)FESOM_PHASE1_C_D;
@@ -326,7 +326,7 @@ void fesom_impl_vert_visc(const struct fesom_mesh    *mesh,
 void fesom_update_vel(const struct fesom_mesh *mesh,
                       struct fesom_dyn        *dyn)
 {
-    const int E = mesh->elem2D;
+    const int E = mesh->myDim_elem2D;       /* interior — exchange UV after */
     const int nl = mesh->nl;
     const real_t coef = -(real_t)FESOM_G * (real_t)FESOM_PHASE1_THETA
                        * (real_t)FESOM_PHASE1_DT;
@@ -360,20 +360,25 @@ void fesom_update_vel(const struct fesom_mesh *mesh,
 void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
                             struct fesom_dyn        *dyn)
 {
-    const int E    = mesh->elem2D;
-    const int Eedg = mesh->edge2D;
+    const int E    = mesh->myDim_elem2D;
+    const int Eedg = mesh->myDim_edge2D + mesh->eDim_edge2D;
     const int nl   = mesh->nl;
+    /* Allocations sized for full local extent — touch only the elements we
+     * compute on (exchange is done in fesom_step after this returns). */
+    int E_alloc = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    (void)E_alloc; (void)N_alloc;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
     const real_t g0 = (real_t)FESOM_PHASE1_VISC_GAMMA0;
     const real_t g1 = (real_t)FESOM_PHASE1_VISC_GAMMA1;
     const real_t g2 = (real_t)FESOM_PHASE1_VISC_GAMMA2;
     const real_t bsret = (real_t)FESOM_PHASE1_VISC_EASYBSRETURN;
 
-    /* Zero the four work arrays (lines 316-322). */
-    memset(dyn->u_b, 0, (size_t)E * (size_t)nl * sizeof(real_t));
-    memset(dyn->v_b, 0, (size_t)E * (size_t)nl * sizeof(real_t));
-    memset(dyn->u_c, 0, (size_t)mesh->nod2D * (size_t)nl * sizeof(real_t));
-    memset(dyn->v_c, 0, (size_t)mesh->nod2D * (size_t)nl * sizeof(real_t));
+    /* Zero the four work arrays (lines 316-322) over full local extent. */
+    memset(dyn->u_b, 0, (size_t)E_alloc * (size_t)nl * sizeof(real_t));
+    memset(dyn->v_b, 0, (size_t)E_alloc * (size_t)nl * sizeof(real_t));
+    memset(dyn->u_c, 0, (size_t)N_alloc * (size_t)nl * sizeof(real_t));
+    memset(dyn->v_c, 0, (size_t)N_alloc * (size_t)nl * sizeof(real_t));
 
     /* Edge loop — accumulate per-element viscous updates (lines 327-361).
        Skip boundary edges (Fortran: myList_edge2D > edge2D_in; serial: el2 < 0). */
@@ -412,8 +417,9 @@ void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
     }
 
     /* Smooth U_b → U_c at nodes (area-weighted mean of surrounding cells).
+       Interior nodes only; halo gets values via exchange afterward.
        Same neighbour traversal as compute_vel_nodes. */
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         int nu1 = mesh->ulevels_nod2D[n] - 1;
         int nl1 = mesh->nlevels_nod2D[n] - 1;
         int o0 = mesh->nod_in_elem2D_offsets[n];
@@ -475,13 +481,14 @@ void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
 void fesom_compute_hbar(const struct fesom_mesh *mesh,
                         struct fesom_dyn        *dyn)
 {
-    const int N  = mesh->nod2D;
-    const int E  = mesh->edge2D;
+    const int N  = mesh->myDim_nod2D;
+    const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int E  = mesh->myDim_edge2D + mesh->eDim_edge2D;
     const int nl = mesh->nl;
     const real_t dt = (real_t)FESOM_PHASE1_DT;
 
-    /* Reset ssh_rhs_old (lines 2005-2009) */
-    memset(dyn->ssh_rhs_old, 0, (size_t)N * sizeof(real_t));
+    /* Reset ssh_rhs_old (lines 2005-2009) over full local extent */
+    memset(dyn->ssh_rhs_old, 0, (size_t)N_alloc * sizeof(real_t));
 
     /* Edge loop — accumulate transport divergence (lines 2014-2065) */
     for (int ed = 0; ed < E; ++ed) {

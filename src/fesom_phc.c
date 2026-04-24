@@ -158,7 +158,7 @@ static void load_one_variable(int ncid, const char *varname,
     }
     free(tmp);
 
-    const int N  = mesh->nod2D;
+    const int N  = mesh->myDim_nod2D;
     const int nl = mesh->nl;
 
     /* Initialise out to dummy (Fortran line 342). */
@@ -256,7 +256,7 @@ static void load_one_variable(int ncid, const char *varname,
  * then vertical fill from the layer above. */
 static void extrap_nod3D(const struct fesom_mesh *mesh, real_t *arr)
 {
-    const int N  = mesh->nod2D;
+    const int N  = mesh->myDim_nod2D;
     const int nl = mesh->nl;
 
     real_t *work = malloc((size_t)N * sizeof(real_t));
@@ -374,11 +374,11 @@ void fesom_phc_load_ic(const char                  *path,
     nc_lon[Nlon - 1] += 360.0;
 
     /* nc_ic3d_ini: per-node bilin_indx (Fortran 281-299, non-cavity branch). */
-    int *bilin_i = malloc((size_t)mesh->nod2D * sizeof(int));
-    int *bilin_j = malloc((size_t)mesh->nod2D * sizeof(int));
+    int *bilin_i = malloc((size_t)mesh->myDim_nod2D * sizeof(int));
+    int *bilin_j = malloc((size_t)mesh->myDim_nod2D * sizeof(int));
     FESOM_CHECK(bilin_i && bilin_j, "phc: oom (bilin)");
 
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         double x = (double)mesh->geo_coord_nod2D[2*n + 0] / FESOM_RAD;
         double y = (double)mesh->geo_coord_nod2D[2*n + 1] / FESOM_RAD;
         if (x < 0.0)   x += 360.0;
@@ -424,7 +424,7 @@ void fesom_phc_load_ic(const char                  *path,
 
     /* Final cleanup (Fortran do_ic3d lines 536-557): replace remaining dummy
        with 0, zero-out below nlevels_nod2D, K → C if T > 100. */
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         int nl1 = mesh->nlevels_nod2D[n] - 1;
         for (int nz = 0; nz < mesh->nl; ++nz) {
             size_t k = FESOM_NODE3D(n, nz, mesh->nl);
@@ -442,7 +442,7 @@ void fesom_phc_load_ic(const char                  *path,
        Pressure approximated as |Z| in metres (≈ decibars). */
     if (t_insitu) {
         printf("[fesom_phc] converting in-situ → potential temperature\n");
-        for (int n = 0; n < mesh->nod2D; ++n) {
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
             int nzmin = mesh->ulevels_nod2D[n] - 1;
             int nzmax = mesh->nlevels_nod2D[n] - 1;
             for (int nz = nzmin; nz < nzmax; ++nz) {
@@ -463,7 +463,7 @@ void fesom_phc_load_ic(const char                  *path,
 
     /* Stats summary (Fortran lines 586-590). */
     real_t Tmin = T[0], Tmax = T[0], Smin = S[0], Smax = S[0];
-    for (int n = 0; n < mesh->nod2D; ++n) {
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         int nzmax = mesh->nlevels_nod2D[n] - 1;
         for (int nz = 0; nz < nzmax; ++nz) {
             size_t k = FESOM_NODE3D(n, nz, mesh->nl);
