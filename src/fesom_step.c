@@ -14,6 +14,7 @@
 #include "fesom_pp.h"
 #include "fesom_ssh.h"
 #include "fesom_tracer_adv.h"
+#include "fesom_tracer_diff.h"
 #include "fesom_tracers.h"
 
 int fesom_timestep(int                          step_n,
@@ -80,6 +81,11 @@ int fesom_timestep(int                          step_n,
     /* 12. tracer advection: T then S, FCT (central HO + QR4C vert + Zalesak). */
     fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);
     fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
+
+    /* 12b. implicit vertical diffusion of tracers + surface heat/water flux BC.
+       Mirrors Fortran solve_tracers_ale → diff_tracers_ale → diff_ver_part_impl_ale
+       (oce_ale_tracer.F90:482), called once per tracer after FCT advection. */
+    fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers);
 
     /* 13. commit thickness: hnode := hnode_new, helem from vertex mean.  */
     fesom_ale_commit_thickness(mesh);

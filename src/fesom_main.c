@@ -1,5 +1,6 @@
 #include "fesom_ale.h"
 #include "fesom_aux.h"
+#include "fesom_bulk.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_eos.h"
@@ -7,6 +8,7 @@
 #include "fesom_forcing_analytical.h"
 #include "fesom_ic.h"
 #include "fesom_io.h"
+#include "fesom_jra55.h"
 #include "fesom_mesh.h"
 #include "fesom_momentum.h"
 #include "fesom_mpi.h"
@@ -203,8 +205,9 @@ static void print_sanity(const fesom_mesh *m)
 int main(int argc, char **argv)
 {
     if (argc < 2) {
-        fprintf(stderr, "usage: %s <mesh_dir> [output_dir] [dt_seconds] [nsteps] [snap_every] [phc_nc_path]\n",
+        fprintf(stderr, "usage: %s <mesh_dir> [output_dir] [dt_seconds] [nsteps] [snap_every] [phc_nc_path] [jra55_year]\n",
                 argv[0]);
+        fprintf(stderr, "  jra55_year > 0 → use JRA55-do daily forcing for that year (replaces analytical wind)\n");
         return 2;
     }
     const char *mesh_dir = argv[1];
@@ -213,9 +216,11 @@ int main(int argc, char **argv)
     int nsteps_cli     = (argc >= 5) ? atoi(argv[4]) : 0;
     int snap_every_cli = (argc >= 6) ? atoi(argv[5]) : 0;
     const char *phc_path = (argc >= 7 && argv[6][0] != '\0') ? argv[6] : NULL;
+    int jra55_year = (argc >= 8) ? atoi(argv[7]) : 0;  /* 0 disables JRA55 */
     if (out_dir) printf("[fesom_port] snapshots → %s/snap_NNNNNN.nc\n", out_dir);
     printf("[fesom_port] dt = %.1f s\n", (double)fesom_phase1_dt);
     if (phc_path) printf("[fesom_port] PHC IC source: %s\n", phc_path);
+    if (jra55_year > 0) printf("[fesom_port] JRA55-do forcing year: %d\n", jra55_year);
 
     fesom_mpi mpi;
     fesom_mpi_init(&mpi, argc, argv);
@@ -631,13 +636,48 @@ int main(int argc, char **argv)
                                /*amp_C=*/      5.0);
     }
 
-    /* Phase 2 step 17: analytical wind forcing (Slice A — constant zonal
-       cosine pattern, no thermal). Should drive an Ekman drift on top of
-       the rest state from IC. */
-    fesom_forcing_set_analytical(&mesh, &forcing,
-                                 /*tau0     = */ 0.05,    /* N/m² */
-                                 /*Ly_factor= */ 2.0);    /* one cosine over 90° */
-    {
+    /* Phase 3 step 24: JRA55-do daily forcing.
+       If jra55_year > 0, init JRA55 reader + bulk formulae; the timestep loop
+       below calls fesom_jra55_step + fesom_bulk_compute every step.
+       Otherwise fall back to Phase 2 analytical wind. */
+    fesom_jra55 jra; int use_jra = 0;
+    if (jra55_year > 0) {
+        fesom_jra55_init(&jra, &mesh);
+        fesom_jra55_open_year(&jra, &mesh, jra55_year);
+        use_jra = 1;
+        printf("[fesom_port] JRA55 init: 8 fields opened for year %d, "
+               "Nlon=%d Nlat=%d Ntime=%d  cal=%s\n",
+               jra55_year,
+               jra.fld[0].Nlon, jra.fld[0].Nlat, jra.fld[0].Ntime,
+               jra.fld[0].calendar);
+        /* Compute the very-first surface state for this set of bulk inputs
+           so the first timestep sees forcing immediately. uvnode is zero at
+           IC (UV=0); T_oc from initial T field. */
+        fesom_jra55_step(&jra, &mesh, jra55_year, /*daynew=*/1, /*timenew=*/0.0);
+        fesom_compute_vel_nodes(&mesh, &dyn);
+        fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing);
+        real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
+        for (int e = 1; e < mesh.elem2D; ++e) {
+            real_t t = forcing.stress_surf[2*e + 0];
+            if (t < tx_min) tx_min = t;
+            if (t > tx_max) tx_max = t;
+        }
+        real_t qmin = forcing.heat_flux[0], qmax = qmin;
+        for (int n = 1; n < mesh.nod2D; ++n) {
+            real_t q = forcing.heat_flux[n];
+            if (q < qmin) qmin = q;
+            if (q > qmax) qmax = q;
+        }
+        printf("[fesom_port] JRA55 first state: stress_surf_x ∈ [%+.3e, %+.3e] N/m²  "
+               "heat_flux ∈ [%+.2e, %+.2e] W/m²\n",
+               (double)tx_min, (double)tx_max, (double)qmin, (double)qmax);
+    } else {
+        /* Phase 2 step 17: analytical wind forcing (Slice A — constant zonal
+           cosine pattern, no thermal). Should drive an Ekman drift on top of
+           the rest state from IC. */
+        fesom_forcing_set_analytical(&mesh, &forcing,
+                                     /*tau0     = */ 0.05,    /* N/m² */
+                                     /*Ly_factor= */ 2.0);    /* one cosine over 90° */
         real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
         for (int e = 1; e < mesh.elem2D; ++e) {
             real_t t = forcing.stress_surf[2*e + 0];
@@ -667,6 +707,16 @@ int main(int argc, char **argv)
         printf("  step    iters    max|uv|       max|eta|      max|w|        "
                "min(T)    max(T)    min(S)    max(S)\n");
         for (int n = 1; n <= nsteps; ++n) {
+            if (use_jra) {
+                /* daynew = day-of-year (1-based). With dt fixed and starting
+                   at day 1, second 0: time = (n-1)*dt seconds from year start.
+                   daynew = floor(t/86400) + 1 ; timenew = t - (daynew-1)*86400. */
+                double t_sec = (double)(n - 1) * (double)FESOM_PHASE1_DT;
+                int    daynew  = (int)floor(t_sec / 86400.0) + 1;
+                double timenew = t_sec - (daynew - 1) * 86400.0;
+                fesom_jra55_step(&jra, &mesh, jra55_year, daynew, (real_t)timenew);
+                fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing);
+            }
             int iters = fesom_timestep(n, &ctx, &mesh, &aux, &dyn,
                                        &tracers, &forcing);
             if (n == 1 || n % print_every == 0 || n == nsteps) {
@@ -761,6 +811,7 @@ int main(int argc, char **argv)
                (double)bmin, (double)bmax);
     }
 
+    if (use_jra) fesom_jra55_free(&jra);
     fesom_forcing_free(&forcing);
     fesom_aux_free    (&aux);
     fesom_tracers_free(&tracers);
