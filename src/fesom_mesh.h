@@ -19,8 +19,9 @@ typedef struct fesom_mesh {
     int edge2D;       /* total edges on this rank                */
     int nl;           /* max number of vertical levels           */
 
-    int myDim_nod2D, eDim_nod2D;
-    int myDim_elem2D, eDim_elem2D;
+    int myDim_nod2D,  eDim_nod2D;
+    int myDim_elem2D, eDim_elem2D, eXDim_elem2D;
+    int myDim_edge2D, eDim_edge2D;
 
     /* horizontal topology — coordinates in ROTATED RADIANS after read */
     real_t *coord_nod2D;     /* [nod2D * 2]   (lon, lat) rotated radians   */
@@ -87,10 +88,16 @@ typedef struct fesom_mesh {
 void fesom_mesh_init(fesom_mesh *m);
 void fesom_mesh_free(fesom_mesh *m);
 
-/* Phase 1 reader. Slice 1: nod2d.out + elem2d.out. */
-void fesom_mesh_read(fesom_mesh *m, const char *mesh_dir);
+/* Parallel mesh reader. Rank 0 reads global files, broadcasts to all ranks;
+ * each rank then extracts its slice using partit->myList_* indices. After
+ * this call, all per-rank arrays are sized to local extent (see size table
+ * in the .c file). For npes==1 the reader behaves bit-identically to the
+ * pre-MPI serial path. */
+struct fesom_partit;
+void fesom_mesh_read(fesom_mesh *m, const char *mesh_dir,
+                     struct fesom_partit *partit);
 
-void fesom_mesh_compute_metrics(fesom_mesh *m);
+void fesom_mesh_compute_metrics(fesom_mesh *m, struct fesom_partit *partit);
 
 /* Allocate time-evolving mesh state (hnode, hnode_new, helem, hbar, hbar_old).
    Counts must already be set (call after fesom_mesh_read). All zeros. */

@@ -78,23 +78,28 @@ static void print_sanity(const fesom_mesh *m)
                m->edge_tri[2*eg + 0], m->edge_tri[2*eg + 1]);
     }
 
-    /* §20 sanity */
+    /* §20 sanity — local extents (myDim+eDim for nodes, myDim only for elem
+     * connectivity since halo elements don't carry elem_nodes). */
+    int N_loc  = m->myDim_nod2D  + m->eDim_nod2D;
+    int Ei_loc = m->myDim_elem2D;                                /* elem_nodes range */
+    int EG_loc = m->myDim_edge2D + m->eDim_edge2D;
     int oob_e = 0, oob_t = 0, edge_boundaries = 0;
     int nlmin = m->nlevels_nod2D[0], nlmax = nlmin;
-    for (int e = 0; e < m->elem2D; ++e) {
+    for (int e = 0; e < Ei_loc; ++e) {
         for (int k = 0; k < 3; ++k) {
             int v = m->elem_nodes[3*e + k];
-            if (v < 0 || v >= m->nod2D) ++oob_e;
+            if (v < 0 || v >= N_loc) ++oob_e;
         }
     }
-    for (int i = 0; i < m->edge2D; ++i) {
+    int E_loc = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
+    for (int i = 0; i < EG_loc; ++i) {
         for (int k = 0; k < 2; ++k) {
             int v = m->edge_tri[2*i + k];
             if (v == -1) ++edge_boundaries;
-            else if (v < -1 || v >= m->elem2D) ++oob_t;
+            else if (v < -1 || v >= E_loc) ++oob_t;
         }
     }
-    for (int i = 1; i < m->nod2D; ++i) {
+    for (int i = 1; i < N_loc; ++i) {
         if (m->nlevels_nod2D[i] < nlmin) nlmin = m->nlevels_nod2D[i];
         if (m->nlevels_nod2D[i] > nlmax) nlmax = m->nlevels_nod2D[i];
     }
@@ -104,10 +109,9 @@ static void print_sanity(const fesom_mesh *m)
     printf("[fesom_port] sanity: nlevels_nod2D min=%d  max=%d  (nl=%d)\n",
            nlmin, nlmax, m->nl);
 
-    /* K_v⁻ check */
     if (m->nlevels_nod2D_min) {
         int kvmin_min = m->nlevels_nod2D_min[0], kvmin_max = kvmin_min;
-        for (int i = 1; i < m->nod2D; ++i) {
+        for (int i = 1; i < N_loc; ++i) {
             int v = m->nlevels_nod2D_min[i];
             if (v < kvmin_min) kvmin_min = v;
             if (v > kvmin_max) kvmin_max = v;
@@ -116,35 +120,33 @@ static void print_sanity(const fesom_mesh *m)
                kvmin_min, kvmin_max);
     }
 
-    /* elem_area diagnostics — should be in m² and physical magnitude */
-    if (m->elem_area) {
+    /* elem_area: range over INTERIOR elements only (halo got 0 then
+     * exchange — but only if multi-rank; for 1-rank, halo doesn't exist). */
+    if (m->elem_area && Ei_loc > 0) {
         real_t amin = m->elem_area[0], amax = amin, asum = 0.0;
         int eminidx = 0, emaxidx = 0;
-        for (int e = 0; e < m->elem2D; ++e) {
+        for (int e = 0; e < Ei_loc; ++e) {
             real_t a = m->elem_area[e];
             asum += a;
             if (a < amin) { amin = a; eminidx = e; }
             if (a > amax) { amax = a; emaxidx = e; }
         }
-        real_t amean = asum / (real_t)m->elem2D;
+        real_t amean = asum / (real_t)Ei_loc;
         printf("[fesom_port] elem_area (m²): min=%.4e (elem %d)  max=%.4e (elem %d)  mean=%.4e\n",
                (double)amin, eminidx, (double)amax, emaxidx, (double)amean);
-        /* Equivalent resolution sqrt(2 * area) */
         printf("[fesom_port] equiv resolution: min=%.2f km  max=%.2f km  mean=%.2f km\n",
                sqrt(2.0 * (double)amin) / 1000.0,
                sqrt(2.0 * (double)amax) / 1000.0,
                sqrt(2.0 * (double)amean) / 1000.0);
     }
-    /* areasvol sanity at probe node 0 surface layer */
     if (m->areasvol && m->nl > 0) {
         printf("[fesom_port] areasvol[node0, nz=0]=%.4e m²  area[node0, nz=0]=%.4e m²\n",
                (double)m->areasvol[0], (double)m->area[0]);
     }
 
-    /* Coriolis: should have |max| ~ 2Ω*sin(80°) ≈ 1.43e-4 s⁻¹ on a global mesh */
     if (m->coriolis_node) {
         real_t fmin = m->coriolis_node[0], fmax = fmin;
-        for (int n = 1; n < m->nod2D; ++n) {
+        for (int n = 1; n < N_loc; ++n) {
             if (m->coriolis_node[n] < fmin) fmin = m->coriolis_node[n];
             if (m->coriolis_node[n] > fmax) fmax = m->coriolis_node[n];
         }
@@ -152,10 +154,9 @@ static void print_sanity(const fesom_mesh *m)
                (double)fmin, (double)fmax);
     }
 
-    /* elem_cos: should be in (0, 1] */
-    if (m->elem_cos) {
+    if (m->elem_cos && Ei_loc > 0) {
         real_t cmin = m->elem_cos[0], cmax = cmin;
-        for (int e = 1; e < m->elem2D; ++e) {
+        for (int e = 1; e < Ei_loc; ++e) {
             if (m->elem_cos[e] < cmin) cmin = m->elem_cos[e];
             if (m->elem_cos[e] > cmax) cmax = m->elem_cos[e];
         }
@@ -163,10 +164,9 @@ static void print_sanity(const fesom_mesh *m)
                (double)cmin, (double)cmax);
     }
 
-    /* edge_dxdy in radians; |edge_dxdy| ~ 1/R for nominal-resolution edges */
-    if (m->edge_dxdy && m->edge2D > 0) {
+    if (m->edge_dxdy && EG_loc > 0) {
         real_t lmax = 0.0;
-        for (int e = 0; e < m->edge2D; ++e) {
+        for (int e = 0; e < EG_loc; ++e) {
             real_t dx = m->edge_dxdy[2*e + 0];
             real_t dy = m->edge_dxdy[2*e + 1];
             real_t l  = sqrt(dx*dx + dy*dy);
@@ -176,8 +176,7 @@ static void print_sanity(const fesom_mesh *m)
                (double)lmax, (double)lmax * FESOM_R_EARTH / 1000.0);
     }
 
-    /* edge_cross_dxdy in meters; sample edge 0 */
-    if (m->edge_cross_dxdy && m->edge2D > 0) {
+    if (m->edge_cross_dxdy && EG_loc > 0) {
         printf("[fesom_port] edge_cross_dxdy[0] (m): "
                "left=(%.2e, %.2e)  right=(%.2e, %.2e)\n",
                (double)m->edge_cross_dxdy[0],
@@ -186,10 +185,9 @@ static void print_sanity(const fesom_mesh *m)
                (double)m->edge_cross_dxdy[3]);
     }
 
-    /* gradient_sca consistency: Σ_i dN_i/dx == 0 and Σ_i dN_i/dy == 0 */
-    if (m->gradient_sca) {
+    if (m->gradient_sca && Ei_loc > 0) {
         real_t residual_max = 0.0;
-        for (int e = 0; e < m->elem2D; ++e) {
+        for (int e = 0; e < Ei_loc; ++e) {
             real_t sx = m->gradient_sca[6*e + 0]
                       + m->gradient_sca[6*e + 1]
                       + m->gradient_sca[6*e + 2];
@@ -229,15 +227,22 @@ int main(int argc, char **argv)
 
     fesom_mesh mesh;
     fesom_mesh_init(&mesh);
-    fesom_mesh_read(&mesh, mesh_dir);
-    fesom_mesh_compute_metrics(&mesh);
+    /* Rank 0 reads global mesh files; others fill via Bcast then extract
+     * their slice using partit->myList_*. For npes==1 this is identity. */
+    /* But we need partit->myDim_* etc set first. For npes>1 it's populated
+     * by fesom_partit_init from my_list*.out; for npes==1 we synthesise them
+     * AFTER reading mesh dims (so the synthesise call comes between read and
+     * scatter). To handle both: do read+scatter inline. */
+    if (mpi.npes == 1) {
+        /* Synthesised partit needs global counts up front (before any halo
+         * code can run). Read global on rank 0 directly. */
+        fesom_mesh_read(&mesh, mesh_dir, &mpi);
+        fesom_partit_set_global_counts_serial(&mpi, mesh.nod2D, mesh.elem2D, mesh.edge2D);
+    } else {
+        fesom_mesh_read(&mesh, mesh_dir, &mpi);
+    }
+    fesom_mesh_compute_metrics(&mesh, &mpi);
     fesom_mesh_alloc_state(&mesh);
-
-    /* Phase 4 step 30a: in serial mode (npes==1), populate the synthesised
-     * partit with mesh dimensions so future code paths reading
-     * partit->myDim_* see the right values. For multi-rank these were already
-     * read from my_list*.out. */
-    fesom_partit_set_global_counts_serial(&mpi, mesh.nod2D, mesh.elem2D, mesh.edge2D);
 
     /* Phase 4 step 30b: identity test of halo exchange. No-op on 1 rank.
      * On 2+ ranks: positive test (halo == owning rank), negative test
