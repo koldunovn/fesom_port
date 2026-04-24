@@ -310,8 +310,12 @@ void fesom_sss_runoff_init(fesom_sss_runoff       *sr,
                                 /*check_dummy=*/0,
                                 /*do_onvert=*/1,
                                 mesh);
-        /* Kg/s/m² → m/s (Fortran line 1281) */
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        /* Kg/s/m² → m/s (Fortran line 1281). read_other_NetCDF populated
+         * runoff at myDim+eDim; apply the same unit conversion across halo so
+         * any downstream read of runoff at halo sees m/s instead of the raw
+         * kg/s/m² that's 1000× larger. */
+        int N_full = mesh->myDim_nod2D + mesh->eDim_nod2D;
+        for (int n = 0; n < N_full; ++n) {
             forcing->runoff[n] = forcing->runoff[n] / 1000.0;
         }
     }
@@ -346,14 +350,20 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
 
     /* ---------- oce_fluxes (ice_oce_coupling.F90:436-646) ---------- */
 
+    /* All write-loops below run myDim+eDim to match Fortran ice_oce_coupling.F90
+     * (lines 373-509) — halo entries of water_flux/virtual_salt/relax_salt must
+     * stay in sync with the owner so any downstream reader at halo positions
+     * sees correct values. Matches the port pattern documented in
+     * `feedback_write_loops_halo.md`. */
+    const int N_full = mesh->myDim_nod2D + mesh->eDim_nod2D;
+
     /* Apply river runoff to water_flux. In the standard Fortran (no-ICEPACK)
      * path, runoff is folded into fresh_wa_flux inside therm_ice (called from
      * thermodynamics loop, ice_thermo_oce.F90:270-323). We don't run therm_ice
      * (no sea ice yet); our bulk obudget computes water_flux = E-P-S only.
      * Replicating the Fortran ICEPACK formula (line 378):
-     *     water_flux(n) = -(fresh_wa_flux*inv_rhowat) - runoff(n)
-     * means subtracting runoff locally so river mouths gain freshwater. */
-    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+     *     water_flux(n) = -(fresh_wa_flux*inv_rhowat) - runoff(n) */
+    for (int n = 0; n < N_full; ++n) {
         forcing->water_flux[n] -= forcing->runoff[n];
     }
 
@@ -361,7 +371,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
      * subtract global mean to enforce zero net salt flux. */
     if (sr->use_virt_salt) {
         real_t rsss = sr->ref_sss;
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        for (int n = 0; n < N_full; ++n) {
             if (sr->ref_sss_local) {
                 int ul = mesh->ulevels_nod2D[n] - 1;
                 rsss = tracers->data[FESOM_TRACER_S].values[FESOM_NODE3D(n, ul, mesh->nl)];
@@ -369,38 +379,38 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
             forcing->virtual_salt[n] = rsss * forcing->water_flux[n];
         }
         real_t net = integrate_nod_2D(forcing->virtual_salt, mesh, partit) / mesh->ocean_area;
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        for (int n = 0; n < N_full; ++n) {
             if (mesh->ulevels_nod2D[n] > 1) continue;     /* cavity */
             forcing->virtual_salt[n] -= net;
         }
     } else {
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) forcing->virtual_salt[n] = 0.0;
+        for (int n = 0; n < N_full; ++n) forcing->virtual_salt[n] = 0.0;
     }
 
     /* Fortran lines 498-524 — relax_salt = surf_relax_S * (Ssurf - S_top),
      * then subtract global mean. Only meaningful where we actually loaded SSS. */
     if (sr->sss_path[0] && sr->sss_month_loaded > 0) {
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        for (int n = 0; n < N_full; ++n) {
             int ul = mesh->ulevels_nod2D[n] - 1;
             real_t Stop = tracers->data[FESOM_TRACER_S].values[FESOM_NODE3D(n, ul, mesh->nl)];
             forcing->relax_salt[n] = sr->surf_relax_S * (forcing->Ssurf[n] - Stop);
         }
         real_t net = integrate_nod_2D(forcing->relax_salt, mesh, partit) / mesh->ocean_area;
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        for (int n = 0; n < N_full; ++n) {
             if (mesh->ulevels_nod2D[n] > 1) continue;     /* cavity */
             forcing->relax_salt[n] -= net;
         }
     } else {
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) forcing->relax_salt[n] = 0.0;
+        for (int n = 0; n < N_full; ++n) forcing->relax_salt[n] = 0.0;
     }
 
     /* Fortran lines 544-563 — assemble local 'flux' = E + P + S + R, then
      * subtract its global mean from water_flux to enforce zero net mass.
      * (Without sea ice: a_ice_old = 0 → snow factor (1-a_ice_old)=1.) */
     {
-        real_t *flux = malloc((size_t)mesh->myDim_nod2D * sizeof(real_t));
+        real_t *flux = malloc((size_t)N_full * sizeof(real_t));
         FESOM_CHECK(flux, "sss_runoff_step: flux alloc");
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        for (int n = 0; n < N_full; ++n) {
             /* evaporation: in Fortran ice_thermo this is set to the bulk
              * evap (positive up). We store this inside water_flux via bulk
              * already, so the equivalent decomposition for our state is:
@@ -411,7 +421,7 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
             flux[n] = forcing->water_flux[n] + forcing->runoff[n];
         }
         real_t net = integrate_nod_2D(flux, mesh, partit) / mesh->ocean_area;
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        for (int n = 0; n < N_full; ++n) {
             forcing->water_flux[n] += net;
         }
         free(flux);

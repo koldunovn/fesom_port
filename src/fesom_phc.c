@@ -484,8 +484,13 @@ void fesom_phc_load_ic(const char                  *path,
     extrap_nod3D(mesh, partit, S);
 
     /* Final cleanup (Fortran do_ic3d lines 536-557): replace remaining dummy
-       with 0, zero-out below nlevels_nod2D, K → C if T > 100. */
-    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+     * with 0, zero-out below nlevels_nod2D, K → C if T > 100.
+     * Fortran iterates myDim+eDim on each sweep (the `where (...)` applies
+     * to the full array). If we only clean myDim, halo entries keep raw PHC
+     * values (in-situ, possibly Kelvin, possibly dummy) and downstream code
+     * that reads T/S at halo positions sees garbage — partition-dependent. */
+    const int N_full_ic = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    for (int n = 0; n < N_full_ic; ++n) {
         int nl1 = mesh->nlevels_nod2D[n] - 1;
         for (int nz = 0; nz < mesh->nl; ++nz) {
             size_t k = FESOM_NODE3D(n, nz, mesh->nl);
@@ -500,10 +505,10 @@ void fesom_phc_load_ic(const char                  *path,
     }
 
     /* insitu→pot via ptheta (Fortran insitu2pot, lines 3074-3118).
-       Pressure approximated as |Z| in metres (≈ decibars). */
+     * Fortran insitu2pot loops myDim+eDim (oce_ale_pressure_bv.F90:3102). */
     if (t_insitu) {
         printf("[fesom_phc] converting in-situ → potential temperature\n");
-        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        for (int n = 0; n < N_full_ic; ++n) {
             int nzmin = mesh->ulevels_nod2D[n] - 1;
             int nzmax = mesh->nlevels_nod2D[n] - 1;
             for (int nz = nzmin; nz < nzmax; ++nz) {
