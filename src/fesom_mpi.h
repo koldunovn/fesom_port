@@ -1,27 +1,28 @@
 #ifndef FESOM_MPI_H
 #define FESOM_MPI_H
 
-#include "fesom_types.h"
-
-struct fesom_mesh;  /* forward decl; full type in fesom_mesh.h */
-
 /*
- * Minimal MPI shim. Phase 1 operates as MPI-with-1-rank: rank=0,
- * nranks=1, fesom_exchange_nod() is a no-op. The struct shape mirrors
- * the Fortran t_partit so that switching to real MPI later changes
- * function bodies, not call sites.
+ * Phase 4: MPI is a hard dependency (matches Fortran). The real partition
+ * state lives in fesom_partit.h; this file is kept as a thin compatibility
+ * facade so existing call sites (`fesom_mpi`, `fesom_mpi_init`, etc.) still
+ * resolve. New code should include and use fesom_partit.h directly.
  */
-typedef struct fesom_mpi {
-    int rank;          /* mype  */
-    int nranks;        /* npes  */
-    int dummy_comm;    /* placeholder for MPI_Comm */
-} fesom_mpi;
 
-void fesom_mpi_init(fesom_mpi *p, int argc, char **argv);
-void fesom_mpi_finalize(fesom_mpi *p);
+#include "fesom_partit.h"
 
-/* Halo exchange of a 3D node-column field. Serial: no-op. */
-void fesom_exchange_nod(real_t *field, int nlev, const struct fesom_mesh *mesh,
-                        const fesom_mpi *p);
+typedef fesom_partit fesom_mpi;
+
+/* Replaces the old serial `fesom_mpi_init(p, argc, argv)`. The mesh dir is
+ * needed to find dist_<NPES>/. */
+static inline void fesom_mpi_init(fesom_mpi *p, const char *mesh_dir,
+                                  int argc, char **argv)
+{
+    fesom_partit_init(p, mesh_dir, argc, argv);
+}
+
+static inline void fesom_mpi_finalize(fesom_mpi *p)
+{
+    fesom_partit_finalize(p);
+}
 
 #endif /* FESOM_MPI_H */

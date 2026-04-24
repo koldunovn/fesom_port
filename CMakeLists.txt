@@ -6,6 +6,9 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Phase 4: MPI is a hard dependency.
+find_package(MPI REQUIRED COMPONENTS C)
+
 # Detect netCDF via nc-config. On Levante: `module load netcdf-c/4.8.1-gcc-11.2.0`
 # puts the right nc-config first in PATH.
 find_program(NC_CONFIG nc-config)
@@ -66,6 +69,7 @@ add_executable(fesom_port
   src/fesom_bulk.c
   src/fesom_tracer_diff.c
   src/fesom_sss_runoff.c
+  src/fesom_partit.c
 )
 target_include_directories(fesom_port PRIVATE src ${NC_INCDIR})
-target_link_libraries(fesom_port PRIVATE m ${NC_LIBS})
+target_link_libraries(fesom_port PRIVATE m ${NC_LIBS} MPI::MPI_C)

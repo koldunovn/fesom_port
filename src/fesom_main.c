@@ -224,13 +224,19 @@ int main(int argc, char **argv)
     if (jra55_year > 0) printf("[fesom_port] JRA55-do forcing year: %d\n", jra55_year);
 
     fesom_mpi mpi;
-    fesom_mpi_init(&mpi, argc, argv);
+    fesom_mpi_init(&mpi, mesh_dir, argc, argv);
 
     fesom_mesh mesh;
     fesom_mesh_init(&mesh);
     fesom_mesh_read(&mesh, mesh_dir);
     fesom_mesh_compute_metrics(&mesh);
     fesom_mesh_alloc_state(&mesh);
+
+    /* Phase 4 step 30a: in serial mode (npes==1), populate the synthesised
+     * partit with mesh dimensions so future code paths reading
+     * partit->myDim_* see the right values. For multi-rank these were already
+     * read from my_list*.out. */
+    fesom_partit_set_global_counts_serial(&mpi, mesh.nod2D, mesh.elem2D, mesh.edge2D);
 
     print_sanity(&mesh);
 
