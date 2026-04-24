@@ -64,7 +64,7 @@ int fesom_timestep(int                          step_n,
     fesom_halo_exchange(dyn->uv_rhsAB, FESOM_HALO_ELEM3D, nl, 2, p);
 
     /*  5. horizontal viscosity (opt_visc=5 with backscatter)  */
-    fesom_visc_filt_bcksct(mesh, dyn);
+    fesom_visc_filt_bcksct(mesh, dyn, p);
     /* uv_rhs is the final output; needed at halo for impl_vert_visc neighbour
      * reads through the TDMA SpMV. */
     fesom_halo_exchange(dyn->uv_rhs, FESOM_HALO_ELEM3D, nl, 2, p);

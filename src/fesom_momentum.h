@@ -80,7 +80,9 @@ void fesom_compute_hbar(const struct fesom_mesh *mesh,
  * Skipped at non-boundary edges (Fortran tests myList_edge2D > edge2D_in;
  * we use edge_tri[2*e + 1] >= 0, equivalent for serial).
  */
+struct fesom_partit;
 void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
-                            struct fesom_dyn        *dyn);
+                            struct fesom_dyn        *dyn,
+                            struct fesom_partit     *partit);
 
 #endif /* FESOM_MOMENTUM_H */

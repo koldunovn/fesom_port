@@ -8,7 +8,9 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
+#include "fesom_halo.h"
 #include "fesom_mesh.h"
+#include "fesom_partit.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -358,7 +360,8 @@ void fesom_update_vel(const struct fesom_mesh *mesh,
  *===========================================================================*/
 
 void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
-                            struct fesom_dyn        *dyn)
+                            struct fesom_dyn        *dyn,
+                            struct fesom_partit     *partit)
 {
     const int E    = mesh->myDim_elem2D;
     const int Eedg = mesh->myDim_edge2D + mesh->eDim_edge2D;
@@ -416,8 +419,17 @@ void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
         }
     }
 
+    /* Halo-exchange U_b, V_b at elements — Fortran oce_dyn.F90:367-369.
+     * Without this, the U_c smoothing at boundary nodes reads stale halo
+     * U_b → wrong U_c → wrong backscatter at boundary elements → no
+     * viscous damping at partition boundaries → uv grows unchecked. */
+    if (partit && partit->npes > 1) {
+        fesom_halo_exchange(dyn->u_b, FESOM_HALO_ELEM3D, nl, 1, partit);
+        fesom_halo_exchange(dyn->v_b, FESOM_HALO_ELEM3D, nl, 1, partit);
+    }
+
     /* Smooth U_b → U_c at nodes (area-weighted mean of surrounding cells).
-       Interior nodes only; halo gets values via exchange afterward.
+       Interior nodes only; halo gets values via exchange below.
        Same neighbour traversal as compute_vel_nodes. */
     for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         int nu1 = mesh->ulevels_nod2D[n] - 1;
@@ -438,6 +450,13 @@ void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
                 dyn->v_c[FESOM_NODE3D(n, nz, nl)] = tv / tot;
             }
         }
+    }
+
+    /* Halo-exchange U_c, V_c — Fortran oce_dyn.F90:391-393. The Apply step
+     * below reads U_c[vertex] for vertices that may be halo nodes. */
+    if (partit && partit->npes > 1) {
+        fesom_halo_exchange(dyn->u_c, FESOM_HALO_NOD3D, nl, 1, partit);
+        fesom_halo_exchange(dyn->v_c, FESOM_HALO_NOD3D, nl, 1, partit);
     }
 
     /* Apply: uv_rhs += u_b − easybsreturn · mean(u_c at 3 vertices)

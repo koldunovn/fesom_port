@@ -1026,6 +1026,15 @@ void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
     /* 3. fct_LO from upwind (advance one step of upwind solution). */
     fesom_tracer_compute_fct_LO(sc, tr_idx, mesh, tracers);
 
+    /* Halo-exchange fct_LO — Fortran oce_adv_tra_driver.F90:294
+     *   call exchange_nod(fct_LO, partit, luse_g2g=.true.)
+     * Step 5 (oce_tra_adv_fct) reads LO at halo nodes when computing
+     * T_max/T_min for the FCT bounds; without this exchange, halo LO is
+     * stale → wrong fct_plus/fct_minus → boundary tracer drift. */
+    if (sc->partit && sc->partit->npes > 1) {
+        fesom_exchange_nod3D(sc->fct_LO, mesh->nl, sc->partit);
+    }
+
     /* 4. High-order flux on top of LO (init_zero=false → adv_flux := HO − LO).
        Use valuesAB for the high-order computation per Fortran:309/331. */
     adv_tra_hor_central(mesh, dyn, ttfAB, /*init_zero=*/0, sc->adv_flux_hor);
