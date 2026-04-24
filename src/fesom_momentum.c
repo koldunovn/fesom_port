@@ -531,8 +531,10 @@ void fesom_compute_hbar(const struct fesom_mesh *mesh,
         dyn->ssh_rhs_old[n2] -= (c1 + c2);
     }
 
-    /* hbar update (lines 2090-2102): linfs skips the water_flux term. */
-    for (int n = 0; n < N; ++n) {
+    /* hbar update (lines 2090-2102): linfs skips the water_flux term.
+     * Fortran oce_ale.F90:2092-2096 saves hbar_old over myDim+eDim_nod2D —
+     * we must mirror that so halo hbar_old isn't stale across steps. */
+    for (int n = 0; n < N_alloc; ++n) {
         mesh->hbar_old[n] = mesh->hbar[n];
     }
     for (int n = 0; n < N; ++n) {
@@ -542,5 +544,5 @@ void fesom_compute_hbar(const struct fesom_mesh *mesh,
         mesh->hbar[n] = mesh->hbar_old[n]
                        + dyn->ssh_rhs_old[n] * dt / area;
     }
-    /* (Serial: no exchange_nod for ssh_rhs_old or hbar.) */
+    /* hbar then halo-exchanged in fesom_step.c after this returns. */
 }

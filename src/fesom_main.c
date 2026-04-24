@@ -738,8 +738,10 @@ skip_rest_state:
             fesom_io_write_snapshot(path, 0, FESOM_PHASE1_DT,
                                     &mesh, &dyn, &tracers, &aux, &mpi);
         }
-        printf("  step    iters    max|uv|       max|eta|      max|w|        "
-               "min(T)    max(T)    min(S)    max(S)\n");
+        if (mpi.mype == 0) {
+            printf("# step iters | uv eta w | T-range S-range | stress hf wf vs rs | hp pgf rho bv-range Kv Av\n");
+            fflush(stdout);
+        }
         /* Cumulative days at the start of each month (non-leap year, since
            the JRA55 calendar conversion above is gregorian — but for monthly
            SSS climatology we just need a 1-12 month index). */
@@ -785,8 +787,11 @@ skip_rest_state:
                 fprintf(stderr, "[step %d] done — %d CG iters\n", n, iters);
             }
             if (n == 1 || n % print_every == 0 || n == nsteps) {
+                /* Iterate myDim only for stat collection — halo entries are
+                 * just owner copies, so global max via MPI_Allreduce is
+                 * exact. Reduces noise from divergent halos before exchange. */
                 real_t uv_max = 0.0, eta_max = 0.0, w_max = 0.0;
-                size_t te = (size_t)(mesh.myDim_elem2D + mesh.eDim_elem2D + mesh.eXDim_elem2D) * (size_t)mesh.nl * 2;
+                size_t te = (size_t)mesh.myDim_elem2D * (size_t)mesh.nl * 2;
                 for (size_t i = 0; i < te; ++i) {
                     real_t a = fabs(dyn.uv[i]);
                     if (a > uv_max) uv_max = a;
@@ -795,7 +800,7 @@ skip_rest_state:
                     real_t a = fabs(dyn.eta_n[k]);
                     if (a > eta_max) eta_max = a;
                 }
-                size_t tn = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * (size_t)mesh.nl;
+                size_t tn = (size_t)mesh.myDim_nod2D * (size_t)mesh.nl;
                 for (size_t i = 0; i < tn; ++i) {
                     real_t a = fabs(dyn.w[i]);
                     if (a > w_max) w_max = a;
@@ -813,16 +818,97 @@ skip_rest_state:
                         if (S > S_max) S_max = S;
                     }
                 }
-                printf("  %4d   %5d   %.3e   %.3e   %.3e   %.5f  %.5f  %.5f  %.5f\n",
-                       n, iters, (double)uv_max, (double)eta_max, (double)w_max,
-                       (double)T_min, (double)T_max,
-                       (double)S_min, (double)S_max);
-                if (uv_max > 5.0 || !(uv_max == uv_max)) {
-                    fprintf(stderr, "[fesom_port] rank %d: BLOWUP detected at step %d "
-                            "(uv_max=%.3e, eta_max=%.3e, w_max=%.3e) — aborting all ranks\n",
-                            mpi.mype, n, (double)uv_max, (double)eta_max, (double)w_max);
-                    fflush(stderr);
+                /* Forcing fields (myDim only). */
+                real_t stress_max = 0.0, hflux_max = 0.0, wflux_max = 0.0;
+                real_t vsalt_max = 0.0, rsalt_max = 0.0;
+                for (int k = 0; k < mesh.myDim_elem2D; ++k) {
+                    real_t s = fabs(forcing.stress_surf[2*k+0]);
+                    real_t t = fabs(forcing.stress_surf[2*k+1]);
+                    if (s > stress_max) stress_max = s;
+                    if (t > stress_max) stress_max = t;
+                }
+                for (int k = 0; k < mesh.myDim_nod2D; ++k) {
+                    real_t a = fabs(forcing.heat_flux[k]);
+                    if (a > hflux_max) hflux_max = a;
+                    a = fabs(forcing.water_flux[k]);
+                    if (a > wflux_max) wflux_max = a;
+                    if (forcing.virtual_salt) {
+                        a = fabs(forcing.virtual_salt[k]);
+                        if (a > vsalt_max) vsalt_max = a;
+                    }
+                    if (forcing.relax_salt) {
+                        a = fabs(forcing.relax_salt[k]);
+                        if (a > rsalt_max) rsalt_max = a;
+                    }
+                }
+                /* Aux fields (myDim only). */
+                real_t hpres_max = 0.0, pgf_max = 0.0, dens_max = 0.0;
+                real_t bv_min = 1e30, bv_max = -1e30;
+                real_t Kv_max = 0.0, Av_max = 0.0;
+                for (int k = 0; k < mesh.myDim_nod2D; ++k) {
+                    int nzmax = mesh.nlevels_nod2D[k] - 1;
+                    for (int nz = 0; nz < nzmax; ++nz) {
+                        size_t i = FESOM_NODE3D(k, nz, mesh.nl);
+                        real_t a = fabs(aux.hpressure[i]);
+                        if (a > hpres_max) hpres_max = a;
+                        a = fabs(aux.density_m_rho0[i]);
+                        if (a > dens_max) dens_max = a;
+                        a = aux.bvfreq[i];
+                        if (a < bv_min) bv_min = a;
+                        if (a > bv_max) bv_max = a;
+                        a = fabs(aux.Kv[i]);
+                        if (a > Kv_max) Kv_max = a;
+                    }
+                }
+                for (int e = 0; e < mesh.myDim_elem2D; ++e) {
+                    int nzmax = mesh.nlevels[e] - 1;
+                    for (int nz = 0; nz < nzmax; ++nz) {
+                        size_t i = FESOM_ELEM3D(e, nz, mesh.nl);
+                        real_t a = fabs(aux.pgf_x[i]);
+                        if (a > pgf_max) pgf_max = a;
+                        a = fabs(aux.pgf_y[i]);
+                        if (a > pgf_max) pgf_max = a;
+                        a = fabs(aux.Av[i]);
+                        if (a > Av_max) Av_max = a;
+                    }
+                }
+                /* Global reductions across ranks. */
+                if (mpi.npes > 1) {
+                    real_t buf_max[16] = {uv_max, eta_max, w_max, T_max, S_max,
+                        stress_max, hflux_max, wflux_max, vsalt_max, rsalt_max,
+                        hpres_max, pgf_max, dens_max, bv_max, Kv_max, Av_max};
+                    real_t buf_min[3]  = {T_min, S_min, bv_min};
+                    real_t out_max[16], out_min[3];
+                    MPI_Allreduce(buf_max, out_max, 16, MPI_DOUBLE, MPI_MAX, mpi.MPI_COMM_FESOM);
+                    MPI_Allreduce(buf_min, out_min, 3,  MPI_DOUBLE, MPI_MIN, mpi.MPI_COMM_FESOM);
+                    uv_max=out_max[0]; eta_max=out_max[1]; w_max=out_max[2];
+                    T_max=out_max[3];  S_max=out_max[4];
+                    stress_max=out_max[5]; hflux_max=out_max[6]; wflux_max=out_max[7];
+                    vsalt_max=out_max[8];  rsalt_max=out_max[9];
+                    hpres_max=out_max[10]; pgf_max=out_max[11]; dens_max=out_max[12];
+                    bv_max=out_max[13]; Kv_max=out_max[14]; Av_max=out_max[15];
+                    T_min=out_min[0]; S_min=out_min[1]; bv_min=out_min[2];
+                }
+                if (mpi.mype == 0) {
+                    printf("  %4d  it=%3d  uv=%.2e eta=%.2e w=%.2e | T[%.2f,%.2f] S[%.2f,%.2f] | "
+                           "stress=%.2e hf=%.2e wf=%.2e vs=%.2e rs=%.2e | "
+                           "hp=%.2e pgf=%.2e rho=%.2e bv[%.1e,%.1e] Kv=%.2e Av=%.2e\n",
+                           n, iters, (double)uv_max, (double)eta_max, (double)w_max,
+                           (double)T_min, (double)T_max, (double)S_min, (double)S_max,
+                           (double)stress_max, (double)hflux_max, (double)wflux_max,
+                           (double)vsalt_max, (double)rsalt_max,
+                           (double)hpres_max, (double)pgf_max, (double)dens_max,
+                           (double)bv_min, (double)bv_max, (double)Kv_max, (double)Av_max);
                     fflush(stdout);
+                }
+                if (uv_max > 5.0 || !(uv_max == uv_max)) {
+                    if (mpi.mype == 0) {
+                        fprintf(stderr, "[fesom_port] BLOWUP at step %d "
+                                "(uv=%.3e eta=%.3e w=%.3e) — aborting all ranks\n",
+                                n, (double)uv_max, (double)eta_max, (double)w_max);
+                        fflush(stderr);
+                        fflush(stdout);
+                    }
                     MPI_Abort(mpi.MPI_COMM_FESOM, 99);
                 }
             }
