@@ -27,11 +27,13 @@ void fesom_eos_jm_components(real_t t, real_t s,
  *   - density_m_rho0  = rho_in_situ - density_0  (use_density_ref=.false.)
  *   - hpressure       (linfs branch, full cells, no cavity)
  *   - bvfreq          (N², no smoothing yet)
+ *   - MLD1_ind        (Large et al. 1997 / FESOM 1.4 — Phase G2a;
+ *                      stored 0-based, used by GM init_Redi_GM)
  *
  * Deferred:
  *   - horizontal N² smoothing (smooth_nod3D)
  *   - vertical N² smoothing
- *   - MLD1/MLD2/MLD3
+ *   - MLD2/MLD3 (Levitus, Griffies)
  *   - dbsfc (KPP only)
  *   - density_dmoc (diagnostic)
  *   - cavity / partial-cell branches

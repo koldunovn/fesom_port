@@ -1128,6 +1128,21 @@ skip_rest_state:
         printf("[fesom_port] EOS global: ρ-ρ0 ∈ [%g, %g]  P ∈ [%g, %g]  N² ∈ [%g, %g]\n",
                (double)rmin, (double)rmax, (double)pmin, (double)pmax,
                (double)bmin, (double)bmax);
+
+        /* G2a: MLD1_ind range — index of mixed-layer base, 0-based.
+         * Open-ocean tropics: 1-3.  Mid-latitude winter: 10-20.
+         * Polar deep-convection: 30+.  All bounded by nlevels_nod2D[n]-1. */
+        if (aux.MLD1_ind) {
+            int Nmd = mesh.myDim_nod2D + mesh.eDim_nod2D;
+            int mlmin = aux.MLD1_ind[0], mlmax = mlmin;
+            for (int i = 1; i < Nmd; ++i) {
+                int v = aux.MLD1_ind[i];
+                if (v < mlmin) mlmin = v;
+                if (v > mlmax) mlmax = v;
+            }
+            printf("[fesom_port] MLD1_ind (0-based level) min=%d max=%d\n",
+                   mlmin, mlmax);
+        }
     }
 
     if (use_sr)  fesom_sss_runoff_free(&sr);

@@ -66,7 +66,9 @@ void fesom_eos_jm_components(real_t t, real_t s,
  *   - no cavity (nzmin = 0 in C / 1 in Fortran, ulevels_nod2D = 1)
  *   - use_density_ref = .false.  → density_ref ≡ density_0
  *   - mix_scheme ≠ KPP (skip dbsfc)
- *   - no MLD computation, no N² smoothing (deferred)
+ *   - MLD1 (Large et al. 1997 / FESOM 1.4) is computed (Phase G2a);
+ *     MLD2 / MLD3 (Levitus, Griffies) still deferred.
+ *   - no N² smoothing
  *
  * Per-node temporaries are stack-allocated VLAs (one column at a time).
  * For Phase 1 nl ≤ 48 — fine on the stack.
@@ -89,6 +91,11 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
         int nzmin = mesh->ulevels_nod2D[n] - 1;     /* 1-based → 0-based */
         int nzmax = mesh->nlevels_nod2D[n] - 1;     /* exclusive bound; layers 0..nzmax-1 */
 
+        /* Initialise MLD1_ind (G2a). Fortran sets MLD1_ind=nzmin+1 (1-based),
+         * which in C 0-based is just nzmin+1. Stored 0-based throughout —
+         * G3 readers add +1 to mirror Fortran's `bvfreq(MLD1_ind+1, n)`. */
+        if (aux->MLD1_ind) aux->MLD1_ind[n] = nzmin + 1;
+
         /* Skip nodes with no wet layers (shouldn't happen in Phase 1 but guard). */
         if (nzmax <= nzmin) continue;
 
@@ -104,14 +111,38 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
                                     &rhopot[nz]);
         }
 
-        /* Pass 2: in-situ density at mid-layer depth Z[nz].
-           Phase 1 has no partial cells / no cavity → Z_3d_n[nz][n] = Z[nz]. */
+        /* Pass 2: in-situ density at mid-layer depth Z[nz], dbsfc1, db_max.
+           Phase 1 has no partial cells / no cavity → Z_3d_n[nz][n] = Z[nz].
+           db_max accumulates the max buoyancy-gradient over the full column,
+           used by MLD1 (Large et al. 1997). Fortran lines 314-335. */
+        real_t db_max = 0.0;
+        real_t z_nzmin = mesh->Z[nzmin];
         for (int nz = nzmin; nz < nzmax; ++nz) {
             real_t z = mesh->Z[nz];
             real_t bulk = bulk_0[nz] + z*(bulk_pz[nz] + z*bulk_pz2[nz]);
             real_t r = bulk * rhopot[nz] / (bulk + 0.1 * z * state_eq_int) - rho_ref;
             rho[nz] = r;
             aux->density_m_rho0[FESOM_NODE3D(n, nz, nl)] = r;
+
+            /* Surface-density adiabatically brought to depth z (Fortran 326-328) */
+            real_t bulk_surf = bulk_0[nzmin] + z*(bulk_pz[nzmin] + z*bulk_pz2[nzmin]);
+            real_t rho_surf = bulk_surf * rhopot[nzmin]
+                            / (bulk_surf + 0.1 * z * state_eq_int);
+
+            /* dbsfc1 (Fortran line 332): use_density_ref=false in our config
+             * so density_ref(nz, n) = density_0 = rho_ref. So
+             * rho(nz)+density_ref = (r) + rho_ref = rho_in_situ_full. */
+            real_t r_full = r + rho_ref;
+            real_t dbsfc1 = -g * (rho_surf - r_full) / r_full;
+
+            /* db_max accumulator (Fortran line 334). At nz==nzmin the
+             * divisor is the |Z[nzmin] - Z[nzmin+1]| placeholder — a
+             * non-zero divisor; at that level dbsfc1 is 0 anyway since
+             * rho_surf == r_full, so the term contributes nothing. */
+            int nz_eff = (nz > nzmin) ? nz : (nzmin + 1);
+            real_t denom = fabs(z_nzmin - mesh->Z[nz_eff]);
+            real_t cand = dbsfc1 / denom;
+            if (cand > db_max) db_max = cand;
         }
 
         /* hpressure — linfs branch, no cavity (nzmin == 0 in C).
@@ -130,7 +161,9 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
 
         /* bvfreq — N² between layers nzmin+1 and nzmax-1, then padded.
            Mirror of lines 427-475. Both rho_up and rho_dn are evaluated at the
-           *same depth* zmean to cancel compressibility. */
+           *same depth* zmean to cancel compressibility. Also locates MLD1
+           (Phase G2a): the shallowest level where N² > db_max. */
+        int mld1_done = 0;
         for (int nz = nzmin + 1; nz < nzmax; ++nz) {
             real_t zmean   = 0.5 * (mesh->Z[nz - 1] + mesh->Z[nz]);
             real_t bulk_up = bulk_0[nz - 1] + zmean*(bulk_pz[nz - 1] + zmean*bulk_pz2[nz - 1]);
@@ -138,8 +171,16 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
             real_t rho_up  = bulk_up * rhopot[nz - 1] / (bulk_up + 0.1 * zmean * state_eq_int);
             real_t rho_dn  = bulk_dn * rhopot[nz    ] / (bulk_dn + 0.1 * zmean * state_eq_int);
             real_t dz_inv  = 1.0 / (mesh->Z[nz - 1] - mesh->Z[nz]);
-            aux->bvfreq[FESOM_NODE3D(n, nz, nl)] =
-                -g * dz_inv * (rho_up - rho_dn) / rho_ref;
+            real_t bv = -g * dz_inv * (rho_up - rho_dn) / rho_ref;
+            aux->bvfreq[FESOM_NODE3D(n, nz, nl)] = bv;
+
+            /* MLD1: Large et al. (1997). Fortran lines 447-451.
+             * Stored 0-based (G3 readers add +1, mirroring Fortran's
+             * `bvfreq(MLD1_ind+1, n)`). */
+            if (!mld1_done && bv > db_max && aux->MLD1_ind) {
+                aux->MLD1_ind[n] = nz;
+                mld1_done = 1;
+            }
         }
         /* Pad surface and bottom — Fortran lines 474-475 */
         if (nzmin + 1 < nzmax) {
