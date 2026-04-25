@@ -4,7 +4,9 @@
  */
 #include "fesom_jra55.h"
 #include "fesom_constants.h"
+#include "fesom_halo.h"
 #include "fesom_mesh.h"
+#include "fesom_partit.h"
 
 #include <math.h>
 #include <netcdf.h>
@@ -538,7 +540,8 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
         "uas", "vas", "huss", "rsds", "rlds", "tas", "prra", "prsn"
     };
 
-    int N = mesh->myDim_nod2D;
+    int N_my = mesh->myDim_nod2D;
+    int N    = mesh->myDim_nod2D + mesh->eDim_nod2D;   /* physics arrays cover halo */
     for (int f = 0; f < FESOM_JRA_NFLD; ++f) {
         fesom_jra55_field *flf = &jra->fld[f];
         strncpy(flf->path_prefix, prefixes[f], sizeof(flf->path_prefix) - 1);
@@ -547,14 +550,19 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
         flf->var_name[sizeof(flf->var_name) - 1] = '\0';
         flf->year_loaded = -1;
         flf->ncid        = -1;
-        flf->coef_a = calloc((size_t)N, sizeof(real_t));
-        flf->coef_b = calloc((size_t)N, sizeof(real_t));
+        /* coef_a/b are computed only at myDim — the halo of jra->* is filled
+         * by exchange after the step compute, so coefs need not extend. */
+        flf->coef_a = calloc((size_t)N_my, sizeof(real_t));
+        flf->coef_b = calloc((size_t)N_my, sizeof(real_t));
         flf->sbcdata1_t_index = -1;
         flf->sbcdata2_t_index = -1;
         FESOM_CHECK(flf->coef_a && flf->coef_b,
                     "fesom_jra55_init: coef_a/b alloc");
     }
 
+    /* Physics arrays sized myDim+eDim: thermo's compute-over-halo loop in
+     * fesom_ice_thermo.c reads jra->shortwave[halo_n] etc.; this used to
+     * be an out-of-bounds read when arrays were sized myDim only. */
     jra->u_wind    = calloc((size_t)N, sizeof(real_t));
     jra->v_wind    = calloc((size_t)N, sizeof(real_t));
     jra->shum      = calloc((size_t)N, sizeof(real_t));
@@ -629,6 +637,7 @@ void fesom_jra55_open_year(fesom_jra55 *jra,
 
 void fesom_jra55_step(fesom_jra55 *jra,
                       const struct fesom_mesh *mesh,
+                      struct fesom_partit     *partit,
                       int yearnew, int daynew, real_t timenew)
 {
     /* Fortran sbc_do (line 1500-ish): rdate = julday(yearnew,1,1) + (daynew-1) + timenew/86400 */
@@ -679,5 +688,19 @@ void fesom_jra55_step(fesom_jra55 *jra,
         jra->Tair     [n] = (rdate * a_ta + b_ta) - 273.15;
         jra->prec_rain[n] = (rdate * a_pr + b_pr) / 1000.0;
         jra->prec_snow[n] = (rdate * a_sn + b_sn) / 1000.0;
+    }
+
+    /* Halo exchange so thermo's compute-over-halo loop sees consistent
+     * forcing at halo nodes. Without this, halo of jra->* is zero / stale,
+     * which surfaces as huge-m_ice-at-halo bug in fesom_ice_thermo. */
+    if (partit) {
+        fesom_exchange_nod2D(jra->u_wind,    partit);
+        fesom_exchange_nod2D(jra->v_wind,    partit);
+        fesom_exchange_nod2D(jra->shum,      partit);
+        fesom_exchange_nod2D(jra->shortwave, partit);
+        fesom_exchange_nod2D(jra->longwave,  partit);
+        fesom_exchange_nod2D(jra->Tair,      partit);
+        fesom_exchange_nod2D(jra->prec_rain, partit);
+        fesom_exchange_nod2D(jra->prec_snow, partit);
     }
 }

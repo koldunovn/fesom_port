@@ -3,6 +3,8 @@
 
 #include "fesom_types.h"
 
+struct fesom_partit;
+
 struct fesom_mesh;
 
 /*
@@ -166,6 +168,7 @@ void fesom_jra55_open_year(fesom_jra55 *jra,
  *   timenew = seconds since start of day */
 void fesom_jra55_step(fesom_jra55 *jra,
                       const struct fesom_mesh *mesh,
+                      struct fesom_partit     *partit,
                       int yearnew, int daynew, real_t timenew);
 
 #endif /* FESOM_JRA55_H */
