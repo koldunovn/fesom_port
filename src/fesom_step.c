@@ -10,6 +10,7 @@
 #include "fesom_dyn.h"
 #include "fesom_eos.h"
 #include "fesom_forcing.h"
+#include "fesom_gm.h"
 #include "fesom_halo.h"
 #include "fesom_ice.h"
 #include "fesom_mesh.h"
@@ -42,6 +43,14 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D(aux->bvfreq,         nl, p);
     fesom_exchange_nod3D(aux->sw_alpha,       nl, p);
     fesom_exchange_nod3D(aux->sw_beta,        nl, p);
+
+    /*  1b. GM/Redi prerequisites (Phase G2b).
+     *      Currently no readers — this is exercise-only. The G8 master
+     *      switch will gate this whole block under gmredi_on. */
+    if (ctx->gm) {
+        fesom_compute_sigma_xy     (aux, tracers, mesh, ctx->gm, p);
+        fesom_compute_neutral_slope(aux,           mesh, ctx->gm, p);
+    }
 
     /*  2. PGF (linfs + full cells)  */
     fesom_pressure_force_linfs_fullcell(mesh, aux);

@@ -813,6 +813,7 @@ skip_rest_state:
                                .tra_sc = &tra_sc,
                                .partit = &mpi,
                                .ice    = &ice,
+                               .gm     = &gm,
                                .jra    = use_jra ? &jra : NULL,
                                .sr     = use_sr  ? &sr  : NULL };
         const int nsteps      = (nsteps_cli > 0)     ? nsteps_cli     : 500;
