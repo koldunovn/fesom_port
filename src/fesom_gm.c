@@ -9,6 +9,7 @@
 #include "fesom_gm.h"
 #include "fesom_aux.h"
 #include "fesom_constants.h"
+#include "fesom_dyn.h"
 #include "fesom_halo.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -457,22 +458,201 @@ void fesom_init_redi_gm(struct fesom_aux *aux,
     }
 }
 
+/* ============================================================ */
+/* G4 — fer_solve_Gamma (oce_fer_gm.F90:40-163)                 */
+/* ============================================================ */
+/*
+ * Per-node 1D TDMA solving the GM streamfunction equation.
+ *
+ *   ∂z(C·∂z Γ) − N²·Γ = (g/ρ₀)·∇σ·K_GM(z)
+ *
+ * The two horizontal components (x, y) share the same matrix and are
+ * solved together (Fortran does it with a (2, nl) RHS; we use a
+ * 2-component sweep per node).
+ *
+ * Note the two distinct level bounds:
+ *   - outer (zbar_n / Z_n setup):  nlevels_nod2D / ulevels_nod2D
+ *   - inner (TDMA solve):          nlevels_nod2D_min / ulevels_nod2D_max
+ *                                  (= conservative bounds)
+ * In our linfs / no-cavity / no-partial-cells config
+ * nzmin_outer == nzmin_inner = 0; nzmax_outer ≥ nzmax_inner.
+ *
+ * Halo: exchange_nod(fer_gamma) — Fortran line 162. We use stride 2
+ * to cover both components in a single exchange.
+ */
 void fesom_fer_solve_gamma(const struct fesom_aux *aux,
                            const struct fesom_mesh *mesh,
                            fesom_gm *gm,
                            struct fesom_partit *partit)
 {
-    (void)aux; (void)mesh; (void)gm; (void)partit;
-    fprintf(stderr, "fesom_fer_solve_gamma: not yet ported (Phase G4)\n");
-    abort();
+    const int    nl       = mesh->nl;
+    const int    myDim    = mesh->myDim_nod2D;
+    const real_t g        = (real_t)FESOM_G;
+    const real_t rho_ref  = (real_t)FESOM_DENSITY_0;
+
+    real_t zbar_n[NL_MAX], Z_n[NL_MAX];
+    real_t a[NL_MAX], b[NL_MAX], c[NL_MAX];
+    real_t cp[NL_MAX], tp_x[NL_MAX], tp_y[NL_MAX];
+    real_t tr_x[NL_MAX], tr_y[NL_MAX];
+    FESOM_CHECK(nl <= NL_MAX, "fer_solve_gamma: nl %d > NL_MAX", nl);
+
+    for (int n = 0; n < myDim; ++n) {
+        /* Outer bounds (Fortran lines 71-72). 0-based throughout. */
+        int nzmax_o = mesh->nlevels_nod2D[n] - 1;     /* index of bottom interface */
+        int nzmin_o = mesh->ulevels_nod2D[n] - 1;     /* = 0 in our config       */
+        if (nzmax_o <= nzmin_o + 1) continue;          /* degenerate column */
+
+        /* Build zbar_n, Z_n on [nzmin_o, nzmax_o] (Fortran 76-86).
+         * For linfs/no-cavity: zbar_n[nz] == mesh->zbar[nz]. */
+        for (int nz = 0; nz < nl; ++nz) { zbar_n[nz] = 0.0; Z_n[nz] = 0.0; }
+        zbar_n[nzmax_o] = mesh->zbar[nzmax_o];
+        Z_n[nzmax_o - 1] = zbar_n[nzmax_o]
+                         + mesh->hnode_new[(size_t)n * nl + (nzmax_o - 1)] * 0.5;
+        for (int nz = nzmax_o - 1; nz >= nzmin_o + 1; --nz) {
+            zbar_n[nz]    = zbar_n[nz + 1]
+                          + mesh->hnode_new[(size_t)n * nl + nz];
+            Z_n[nz - 1]   = zbar_n[nz]
+                          + mesh->hnode_new[(size_t)n * nl + (nz - 1)] * 0.5;
+        }
+        zbar_n[nzmin_o] = zbar_n[nzmin_o + 1]
+                        + mesh->hnode_new[(size_t)n * nl + nzmin_o];
+
+        /* Inner bounds for TDMA (Fortran 92-93). */
+        int nzmax = mesh->nlevels_nod2D_min[n] - 1;
+        int nzmin = mesh->ulevels_nod2D_max[n] - 1;
+        if (nzmax <= nzmin + 1) {
+            /* No interior layers — Γ stays zero everywhere. */
+            for (int nz = 0; nz < nl; ++nz) {
+                gm->fer_gamma[(size_t)n * nl * 2 + nz * 2 + 0] = 0.0;
+                gm->fer_gamma[(size_t)n * nl * 2 + nz * 2 + 1] = 0.0;
+            }
+            continue;
+        }
+
+        /* Top boundary (Dirichlet): a=c=0, b=1. */
+        a[nzmin] = 0.0;
+        c[nzmin] = 0.0;
+        b[nzmin] = 1.0;
+
+        /* zinv2 init for body (Fortran 104). */
+        real_t zinv2 = 1.0 / (zbar_n[nzmin] - zbar_n[nzmin + 1]);
+
+        /* Body: nz = nzmin+1 .. nzmax-1 (Fortran 107-114). */
+        const real_t fc = gm->fer_C[n];
+        for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+            real_t zinv1 = zinv2;
+            zinv2 = 1.0 / (zbar_n[nz] - zbar_n[nz + 1]);
+            real_t zinv  = 1.0 / (Z_n[nz - 1] - Z_n[nz]);
+            a[nz] = fc * zinv1 * zinv;
+            c[nz] = fc * zinv2 * zinv;
+            real_t bv = aux->bvfreq[(size_t)n * nl + nz];
+            if (bv < 1.0e-8) bv = 1.0e-8;
+            b[nz] = -a[nz] - c[nz] - bv;
+        }
+
+        /* Bottom boundary (Dirichlet). */
+        a[nzmax] = 0.0;
+        c[nzmax] = 0.0;
+        b[nzmax] = 1.0;
+
+        /* RHS (Fortran 124-132). r = g/ρ₀; sigma_xy avg over two
+         * adjacent mid-layers (nz-1, nz) at the level interface. */
+        const real_t r = g / rho_ref;
+        for (int nz = 0; nz < nl; ++nz) { tr_x[nz] = 0.0; tr_y[nz] = 0.0; }
+        for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+            real_t sx_up = gm->sigma_xy[(size_t)n * nl * 2 + (nz - 1) * 2 + 0];
+            real_t sx_dn = gm->sigma_xy[(size_t)n * nl * 2 + nz       * 2 + 0];
+            real_t sy_up = gm->sigma_xy[(size_t)n * nl * 2 + (nz - 1) * 2 + 1];
+            real_t sy_dn = gm->sigma_xy[(size_t)n * nl * 2 + nz       * 2 + 1];
+            real_t k = gm->fer_K[(size_t)n * nl + nz];
+            tr_x[nz] = r * 0.5 * (sx_up + sx_dn) * k;
+            tr_y[nz] = r * 0.5 * (sy_up + sy_dn) * k;
+        }
+
+        /* Thomas sweep (Fortran 139-148). */
+        cp[nzmin]   = c[nzmin]   / b[nzmin];
+        tp_x[nzmin] = tr_x[nzmin] / b[nzmin];
+        tp_y[nzmin] = tr_y[nzmin] / b[nzmin];
+        for (int nz = nzmin + 1; nz <= nzmax; ++nz) {
+            real_t m = b[nz] - cp[nz - 1] * a[nz];
+            cp  [nz] = c[nz] / m;
+            tp_x[nz] = (tr_x[nz] - tp_x[nz - 1] * a[nz]) / m;
+            tp_y[nz] = (tr_y[nz] - tp_y[nz - 1] * a[nz]) / m;
+        }
+
+        /* Back-substitution into fer_gamma (Fortran 151-157). Zero
+         * outside [nzmin, nzmax]. */
+        for (int nz = 0; nz < nl; ++nz) {
+            gm->fer_gamma[(size_t)n * nl * 2 + nz * 2 + 0] = 0.0;
+            gm->fer_gamma[(size_t)n * nl * 2 + nz * 2 + 1] = 0.0;
+        }
+        gm->fer_gamma[(size_t)n * nl * 2 + nzmax * 2 + 0] = tp_x[nzmax];
+        gm->fer_gamma[(size_t)n * nl * 2 + nzmax * 2 + 1] = tp_y[nzmax];
+        for (int nz = nzmax - 1; nz >= nzmin; --nz) {
+            real_t gx_below = gm->fer_gamma[(size_t)n * nl * 2 + (nz + 1) * 2 + 0];
+            real_t gy_below = gm->fer_gamma[(size_t)n * nl * 2 + (nz + 1) * 2 + 1];
+            gm->fer_gamma[(size_t)n * nl * 2 + nz * 2 + 0] = tp_x[nz] - cp[nz] * gx_below;
+            gm->fer_gamma[(size_t)n * nl * 2 + nz * 2 + 1] = tp_y[nz] - cp[nz] * gy_below;
+        }
+    }
+
+    /* Halo exchange fer_gamma (Fortran 162). 2 components per (n, nz). */
+    if (partit && partit->npes > 1) {
+        fesom_halo_exchange(gm->fer_gamma, FESOM_HALO_NOD2D, nl, 2, partit);
+    }
 }
 
+/* ============================================================ */
+/* G4 — fer_gamma2vel (oce_fer_gm.F90:168-210)                  */
+/* ============================================================ */
+/*
+ * Element-loop reconstruction of bolus velocity from the streamfunction
+ * differences across vertical interfaces:
+ *   fer_uv(comp, nz, el) = (1/3) · Σ_v (Γ(comp, nz, v) − Γ(comp, nz+1, v))
+ *                          / helem(nz, el)
+ *
+ * Halo: exchange_elem(fer_uv) — Fortran 208. Stride 2.
+ */
 void fesom_fer_gamma2vel(struct fesom_dyn *dyn,
                          const struct fesom_mesh *mesh,
                          const fesom_gm *gm,
                          struct fesom_partit *partit)
 {
-    (void)dyn; (void)mesh; (void)gm; (void)partit;
-    fprintf(stderr, "fesom_fer_gamma2vel: not yet ported (Phase G4)\n");
-    abort();
+    const int  nl      = mesh->nl;
+    const int  myDim_e = mesh->myDim_elem2D;
+    const real_t onethird = 1.0 / 3.0;
+
+    for (int el = 0; el < myDim_e; ++el) {
+        int v0 = mesh->elem_nodes[3*el + 0];
+        int v1 = mesh->elem_nodes[3*el + 1];
+        int v2 = mesh->elem_nodes[3*el + 2];
+        int nzmax = mesh->nlevels[el] - 1;       /* nl1 = layer count */
+        int nzmin = mesh->ulevels[el] - 1;       /* 0-based */
+
+        for (int nz = nzmin; nz < nzmax; ++nz) {
+            real_t h = mesh->helem[(size_t)el * nl + nz];
+            if (!(h > 0.0)) continue;            /* dry / sentinel layer */
+            real_t zinv = onethird / h;
+
+            real_t gx_top = gm->fer_gamma[(size_t)v0 * nl * 2 + nz       * 2 + 0]
+                          + gm->fer_gamma[(size_t)v1 * nl * 2 + nz       * 2 + 0]
+                          + gm->fer_gamma[(size_t)v2 * nl * 2 + nz       * 2 + 0];
+            real_t gx_bot = gm->fer_gamma[(size_t)v0 * nl * 2 + (nz + 1) * 2 + 0]
+                          + gm->fer_gamma[(size_t)v1 * nl * 2 + (nz + 1) * 2 + 0]
+                          + gm->fer_gamma[(size_t)v2 * nl * 2 + (nz + 1) * 2 + 0];
+            real_t gy_top = gm->fer_gamma[(size_t)v0 * nl * 2 + nz       * 2 + 1]
+                          + gm->fer_gamma[(size_t)v1 * nl * 2 + nz       * 2 + 1]
+                          + gm->fer_gamma[(size_t)v2 * nl * 2 + nz       * 2 + 1];
+            real_t gy_bot = gm->fer_gamma[(size_t)v0 * nl * 2 + (nz + 1) * 2 + 1]
+                          + gm->fer_gamma[(size_t)v1 * nl * 2 + (nz + 1) * 2 + 1]
+                          + gm->fer_gamma[(size_t)v2 * nl * 2 + (nz + 1) * 2 + 1];
+
+            dyn->fer_uv[(size_t)el * nl * 2 + nz * 2 + 0] = (gx_top - gx_bot) * zinv;
+            dyn->fer_uv[(size_t)el * nl * 2 + nz * 2 + 1] = (gy_top - gy_bot) * zinv;
+        }
+    }
+
+    if (partit && partit->npes > 1) {
+        fesom_halo_exchange(dyn->fer_uv, FESOM_HALO_ELEM2D_FULL, nl, 2, partit);
+    }
 }

@@ -44,14 +44,18 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D(aux->sw_alpha,       nl, p);
     fesom_exchange_nod3D(aux->sw_beta,        nl, p);
 
-    /*  1b. GM/Redi prerequisites + per-step coefficient builder
-     *      (Phases G2b + G3). Outputs fer_K, fer_C, Ki, fer_tapfac,
-     *      neutral_slope, slope_tapered. No readers yet (G4 / G5 / G7
-     *      will plumb them). G8 will gate this block under gmredi_on. */
+    /*  1b. GM/Redi prerequisites + per-step coefficient builder +
+     *      streamfunction solve + bolus velocity reconstruction
+     *      (Phases G2b + G3 + G4). Outputs sigma_xy / neutral_slope /
+     *      slope_tapered / fer_tapfac / fer_K / fer_C / Ki / fer_gamma /
+     *      dyn->fer_uv. Still no readers (G5 / G6 / G7 will plumb the
+     *      tracer-side use). G8 will gate this block under gmredi_on. */
     if (ctx->gm) {
         fesom_compute_sigma_xy     (aux, tracers, mesh, ctx->gm, p);
         fesom_compute_neutral_slope(aux,           mesh, ctx->gm, p);
         fesom_init_redi_gm         (aux,           mesh, ctx->gm, p);
+        fesom_fer_solve_gamma      (aux,           mesh, ctx->gm, p);
+        fesom_fer_gamma2vel        (dyn,           mesh, ctx->gm, p);
     }
 
     /*  2. PGF (linfs + full cells)  */
