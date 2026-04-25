@@ -8,6 +8,7 @@
 #include "fesom_forcing_analytical.h"
 #include "fesom_ic.h"
 #include "fesom_ice.h"
+#include "fesom_ice_coupling.h"
 #include "fesom_io.h"
 #include "fesom_halo.h"
 #include "fesom_jra55.h"
@@ -893,6 +894,19 @@ skip_rest_state:
                            &dyn, &tracers, &forcing,
                            use_jra ? &jra : NULL,
                            use_sr  ? &sr  : NULL);
+
+            /* Phase D5 — ice-mediated surface momentum flux. Must be after
+             * fesom_ice_step (uses post-EVP ice->uice/vice halo) and before
+             * fesom_timestep (compute_vel_rhs / impl_vert_visc consume
+             * forcing->stress_surf). Mirrors Fortran oce_fluxes_mom called
+             * from oce_timestep_ale before the ocean step.
+             *
+             * Skipped under FESOM_NO_WIND: that toggle's intent is "no
+             * surface stress on the ocean", which D5 would otherwise
+             * re-populate from ice-ocean drag. */
+            if (!no_wind) {
+                fesom_ice_oce_fluxes_mom(&ice, &mpi, &mesh, &forcing);
+            }
 
             /* Per-step heartbeat on rank 0 — independent of print_every so
              * we always see SOMETHING happening even if the model is hung

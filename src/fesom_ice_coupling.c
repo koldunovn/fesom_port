@@ -1,4 +1,5 @@
 #include "fesom_ice_coupling.h"
+#include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
 #include "fesom_halo.h"
@@ -176,3 +177,71 @@ void fesom_ice_oce_fluxes(fesom_ice                     *ice,
     fesom_exchange_nod2D(forcing->water_flux, partit);
 }
 
+/*
+ * Mirror of Fortran oce_fluxes_mom (ice_oce_coupling.F90:53-149).
+ *
+ * Two loops, both literal:
+ *   per-node loop: 0..myDim+eDim — compute stress_iceoce_x/y, blend with
+ *     atmoce (snapshot from forcing->stress_node_surf as written by
+ *     fesom_bulk_compute), write back the blended stress_node_surf.
+ *   per-element loop: 0..myDim_elem2D — stress_surf = mean of the 3 vertex
+ *     stress_node_surf. Matches Fortran's myDim-only bound; impl_vert_visc
+ *     also reads only myDim.
+ *
+ * No halo exchanges are emitted: the per-node loop covers myDim+eDim, so
+ * the per-element loop reads stress_node_surf at owned-element vertices
+ * (myDim or eDim) against fresh values.
+ */
+void fesom_ice_oce_fluxes_mom(fesom_ice              *ice,
+                              struct fesom_partit    *partit,
+                              struct fesom_mesh      *mesh,
+                              struct fesom_forcing   *forcing)
+{
+    (void)partit;  /* No halo exchange needed; see header. */
+
+    const int N      = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int Eown   = mesh->myDim_elem2D;
+    const real_t rho_cd = (real_t)FESOM_DENSITY_0 * ice->cd_oce_ice;
+    real_t *u_ice = ice->uice;
+    real_t *v_ice = ice->vice;
+    real_t *u_w   = ice->srfoce_u;
+    real_t *v_w   = ice->srfoce_v;
+    real_t *a_ice = ice->data[0].values;            /* ice concentration */
+    real_t *sicx  = ice->stress_iceoce_x;
+    real_t *sicy  = ice->stress_iceoce_y;
+    real_t *sns   = forcing->stress_node_surf;      /* [2*n+0,1] */
+    real_t *ss    = forcing->stress_surf;           /* [2*el+0,1] */
+
+    /* Per-node — Fortran lines 105-122. */
+    for (int n = 0; n < N; ++n) {
+        if (mesh->ulevels_nod2D[n] > 1) continue;     /* cavity */
+
+        real_t a = a_ice[n];
+        real_t atmx = sns[2*n + 0];                   /* atmoce snapshot */
+        real_t atmy = sns[2*n + 1];
+
+        if (a > 0.001) {
+            real_t du  = u_ice[n] - u_w[n];
+            real_t dv  = v_ice[n] - v_w[n];
+            real_t aux = sqrt(du*du + dv*dv) * rho_cd;
+            sicx[n] = aux * du;
+            sicy[n] = aux * dv;
+        } else {
+            sicx[n] = 0.0;
+            sicy[n] = 0.0;
+        }
+        sns[2*n + 0] = sicx[n] * a + atmx * (1.0 - a);
+        sns[2*n + 1] = sicy[n] * a + atmy * (1.0 - a);
+    }
+
+    /* Per-element — Fortran lines 127-143. Bound is myDim_elem2D only. */
+    for (int e = 0; e < Eown; ++e) {
+        if (mesh->ulevels[e] > 1) continue;          /* cavity */
+
+        int v0 = mesh->elem_nodes[3*e + 0];
+        int v1 = mesh->elem_nodes[3*e + 1];
+        int v2 = mesh->elem_nodes[3*e + 2];
+        ss[2*e + 0] = (sns[2*v0 + 0] + sns[2*v1 + 0] + sns[2*v2 + 0]) / 3.0;
+        ss[2*e + 1] = (sns[2*v0 + 1] + sns[2*v1 + 1] + sns[2*v2 + 1]) / 3.0;
+    }
+}

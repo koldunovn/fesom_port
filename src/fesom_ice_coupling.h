@@ -47,4 +47,30 @@ void fesom_ice_oce_fluxes(fesom_ice                     *ice,
                           struct fesom_forcing          *forcing,
                           const struct fesom_sss_runoff *sr);
 
+/*
+ * Ice-mediated surface momentum flux. Mirror of Fortran oce_fluxes_mom
+ * (ice_oce_coupling.F90:53). Must be called AFTER fesom_ice_step (so
+ * ice->uice/vice halo is populated by the closing EVP exchange) and BEFORE
+ * the ocean step's compute_vel_rhs / impl_vert_visc (which consume
+ * forcing->stress_surf).
+ *
+ * The atmosphere-ocean stress is taken in place from forcing->stress_node_surf
+ * as written by fesom_bulk_compute. This is faithful in our (non-OASIS,
+ * non-transit) config: no other code reads the atmoce field separately.
+ *
+ * Writes:
+ *   ice->stress_iceoce_x/y[n]               for n in [0, myDim+eDim)
+ *   forcing->stress_node_surf[2n+0,1]       for n in [0, myDim+eDim)  (in place)
+ *   forcing->stress_surf[2*elem+0,1]        for elem in [0, myDim_elem2D)
+ *
+ * Halo coverage matches Fortran: per-node loop covers myDim+eDim so no
+ * exchange is needed before the element loop reads stress_node_surf at
+ * elnodes. The element loop matches Fortran's myDim-only bound (the only
+ * downstream reader, impl_vert_visc, also iterates myDim).
+ */
+void fesom_ice_oce_fluxes_mom(fesom_ice              *ice,
+                              struct fesom_partit    *partit,
+                              struct fesom_mesh      *mesh,
+                              struct fesom_forcing   *forcing);
+
 #endif /* FESOM_ICE_COUPLING_H */
