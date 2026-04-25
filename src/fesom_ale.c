@@ -75,11 +75,12 @@ void fesom_ale_commit_thickness(struct fesom_mesh *mesh)
  * directly.
  */
 void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
-                              struct fesom_dyn        *dyn)
+                              struct fesom_dyn        *dyn,
+                              int                      gm_on)
 {
     const int nl = mesh->nl;
 
-    /* Step 1: zero w everywhere (all local nodes) */
+    /* Step 1: zero w everywhere (all local nodes); fer_w too if GM on. */
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
     /* Fortran vert_vel_ale (oce_ale.F90:2200) iterates `do ed=1, myDim_edge2D`
      * only. The earlier "myDim+eDim" was wrong — iterating halo edges adds
@@ -87,11 +88,19 @@ void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
      * adds → small per-step error → CG NaN after ~85 steps. */
     int EG = mesh->myDim_edge2D;
     memset(dyn->w, 0, (size_t)N * (size_t)nl * sizeof(real_t));
+    if (gm_on) {
+        memset(dyn->fer_w, 0, (size_t)N * (size_t)nl * sizeof(real_t));
+    }
 
     /* Step 2: edge-flux accumulation. Each interior boundary node receives
      * contributions from all its incident edges via this rank's myDim_edge2D
      * (the partition replicates cross-rank edges); exchange_nod(w) afterward
-     * refreshes halo entries with their owners' values. */
+     * refreshes halo entries with their owners' values.
+     *
+     * Phase G6a: when gm_on, the same edge iteration also accumulates fer_w
+     * from dyn->fer_uv. The c1 (regular) and c2 (GM) contributions write to
+     * dyn->w and dyn->fer_w respectively — disjoint targets, so the dyn->w
+     * accumulator is bit-identical to the gm_on=0 path. */
     for (int ed = 0; ed < EG; ++ed) {
         int n1 = mesh->edges[2*ed + 0];
         int n2 = mesh->edges[2*ed + 1];
@@ -108,10 +117,17 @@ void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
                 /* Mirror of c1=(UV(2)*dx - UV(1)*dy)*helem; UV index 1=u, 2=v. */
                 real_t u = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 0];
                 real_t v = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 1];
-                real_t c1 = (v * dxL - u * dyL)
-                          * mesh->helem[FESOM_ELEM3D(el1, nz, nl)];
+                real_t h = mesh->helem[FESOM_ELEM3D(el1, nz, nl)];
+                real_t c1 = (v * dxL - u * dyL) * h;
                 dyn->w[FESOM_NODE3D(n1, nz, nl)] += c1;
                 dyn->w[FESOM_NODE3D(n2, nz, nl)] -= c1;
+                if (gm_on) {
+                    real_t fu = dyn->fer_uv[FESOM_ELEMVEC(el1, nz, nl) + 0];
+                    real_t fv = dyn->fer_uv[FESOM_ELEMVEC(el1, nz, nl) + 1];
+                    real_t c2 = (fv * dxL - fu * dyL) * h;
+                    dyn->fer_w[FESOM_NODE3D(n1, nz, nl)] += c2;
+                    dyn->fer_w[FESOM_NODE3D(n2, nz, nl)] -= c2;
+                }
             }
         }
         /* Right cell — only on interior edges */
@@ -123,22 +139,34 @@ void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
             for (int nz = nzmin; nz < nzmax; ++nz) {
                 real_t u = dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 0];
                 real_t v = dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 1];
-                real_t c1 = -(v * dxR - u * dyR)
-                          * mesh->helem[FESOM_ELEM3D(el2, nz, nl)];
+                real_t h = mesh->helem[FESOM_ELEM3D(el2, nz, nl)];
+                real_t c1 = -(v * dxR - u * dyR) * h;
                 dyn->w[FESOM_NODE3D(n1, nz, nl)] += c1;
                 dyn->w[FESOM_NODE3D(n2, nz, nl)] -= c1;
+                if (gm_on) {
+                    real_t fu = dyn->fer_uv[FESOM_ELEMVEC(el2, nz, nl) + 0];
+                    real_t fv = dyn->fer_uv[FESOM_ELEMVEC(el2, nz, nl) + 1];
+                    real_t c2 = -(fv * dxR - fu * dyR) * h;
+                    dyn->fer_w[FESOM_NODE3D(n1, nz, nl)] += c2;
+                    dyn->fer_w[FESOM_NODE3D(n2, nz, nl)] -= c2;
+                }
             }
         }
     }
 
     /* Step 3: cumulative sum bottom → top (all local nodes; halo nodes will
-     * be re-synced by exchange_nod(w) in the timestep wrapper) */
+     * be re-synced by exchange_nod(w) in the timestep wrapper). Mirror for
+     * fer_w when gm_on. */
     for (int n = 0; n < N; ++n) {
         int nzmin = mesh->ulevels_nod2D[n] - 1;
         int nzmax = mesh->nlevels_nod2D[n] - 1;
         for (int nz = nzmax - 1; nz >= nzmin; --nz) {
             dyn->w[FESOM_NODE3D(n, nz, nl)] +=
                 dyn->w[FESOM_NODE3D(n, nz + 1, nl)];
+            if (gm_on) {
+                dyn->fer_w[FESOM_NODE3D(n, nz, nl)] +=
+                    dyn->fer_w[FESOM_NODE3D(n, nz + 1, nl)];
+            }
         }
     }
 
@@ -150,6 +178,9 @@ void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
             real_t a = mesh->area[FESOM_NODE3D(n, nz, nl)];
             if (a > 0.0) {
                 dyn->w[FESOM_NODE3D(n, nz, nl)] /= a;
+                if (gm_on) {
+                    dyn->fer_w[FESOM_NODE3D(n, nz, nl)] /= a;
+                }
             }
         }
     }

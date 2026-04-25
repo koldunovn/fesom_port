@@ -18,11 +18,19 @@ struct fesom_dyn;
  * Mirror of the linfs path of vert_vel_ale (oce_ale.F90:2132+) plus
  * update_thickness_ale (oce_ale.F90:1035+).
  *
- * Future: zlevel surface-flux correction, zstar layer scaling, Fer_GM
- * bolus contribution, partial cells.
+ * Phase G6a: when `gm_on != 0`, the same edge loop also accumulates
+ *   dyn->fer_w from dyn->fer_uv. The dyn->w computation path is
+ *   bit-identical to the gm_on=0 case, by construction (the fer_w
+ *   block adds reads/writes only on dyn->fer_w / dyn->fer_uv — never
+ *   touches dyn->w or its inputs). This is the bit-identity off-switch
+ *   guarantee tested at G9.
+ *
+ * Future: zlevel surface-flux correction, zstar layer scaling,
+ * partial cells.
  */
 void fesom_ale_vert_vel_linfs(const struct fesom_mesh *mesh,
-                              struct fesom_dyn        *dyn);
+                              struct fesom_dyn        *dyn,
+                              int                      gm_on);
 
 /* hnode_new := hnode (linfs invariant). Called at the start of the ALE step. */
 void fesom_ale_thickness_linfs(struct fesom_mesh *mesh);

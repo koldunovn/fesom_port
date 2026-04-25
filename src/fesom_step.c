@@ -132,8 +132,12 @@ int fesom_timestep(int                          step_n,
     fesom_ale_thickness_linfs(mesh);
     /* hnode_new = hnode (no exchange needed; both already cover halo). */
 
-    fesom_ale_vert_vel_linfs(mesh, dyn);
+    fesom_ale_vert_vel_linfs(mesh, dyn, ctx->gm ? 1 : 0);
     fesom_exchange_nod3D(dyn->w, nl, p);     /* Fortran oce_ale.F90:2679 */
+    if (ctx->gm) {
+        /* Mirror Fortran oce_ale.F90:2681 — exchange_nod(fer_Wvel). */
+        fesom_exchange_nod3D(dyn->fer_w, nl, p);
+    }
 
     fesom_ale_compute_cflz(mesh, dyn);
     fesom_exchange_nod3D(dyn->cfl_z, nl, p);

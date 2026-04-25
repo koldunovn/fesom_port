@@ -447,7 +447,7 @@ int main(int argc, char **argv)
 
     /* Phase 1 step 6: linfs ALE thickness + vertical velocity. */
     fesom_ale_thickness_linfs(&mesh);
-    fesom_ale_vert_vel_linfs(&mesh, &dyn);
+    fesom_ale_vert_vel_linfs(&mesh, &dyn, /* gm_on */ 0);
 
     /* ALE sanity: with UV ≡ 0, w must be exactly 0. hnode_new must equal hnode. */
     if (do_sanity) {
