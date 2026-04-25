@@ -35,6 +35,23 @@ int fesom_timestep(int                          step_n,
     fesom_partit *p = ctx->partit;
     int nl = mesh->nl;
 
+    /* Phase G8 — env-gated master switch for GM/Redi.
+     *   FESOM_NO_GMREDI=1 → treat ctx->gm as NULL for the rest of this step.
+     *                      Skips compute_sigma_xy, compute_neutral_slope,
+     *                      init_Redi_GM, fer_solve_Gamma, fer_gamma2vel,
+     *                      Redi K33 in tracer diff, bolus add/sub, and
+     *                      G7a/G7b. Used by G9 bit-identity off-switch test.
+     * Read once and cache (matches FESOM_NO_TRADV style elsewhere). */
+    static int s_gmredi_env_loaded = 0;
+    static int s_no_gmredi         = 0;
+    if (!s_gmredi_env_loaded) {
+        const char *e = getenv("FESOM_NO_GMREDI");
+        s_no_gmredi = (e && atoi(e));
+        s_gmredi_env_loaded = 1;
+    }
+    /* Local alias so the original ctx->gm isn't mutated. */
+    struct fesom_gm *gm = s_no_gmredi ? NULL : ctx->gm;
+
     /*  1. EOS + hydrostatic pressure + N²  */
     fesom_pressure_bv(tracers, mesh, aux);
     /* sw_alpha / sw_beta — McDougall (1987). Needed by GM/Redi (and KPP).
@@ -53,12 +70,12 @@ int fesom_timestep(int                          step_n,
      *      slope_tapered / fer_tapfac / fer_K / fer_C / Ki / fer_gamma /
      *      dyn->fer_uv. Still no readers (G5 / G6 / G7 will plumb the
      *      tracer-side use). G8 will gate this block under gmredi_on. */
-    if (ctx->gm) {
-        fesom_compute_sigma_xy     (aux, tracers, mesh, ctx->gm, p);
-        fesom_compute_neutral_slope(aux,           mesh, ctx->gm, p);
-        fesom_init_redi_gm         (aux,           mesh, ctx->gm, p);
-        fesom_fer_solve_gamma      (aux,           mesh, ctx->gm, p);
-        fesom_fer_gamma2vel        (dyn,           mesh, ctx->gm, p);
+    if (gm) {
+        fesom_compute_sigma_xy     (aux, tracers, mesh, gm, p);
+        fesom_compute_neutral_slope(aux,           mesh, gm, p);
+        fesom_init_redi_gm         (aux,           mesh, gm, p);
+        fesom_fer_solve_gamma      (aux,           mesh, gm, p);
+        fesom_fer_gamma2vel        (dyn,           mesh, gm, p);
     }
 
     /*  2. PGF (linfs + full cells)  */
@@ -132,9 +149,9 @@ int fesom_timestep(int                          step_n,
     fesom_ale_thickness_linfs(mesh);
     /* hnode_new = hnode (no exchange needed; both already cover halo). */
 
-    fesom_ale_vert_vel_linfs(mesh, dyn, ctx->gm ? 1 : 0);
+    fesom_ale_vert_vel_linfs(mesh, dyn, gm ? 1 : 0);
     fesom_exchange_nod3D(dyn->w, nl, p);     /* Fortran oce_ale.F90:2679 */
-    if (ctx->gm) {
+    if (gm) {
         /* Mirror Fortran oce_ale.F90:2681 — exchange_nod(fer_Wvel). */
         fesom_exchange_nod3D(dyn->fer_w, nl, p);
     }
@@ -149,7 +166,7 @@ int fesom_timestep(int                          step_n,
     /* 13a. Phase G6b — bolus velocity add (Fortran oce_ale_tracer.F90:199-211).
      * Wraps BOTH advection (13) and diffusion (13b) so each tracer sees the
      * bolus-augmented velocity field. Subtracted back after diffusion. */
-    if (ctx->gm) {
+    if (gm) {
         const int E_loop = mesh->myDim_elem2D + mesh->eDim_elem2D;
         const int N_loop = mesh->myDim_nod2D + mesh->eDim_nod2D;
         for (int e = 0; e < E_loop; ++e) {
@@ -178,18 +195,18 @@ int fesom_timestep(int                          step_n,
     }
     if (!nt_adv_skip) {
         fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);
-        if (ctx->gm) {
+        if (gm) {
             /* G7a builds gm->tr_xy + adds vertical-explicit Redi flux to T. */
-            fesom_diff_ver_part_redi_expl(FESOM_TRACER_T, ctx->gm, aux, mesh, tracers, p);
+            fesom_diff_ver_part_redi_expl(FESOM_TRACER_T, gm, aux, mesh, tracers, p);
             /* G7b reuses gm->tr_xy + builds gm->tr_z + horizontal Redi flux. */
-            fesom_diff_part_hor_redi    (FESOM_TRACER_T, ctx->gm, aux, mesh, tracers, p);
+            fesom_diff_part_hor_redi    (FESOM_TRACER_T, gm, aux, mesh, tracers, p);
         }
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
 
         fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
-        if (ctx->gm) {
-            fesom_diff_ver_part_redi_expl(FESOM_TRACER_S, ctx->gm, aux, mesh, tracers, p);
-            fesom_diff_part_hor_redi    (FESOM_TRACER_S, ctx->gm, aux, mesh, tracers, p);
+        if (gm) {
+            fesom_diff_ver_part_redi_expl(FESOM_TRACER_S, gm, aux, mesh, tracers, p);
+            fesom_diff_part_hor_redi    (FESOM_TRACER_S, gm, aux, mesh, tracers, p);
         }
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
     }
@@ -203,7 +220,7 @@ int fesom_timestep(int                          step_n,
         nt_dif_checked = 1;
     }
     if (!nt_dif_skip) {
-        fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers, ctx->gm);
+        fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers, gm);
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
     }
@@ -212,7 +229,7 @@ int fesom_timestep(int                          step_n,
      * Restore dyn->uv / dyn->w / dyn->w_e to their pre-add values so the
      * remainder of the timestep (and the next step) sees the original
      * velocity field. */
-    if (ctx->gm) {
+    if (gm) {
         const int E_loop = mesh->myDim_elem2D + mesh->eDim_elem2D;
         const int N_loop = mesh->myDim_nod2D + mesh->eDim_nod2D;
         for (int e = 0; e < E_loop; ++e) {
