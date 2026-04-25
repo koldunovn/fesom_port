@@ -47,6 +47,10 @@ typedef struct fesom_gm {
      * time; fesom_diff_ver_part_redi_expl rebuilds and halo-exchanges.
      * Layout: [E_full * (nl-1) * 2], comp innermost. */
     real_t *tr_xy;
+    /* G7b scratch — per-node 3D vertical gradient of the active tracer
+     * (Fortran tr_z from oce_tracer_mod.F90:222-227). Sized [N * nl]; nz=0
+     * (top) and nz=nlevels-1 (bottom) are 0 boundaries. */
+    real_t *tr_z;
 } fesom_gm;
 
 void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh);
@@ -84,15 +88,32 @@ void fesom_fer_gamma2vel         (struct fesom_dyn         *dyn,
 
 /* --- Phase G7a: vertical-explicit Redi (oce_ale_tracer.F90:1086-1169)
  *
- * Adds the off-diagonal Redi tensor's vertical projection to del_ttf
- * for the given tracer. Uses valuesAB as the active field (matches
- * Fortran ttf). Computes gm->tr_xy as scratch and halo-exchanges it.
- * No-op if gm == NULL or redi_on == 0. */
+ * Adds the off-diagonal Redi tensor's vertical projection to T values
+ * for the given tracer. Reads valuesold (= pre-step T, matches Fortran
+ * `values` at tr_xy build time). Builds gm->tr_xy as scratch and
+ * halo-exchanges it. No-op if gm == NULL. */
 void fesom_diff_ver_part_redi_expl(int                          tr_idx,
                                    fesom_gm                    *gm,
                                    const struct fesom_aux      *aux,
                                    const struct fesom_mesh     *mesh,
                                    struct fesom_tracers        *tracers,
                                    struct fesom_partit         *partit);
+
+/* --- Phase G7b: horizontal Redi (oce_ale_tracer.F90:1173-1336)
+ *
+ * Edge-based horizontal Redi/eddy diffusivity flux with 5 partial-cell
+ * branches A/B/C/D/E for level mismatches between the two adjacent
+ * elements of an edge. Builds gm->tr_z (per-node vertical gradient)
+ * and reuses gm->tr_xy from a preceding fesom_diff_ver_part_redi_expl
+ * call (same tracer). No-op if gm == NULL.
+ *
+ * Must be called AFTER fesom_diff_ver_part_redi_expl in the same
+ * per-tracer iteration so gm->tr_xy is populated. */
+void fesom_diff_part_hor_redi    (int                          tr_idx,
+                                  fesom_gm                    *gm,
+                                  const struct fesom_aux      *aux,
+                                  const struct fesom_mesh     *mesh,
+                                  struct fesom_tracers        *tracers,
+                                  struct fesom_partit         *partit);
 
 #endif /* FESOM_GM_H */

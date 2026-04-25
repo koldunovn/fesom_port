@@ -58,6 +58,7 @@ void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh)
     g->fer_C         = calloc((size_t)N, sizeof(real_t));
     g->fer_scal      = calloc((size_t)N, sizeof(real_t));
     g->tr_xy         = calloc(e_nl1x2,   sizeof(real_t));
+    g->tr_z          = calloc(n_nl,      sizeof(real_t));
 
     GM_CHECK(g->sigma_xy,      "sigma_xy");
     GM_CHECK(g->neutral_slope, "neutral_slope");
@@ -69,6 +70,7 @@ void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh)
     GM_CHECK(g->fer_C,         "fer_C");
     GM_CHECK(g->fer_scal,      "fer_scal");
     GM_CHECK(g->tr_xy,         "tr_xy");
+    GM_CHECK(g->tr_z,          "tr_z");
 
     /* Initial value matches Fortran oce_setup_step.F90:934.
      * init_Redi_GM (G3) overwrites this every step, but pre-G3 readers
@@ -90,6 +92,7 @@ void fesom_gm_free(fesom_gm *g)
     free(g->fer_C);
     free(g->fer_scal);
     free(g->tr_xy);
+    free(g->tr_z);
     memset(g, 0, sizeof(*g));
 }
 
@@ -656,12 +659,17 @@ void fesom_diff_ver_part_redi_expl(int                          tr_idx,
     const int    Etot   = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
     const real_t dt     = (real_t)FESOM_PHASE1_DT;
 
-    real_t *valsAB = tracers->data[tr_idx].valuesAB;       /* [N * nl] */
+    /* Fortran's `values` at the time tr_xy is built (oce_tracer_mod.F90:127)
+     * is the PRE-STEP T (advection hasn't run yet). Our C port runs
+     * ale_reconstruct INSIDE fesom_tracer_advect_one_fct, so by the time
+     * we get here `values` holds the post-advection T. The pre-step T is
+     * preserved in `valuesold` (set in init_tracers_AB_one,
+     * fesom_tracer_adv.c:198). Use it to match Fortran's tr_xy semantics. */
+    real_t *valsold = tracers->data[tr_idx].valuesold;     /* [N * nl] */
     /* Fortran writes Redi flux into del_ttf BEFORE ale_reconstruct
-     * (oce_ale_tracer.F90:394 → 468-471). Our C port runs ale_reconstruct
-     * INSIDE fesom_tracer_advect_one_fct, so del_ttf is dead by the time
-     * we get here. Apply the Redi contribution directly to T values with
-     * the same `/hnode_new` factor that reconstruct would have applied. */
+     * (oce_ale_tracer.F90:394 → 468-471). The C port has reconstruct
+     * already done — apply the Redi contribution directly to `values`
+     * with the same `/hnode_new` factor that reconstruct would have. */
     real_t *vals    = tracers->data[tr_idx].values;        /* [N * nl] */
 
     /* ---- Step 1: tr_xy = ∇_h(valsAB) per element ------------ */
@@ -680,9 +688,9 @@ void fesom_diff_ver_part_redi_expl(int                          tr_idx,
         int nle = mesh->nlevels[el] - 1;        /* exclusive */
         int ule = mesh->ulevels[el] - 1;        /* 0-based */
         for (int nz = ule; nz < nle; ++nz) {
-            real_t T0 = valsAB[(size_t)v0 * nl + nz];
-            real_t T1 = valsAB[(size_t)v1 * nl + nz];
-            real_t T2 = valsAB[(size_t)v2 * nl + nz];
+            real_t T0 = valsold[(size_t)v0 * nl + nz];
+            real_t T1 = valsold[(size_t)v1 * nl + nz];
+            real_t T2 = valsold[(size_t)v2 * nl + nz];
             txy[(size_t)el * nl1 * 2 + nz * 2 + 0] = g[0]*T0 + g[1]*T1 + g[2]*T2;
             txy[(size_t)el * nl1 * 2 + nz * 2 + 1] = g[3]*T0 + g[4]*T1 + g[5]*T2;
         }
@@ -776,6 +784,238 @@ void fesom_diff_ver_part_redi_expl(int                          tr_idx,
             if (av > 0.0 && hn > 0.0) {
                 vals[(size_t)n * nl + nz] +=
                     (vd_flux[nz] - vd_flux[nz + 1]) * dt / (av * hn);
+            }
+        }
+    }
+}
+
+/* ============================================================ */
+/* G7b — diff_part_hor_redi (oce_ale_tracer.F90:1173-1336)       */
+/* ============================================================ */
+/*
+ * Horizontal Redi flux on edges: builds gm->tr_z (per-node vertical
+ * tracer gradient) once per call, then iterates myDim_edge2D applying
+ * the Redi flux contribution at the two endpoints. Five partial-cell
+ * branches handle level mismatches between the two adjacent elements:
+ *   (A) levels in el(1) but not el(2) (el(2) starts deeper)
+ *   (B) levels in el(2) but not el(1) (el(1) starts deeper)
+ *   (C) levels common to both — averaged
+ *   (D) levels in el(1) but not el(2) (el(1) extends deeper)
+ *   (E) levels in el(2) but not el(1) (el(2) extends deeper)
+ *
+ * Reuses gm->tr_xy populated by a preceding fesom_diff_ver_part_redi_expl
+ * call. Reads valuesold (= pre-step T) for the tr_z build, matching the
+ * Fortran convention that tr_z = grad_z(values) at the time tr_xy is built.
+ *
+ * Like G7a, applies the Redi flux directly to `values` with the
+ * `/hnode_new` factor (composed from Fortran's del_ttf accumulation
+ * and the subsequent ale_reconstruct). For our linfs config that's the
+ * identical computation as Fortran produces.
+ *
+ * Halo audit (E7-style — same code class as ocean FCT bug 2):
+ *   tr_z is computed per-node for myDim then halo-exchanged before the
+ *   edge loop reads it.
+ *   tr_xy is per-element with halo exchange in G7a.
+ *   slope_tapered, Ki, areasvol — already halo-coherent.
+ *   The edge loop bound is myDim_edge2D (matches Fortran 1208).
+ *   Per-edge writes only target the two endpoint nodes — for myDim
+ *   edges, both endpoints are valid local nodes (myDim or eDim).
+ */
+void fesom_diff_part_hor_redi(int                          tr_idx,
+                              fesom_gm                    *gm,
+                              const struct fesom_aux      *aux,
+                              const struct fesom_mesh     *mesh,
+                              struct fesom_tracers        *tracers,
+                              struct fesom_partit         *partit)
+{
+    (void)aux;
+    if (!gm) return;
+
+    const int    nl     = mesh->nl;
+    const int    nl1    = nl - 1;
+    const int    Nfull  = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    EG     = mesh->myDim_edge2D;
+    const real_t dt     = (real_t)FESOM_PHASE1_DT;
+    const real_t isredi = 1.0;
+
+    real_t *valsold = tracers->data[tr_idx].valuesold;
+    real_t *vals    = tracers->data[tr_idx].values;
+    real_t *txy     = gm->tr_xy;            /* [E_full * (nl-1) * 2] — built by G7a */
+    real_t *trz     = gm->tr_z;             /* [N * nl] */
+    const real_t *st = gm->slope_tapered;   /* [N * (nl-1) * 3] */
+    const real_t *Ki = gm->Ki;              /* [N * nl] */
+
+    /* ---- Step 1: tr_z = ∂ valuesold/∂z at interfaces (Fortran 219-228) -------
+     * Fortran loops myDim+eDim and exchanges; we mirror by looping myDim then
+     * halo-exchange. tr_z[nzmin] and tr_z[nzmax] are 0 boundaries. */
+    /* Zero halo + boundary slots first. */
+    memset(trz, 0, (size_t)Nfull * (size_t)nl * sizeof(real_t));
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        int nzmax = mesh->nlevels_nod2D[n] - 1;     /* exclusive: layer count */
+        int nzmin = mesh->ulevels_nod2D[n] - 1;     /* 0-based */
+        if (nzmax <= nzmin + 1) continue;
+        for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+            real_t T_up = valsold[(size_t)n * nl + (nz - 1)];
+            real_t T_dn = valsold[(size_t)n * nl + nz];
+            real_t h_up = mesh->hnode[(size_t)n * nl + (nz - 1)];
+            real_t h_dn = mesh->hnode[(size_t)n * nl + nz];
+            real_t dz   = 0.5 * (h_up + h_dn);
+            trz[(size_t)n * nl + nz] = (T_up - T_dn) / dz;
+        }
+        /* nzmin and nzmax stay 0 (zeroed above). */
+    }
+    if (partit && partit->npes > 1) {
+        fesom_exchange_nod3D(trz, nl, partit);
+    }
+
+    /* ---- Step 2: edge loop ---------------------------------- */
+    real_t rhs1[NL_MAX], rhs2[NL_MAX];
+    FESOM_CHECK(nl <= NL_MAX, "diff_part_hor_redi: nl %d > NL_MAX", nl);
+
+    for (int ed = 0; ed < EG; ++ed) {
+        int e1 = mesh->edges[2*ed + 0];
+        int e2 = mesh->edges[2*ed + 1];
+        int el1 = mesh->edge_tri[2*ed + 0];
+        int el2 = mesh->edge_tri[2*ed + 1];
+        if (el1 < 0) continue;          /* malformed edge — skip */
+
+        real_t dxL = mesh->edge_cross_dxdy[4*ed + 0];
+        real_t dyL = mesh->edge_cross_dxdy[4*ed + 1];
+        real_t dxR = 0.0, dyR = 0.0;
+
+        int nl1_e = mesh->nlevels[el1] - 1;
+        int ul1_e = mesh->ulevels[el1] - 1;
+        int nl2_e = -1;                   /* sentinel for "no el(2)" */
+        int ul2_e = -1;
+        if (el2 >= 0) {
+            nl2_e = mesh->nlevels[el2] - 1;
+            ul2_e = mesh->ulevels[el2] - 1;
+            dxR = mesh->edge_cross_dxdy[4*ed + 2];
+            dyR = mesh->edge_cross_dxdy[4*ed + 3];
+        }
+
+        /* Common range. Fortran: nl12=min(nl1,nl2), ul12=max(ul1,ul2). */
+        int nl12 = (el2 >= 0) ? ((nl1_e < nl2_e) ? nl1_e : nl2_e) : nl1_e;
+        int ul12 = (el2 >= 0) ? ((ul1_e > ul2_e) ? ul1_e : ul2_e) : ul1_e;
+
+        /* Zero rhs. Touch only the level range we'll write to + boundaries. */
+        for (int nz = 0; nz < nl1; ++nz) { rhs1[nz] = 0.0; rhs2[nz] = 0.0; }
+
+        /* Helper: compute Kh, Tz, SxTz, SyTz for a given level given enodes (e1, e2). */
+        #define COMPUTE_KH_TZ_S(NZ)                                                                   \
+            real_t Kh   = 0.5 * (Ki[(size_t)e1 * nl + (NZ)] + Ki[(size_t)e2 * nl + (NZ)]);            \
+            real_t Tz1  = 0.5 * (trz[(size_t)e1 * nl + (NZ)] + trz[(size_t)e1 * nl + ((NZ)+1)]);      \
+            real_t Tz2  = 0.5 * (trz[(size_t)e2 * nl + (NZ)] + trz[(size_t)e2 * nl + ((NZ)+1)]);      \
+            real_t st_x_1 = st[(size_t)e1 * nl1 * 3 + (NZ) * 3 + 0];                                  \
+            real_t st_y_1 = st[(size_t)e1 * nl1 * 3 + (NZ) * 3 + 1];                                  \
+            real_t st_x_2 = st[(size_t)e2 * nl1 * 3 + (NZ) * 3 + 0];                                  \
+            real_t st_y_2 = st[(size_t)e2 * nl1 * 3 + (NZ) * 3 + 1];                                  \
+            real_t SxTz = 0.5 * (Tz1 * st_x_1 + Tz2 * st_x_2);                                        \
+            real_t SyTz = 0.5 * (Tz1 * st_y_1 + Tz2 * st_y_2);
+
+        /* (A) ul1..ul12-1 — el(1) only (Fortran 1233-1246) */
+        for (int nz = ul1_e; nz < ul12; ++nz) {
+            COMPUTE_KH_TZ_S(nz)
+            real_t dz = mesh->helem[(size_t)el1 * nl + nz];
+            real_t Tx = txy[(size_t)el1 * nl1 * 2 + nz * 2 + 0];
+            real_t Ty = txy[(size_t)el1 * nl1 * 2 + nz * 2 + 1];
+            real_t Fx = Kh * (Tx + SxTz * isredi);
+            real_t Fy = Kh * (Ty + SyTz * isredi);
+            real_t c  = (-dxL * Fy + dyL * Fx) * dz;
+            rhs1[nz] += c;
+            rhs2[nz] -= c;
+        }
+
+        /* (B) ul2..ul12-1 — el(2) only (Fortran 1249-1264) */
+        if (el2 >= 0) {
+            for (int nz = ul2_e; nz < ul12; ++nz) {
+                COMPUTE_KH_TZ_S(nz)
+                real_t dz = mesh->helem[(size_t)el2 * nl + nz];
+                real_t Tx = txy[(size_t)el2 * nl1 * 2 + nz * 2 + 0];
+                real_t Ty = txy[(size_t)el2 * nl1 * 2 + nz * 2 + 1];
+                real_t Fx = Kh * (Tx + SxTz * isredi);
+                real_t Fy = Kh * (Ty + SyTz * isredi);
+                real_t c  = (dxR * Fy - dyR * Fx) * dz;
+                rhs1[nz] += c;
+                rhs2[nz] -= c;
+            }
+        }
+
+        /* (C) ul12..nl12 — both elements (Fortran 1267-1280) */
+        for (int nz = ul12; nz < nl12; ++nz) {
+            COMPUTE_KH_TZ_S(nz)
+            real_t dz = (el2 >= 0)
+                      ? 0.5 * (mesh->helem[(size_t)el1 * nl + nz]
+                             + mesh->helem[(size_t)el2 * nl + nz])
+                      : mesh->helem[(size_t)el1 * nl + nz];
+            real_t Tx, Ty;
+            if (el2 >= 0) {
+                Tx = 0.5 * (txy[(size_t)el1 * nl1 * 2 + nz * 2 + 0]
+                          + txy[(size_t)el2 * nl1 * 2 + nz * 2 + 0]);
+                Ty = 0.5 * (txy[(size_t)el1 * nl1 * 2 + nz * 2 + 1]
+                          + txy[(size_t)el2 * nl1 * 2 + nz * 2 + 1]);
+            } else {
+                Tx = txy[(size_t)el1 * nl1 * 2 + nz * 2 + 0];
+                Ty = txy[(size_t)el1 * nl1 * 2 + nz * 2 + 1];
+            }
+            real_t Fx = Kh * (Tx + SxTz * isredi);
+            real_t Fy = Kh * (Ty + SyTz * isredi);
+            real_t c  = ((dxR - dxL) * Fy - (dyR - dyL) * Fx) * dz;
+            rhs1[nz] += c;
+            rhs2[nz] -= c;
+        }
+
+        /* (D) nl12+1..nl1 — el(1) only (Fortran 1283-1296) */
+        for (int nz = nl12; nz < nl1_e; ++nz) {
+            COMPUTE_KH_TZ_S(nz)
+            real_t dz = mesh->helem[(size_t)el1 * nl + nz];
+            real_t Tx = txy[(size_t)el1 * nl1 * 2 + nz * 2 + 0];
+            real_t Ty = txy[(size_t)el1 * nl1 * 2 + nz * 2 + 1];
+            real_t Fx = Kh * (Tx + SxTz * isredi);
+            real_t Fy = Kh * (Ty + SyTz * isredi);
+            real_t c  = (-dxL * Fy + dyL * Fx) * dz;
+            rhs1[nz] += c;
+            rhs2[nz] -= c;
+        }
+
+        /* (E) nl12+1..nl2 — el(2) only (Fortran 1299-1312) */
+        if (el2 >= 0) {
+            for (int nz = nl12; nz < nl2_e; ++nz) {
+                COMPUTE_KH_TZ_S(nz)
+                real_t dz = mesh->helem[(size_t)el2 * nl + nz];
+                real_t Tx = txy[(size_t)el2 * nl1 * 2 + nz * 2 + 0];
+                real_t Ty = txy[(size_t)el2 * nl1 * 2 + nz * 2 + 1];
+                real_t Fx = Kh * (Tx + SxTz * isredi);
+                real_t Fy = Kh * (Ty + SyTz * isredi);
+                real_t c  = (dxR * Fy - dyR * Fx) * dz;
+                rhs1[nz] += c;
+                rhs2[nz] -= c;
+            }
+        }
+
+        #undef COMPUTE_KH_TZ_S
+
+        /* Apply rhs to T values at the two endpoints. Fortran 1314-1331:
+         * ul12 = ul1 (default); if (ul2 > 0) ul12 = min(ul1, ul2)
+         * nl12 := max(nl1, nl2)
+         * del_ttf[ul12..nl12, n] += rhs * dt / areasvol
+         * Then ale_reconstruct does T += del_ttf/hnode_new. We compose:
+         *   T += rhs * dt / (areasvol * hnode_new)
+         */
+        int ul_apply = ul1_e;
+        if (el2 >= 0 && ul2_e < ul_apply) ul_apply = ul2_e;
+        int nl_apply = (el2 >= 0 && nl2_e > nl1_e) ? nl2_e : nl1_e;
+
+        for (int nz = ul_apply; nz < nl_apply; ++nz) {
+            real_t hn1 = mesh->hnode_new[(size_t)e1 * nl + nz];
+            real_t av1 = mesh->areasvol [(size_t)e1 * nl + nz];
+            if (av1 > 0.0 && hn1 > 0.0) {
+                vals[(size_t)e1 * nl + nz] += rhs1[nz] * dt / (av1 * hn1);
+            }
+            real_t hn2 = mesh->hnode_new[(size_t)e2 * nl + nz];
+            real_t av2 = mesh->areasvol [(size_t)e2 * nl + nz];
+            if (av2 > 0.0 && hn2 > 0.0) {
+                vals[(size_t)e2 * nl + nz] += rhs2[nz] * dt / (av2 * hn2);
             }
         }
     }
