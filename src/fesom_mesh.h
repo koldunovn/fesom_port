@@ -47,12 +47,23 @@ typedef struct fesom_mesh {
     int    *nlevels_nod2D;     /* [nod2D]   K_v⁺ (MAX over surrounding cells, from nlvls.out) */
     int    *nlevels_nod2D_min; /* [nod2D]   K_v⁻ (MIN over surrounding cells) — ALE limit */
     int    *ulevels_nod2D;     /* [nod2D]   upper level (=1 without cavities) */
+    int    *ulevels_nod2D_max; /* [nod2D]   MAX of ulevels over surrounding cells.
+                                  Used by GM fer_solve_Gamma. Mirror of
+                                  Fortran mesh%ulevels_nod2D_max, oce_mesh.F90:1657. */
     int    *nlevels;           /* [elem2D]  K_c, per-cell level count, from elvls.out */
     int    *ulevels;           /* [elem2D]  upper level per cell (=1 without cavities) */
     real_t *zbar;              /* [nl]      interface depths, negative downward */
     real_t *Z;                 /* [nl-1]    mid-layer depths = 0.5*(zbar[nz]+zbar[nz+1]) */
+    real_t *zbar_3d_n;         /* [nod2D * nl]  per-node interface depths.
+                                  In our linfs/no-cavity/no-partial-cell config this
+                                  collapses to zbar[nz] for valid levels and 0 elsewhere
+                                  (constant in time). Mirror of Fortran mesh%zbar_3d_n,
+                                  oce_ale.F90:266+340. Used by GM scaling_GMzexp. */
     real_t *depth;             /* [nod2D]   bathymetry per node — INPUT METADATA only;
                                   the operative cellwise depth lives in nlevels(elem) */
+    real_t *mesh_resolution;   /* [nod2D]   Voronoi-cell diameter, smoothed 3 passes.
+                                  Mirror of Fortran mesh%mesh_resolution,
+                                  oce_mesh.F90:2199+2353-2378. Used by GM/Redi. */
 
     /* node→element inverse (CSR). For node n, its surrounding cells are
        nod_in_elem2D[nod_in_elem2D_offsets[n] .. nod_in_elem2D_offsets[n+1]-1]. */

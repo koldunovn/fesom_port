@@ -123,6 +123,28 @@ static void print_sanity(const fesom_mesh *m)
                kvmin_min, kvmin_max);
     }
 
+    /* GM/Redi prereq sanity (Phase G0). */
+    if (m->ulevels_nod2D_max) {
+        int u_min = m->ulevels_nod2D_max[0], u_max = u_min;
+        for (int i = 1; i < N_loc; ++i) {
+            int v = m->ulevels_nod2D_max[i];
+            if (v < u_min) u_min = v;
+            if (v > u_max) u_max = v;
+        }
+        printf("[fesom_port] sanity: ulevels_nod2D_max min=%d max=%d\n",
+               u_min, u_max);
+    }
+    if (m->mesh_resolution) {
+        real_t r_min = m->mesh_resolution[0], r_max = r_min;
+        for (int i = 1; i < N_loc; ++i) {
+            real_t v = m->mesh_resolution[i];
+            if (v < r_min) r_min = v;
+            if (v > r_max) r_max = v;
+        }
+        printf("[fesom_port] sanity: mesh_resolution (Voronoi diam) min=%.1f km  max=%.1f km\n",
+               (double)r_min / 1000.0, (double)r_max / 1000.0);
+    }
+
     /* elem_area: range over INTERIOR elements only (halo got 0 then
      * exchange — but only if multi-rank; for 1-rank, halo doesn't exist). */
     if (m->elem_area && Ei_loc > 0) {

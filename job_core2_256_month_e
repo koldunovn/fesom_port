@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH --job-name=fesom_port_256_month_e
+#SBATCH -p compute
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=128
+#SBATCH --ntasks=256
+#SBATCH --time=02:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/core2_256r_month_e_20260425_161539/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/core2_256r_month_e_20260425_161539/slurm.%j.err
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+
+ulimit -s 204800
+
+OUT_DIR=/work/ab0995/a270088/port/core2_256r_month_e_20260425_161539
+mkdir -p "$OUT_DIR"
+
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+# One model month at dt=500s = 5184 steps. Daily snapshots (172 steps;
+# 86400/500=172.8, rounding to 172 → snapshots a hair earlier than midnight).
+DT=500
+NSTEPS=5184
+SNAP_EVERY=172
+export FESOM_PRINT_EVERY=200    # progress every ~17 model min
+JRA55_YEAR=1958
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+EXITCODE=$?
+date
+
+echo "Exit code: $EXITCODE"
+echo "Tail of run.log:"
+tail -40 "$OUT_DIR/run.log"
+echo "Tail of run.err:"
+tail -10 "$OUT_DIR/run.err"
+exit $EXITCODE

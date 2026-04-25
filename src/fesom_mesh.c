@@ -1,5 +1,6 @@
 #include "fesom_mesh.h"
 #include "fesom_constants.h"
+#include "fesom_halo.h"
 #include "fesom_partit.h"
 
 #include <math.h>
@@ -34,11 +35,14 @@ void fesom_mesh_free(fesom_mesh *m)
     free(m->nlevels_nod2D);
     free(m->nlevels_nod2D_min);
     free(m->ulevels_nod2D);
+    free(m->ulevels_nod2D_max);
     free(m->nlevels);
     free(m->ulevels);
     free(m->zbar);
     free(m->Z);
+    free(m->zbar_3d_n);
     free(m->depth);
+    free(m->mesh_resolution);
     free(m->nod_in_elem2D_offsets);
     free(m->nod_in_elem2D);
     free(m->elem_area);
@@ -488,7 +492,9 @@ static void compute_vertical_levels_aux(fesom_mesh *m)
     m->ulevels           = malloc((size_t)E * sizeof(int));
     m->ulevels_nod2D     = malloc((size_t)N * sizeof(int));
     m->nlevels_nod2D_min = malloc((size_t)N * sizeof(int));
-    FESOM_CHECK(m->ulevels && m->ulevels_nod2D && m->nlevels_nod2D_min,
+    m->ulevels_nod2D_max = malloc((size_t)N * sizeof(int));
+    FESOM_CHECK(m->ulevels && m->ulevels_nod2D && m->nlevels_nod2D_min
+             && m->ulevels_nod2D_max,
                 "vertical aux: out of memory");
 
     for (int e = 0; e < E; ++e) m->ulevels[e]       = 1;
@@ -502,14 +508,96 @@ static void compute_vertical_levels_aux(fesom_mesh *m)
              * extreme outer boundary of the partition; mirror nlevels_nod2D
              * so K_v⁻ is at least sensible. */
             m->nlevels_nod2D_min[n] = m->nlevels_nod2D[n];
+            m->ulevels_nod2D_max[n] = m->ulevels_nod2D[n];
             continue;
         }
         int mn = m->nlevels[m->nod_in_elem2D[o0]];
+        int mx_u = m->ulevels[m->nod_in_elem2D[o0]];
         for (int k = o0 + 1; k < o1; ++k) {
-            int v = m->nlevels[m->nod_in_elem2D[k]];
-            if (v < mn) mn = v;
+            int e  = m->nod_in_elem2D[k];
+            int v  = m->nlevels[e];
+            int vu = m->ulevels[e];
+            if (v  < mn  ) mn   = v;
+            if (vu > mx_u) mx_u = vu;
         }
         m->nlevels_nod2D_min[n] = mn;
+        m->ulevels_nod2D_max[n] = mx_u;
+    }
+}
+
+/*--- GM/Redi mesh prerequisites -------------------------------------------- *
+ *  mesh_resolution[n] — Voronoi diameter, smoothed 3 passes (Fortran
+ *      oce_mesh.F90:2353-2378).  All loops match Fortran bounds exactly.
+ *  zbar_3d_n[n*nl + nz] — per-node interface depths.  In our
+ *      linfs / no-cavity / no-partial-cells config this collapses to
+ *      zbar[nz] for nz < nlevels_nod2D[n], 0 elsewhere.  Built once at
+ *      setup; constant in time for linfs.
+ * ------------------------------------------------------------------------ */
+static void compute_mesh_resolution(fesom_mesh *m, fesom_partit *partit)
+{
+    int N      = m->myDim_nod2D + m->eDim_nod2D;
+    int N_own  = m->myDim_nod2D;
+    int nl     = m->nl;
+
+    m->mesh_resolution = malloc((size_t)N * sizeof(real_t));
+    FESOM_CHECK(m->mesh_resolution, "mesh_resolution: out of memory");
+
+    /* Voronoi diameter: 2 * sqrt(areasvol(ulevels_nod2D(n), n) / pi).
+     * Fortran loop bound is myDim+eDim (oce_mesh.F90:2356). */
+    const real_t inv_pi = 1.0 / 3.14159265358979323846;
+    for (int n = 0; n < N; ++n) {
+        int ul = m->ulevels_nod2D[n] - 1;          /* 0-based */
+        real_t a = m->areasvol[(size_t)n * nl + ul];
+        m->mesh_resolution[n] = 2.0 * sqrt(a * inv_pi);
+    }
+
+    /* 3 passes of mass-matrix smoothing: per-node weighted mean of
+     * surrounding-element vertex resolutions (oce_mesh.F90:2361-2377).
+     * Fortran writes only myDim then exchange_nod, three times. */
+    real_t *work = calloc((size_t)N_own, sizeof(real_t));
+    FESOM_CHECK(work, "mesh_resolution smoothing: out of memory");
+    for (int pass = 0; pass < 3; ++pass) {
+        for (int n = 0; n < N_own; ++n) {
+            int o0 = m->nod_in_elem2D_offsets[n];
+            int o1 = m->nod_in_elem2D_offsets[n + 1];
+            real_t vol = 0.0, acc = 0.0;
+            for (int k = o0; k < o1; ++k) {
+                int elem = m->nod_in_elem2D[k];
+                int v0 = m->elem_nodes[3*elem + 0];
+                int v1 = m->elem_nodes[3*elem + 1];
+                int v2 = m->elem_nodes[3*elem + 2];
+                real_t mean3 = (m->mesh_resolution[v0]
+                              + m->mesh_resolution[v1]
+                              + m->mesh_resolution[v2]) / 3.0;
+                acc += mean3 * m->elem_area[elem];
+                vol += m->elem_area[elem];
+            }
+            work[n] = (vol > 0.0) ? acc / vol : 0.0;
+        }
+        for (int n = 0; n < N_own; ++n) m->mesh_resolution[n] = work[n];
+        if (partit && partit->npes > 1) {
+            fesom_exchange_nod2D(m->mesh_resolution, partit);
+        }
+    }
+    free(work);
+}
+
+static void compute_zbar_3d_n(fesom_mesh *m)
+{
+    int N  = m->myDim_nod2D + m->eDim_nod2D;
+    int nl = m->nl;
+    m->zbar_3d_n = calloc((size_t)N * nl, sizeof(real_t));
+    FESOM_CHECK(m->zbar_3d_n, "zbar_3d_n: out of memory");
+
+    /* Fortran oce_ale.F90:342-375 with our config (no cavity, no partial
+     * cells): zbar_3d_n(nz, n) = zbar(nz) for nz in [ulevels..nlevels].
+     * ulevels_nod2D = 1 always for us, so for nz from 0 to nlevels-1
+     * we copy zbar[nz]. Beyond nlevels we leave 0. Same for halo nodes. */
+    for (int n = 0; n < N; ++n) {
+        int nzmax = m->nlevels_nod2D[n];   /* 1-based count */
+        for (int nz = 0; nz < nzmax; ++nz) {
+            m->zbar_3d_n[(size_t)n * nl + nz] = m->zbar[nz];
+        }
     }
 }
 
@@ -1085,8 +1173,6 @@ void fesom_mesh_read(fesom_mesh *m, const char *mesh_dir,
 
 void fesom_mesh_compute_metrics(fesom_mesh *m, fesom_partit *partit)
 {
-    extern void fesom_halo_exchange(real_t *, int, int, int, fesom_partit *);
-
     build_nod_in_elem2D(m);
     compute_vertical_levels_aux(m);
 
@@ -1123,6 +1209,10 @@ void fesom_mesh_compute_metrics(fesom_mesh *m, fesom_partit *partit)
 
     compute_edges_geometry(m);        /* needs elem_cos */
     compute_gradient_sca(m);          /* needs elem_cos + elem_area */
+
+    /* GM/Redi mesh prerequisites — needs areasvol + elem_area + nlevels. */
+    compute_mesh_resolution(m, partit);
+    compute_zbar_3d_n(m);
 
     /* ocean_area: local sum (computed in compute_node_areas) → MPI_Allreduce. */
     if (partit->npes > 1) {
