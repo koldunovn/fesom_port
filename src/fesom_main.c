@@ -9,6 +9,7 @@
 #include "fesom_ic.h"
 #include "fesom_ice.h"
 #include "fesom_ice_coupling.h"
+#include "fesom_ice_fct.h"
 #include "fesom_io.h"
 #include "fesom_halo.h"
 #include "fesom_jra55.h"
@@ -445,6 +446,10 @@ int main(int argc, char **argv)
     fesom_ssh_preconditioner(&stiff, &mesh, &mpi);
     fesom_solverinfo_alloc(&solver, &mesh);
     solver.partit = &mpi;
+
+    /* Phase E1: build the FCT mass matrix once, sharing ssh_stiff's CSR
+     * sparsity. Must run AFTER fesom_ssh_stiff_alloc_and_build. */
+    fesom_ice_mass_matrix_fill(&ice, &stiff, &mpi, &mesh);
 
     /* Stiffness diagonal sanity. */
     if (do_sanity) {
@@ -893,7 +898,8 @@ skip_rest_state:
             fesom_ice_step(n, &ice, &mpi, &mesh,
                            &dyn, &tracers, &forcing,
                            use_jra ? &jra : NULL,
-                           use_sr  ? &sr  : NULL);
+                           use_sr  ? &sr  : NULL,
+                           &stiff);
 
             /* Phase D5 — ice-mediated surface momentum flux. Must be after
              * fesom_ice_step (uses post-EVP ice->uice/vice halo) and before

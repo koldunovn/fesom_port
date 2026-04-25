@@ -63,6 +63,7 @@ struct fesom_tracers;
 struct fesom_forcing;
 struct fesom_jra55;
 struct fesom_sss_runoff;
+struct fesom_ssh_stiff;
 
 void fesom_ice_step(int                            step,
                     fesom_ice                     *ice,
@@ -72,7 +73,8 @@ void fesom_ice_step(int                            step,
                     const struct fesom_tracers    *tracers,
                     struct fesom_forcing          *forcing,
                     const struct fesom_jra55      *jra,
-                    const struct fesom_sss_runoff *sr);
+                    const struct fesom_sss_runoff *sr,
+                    const struct fesom_ssh_stiff  *stiff);
 
 void fesom_ice_free(fesom_ice *ice);
 

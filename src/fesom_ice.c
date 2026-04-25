@@ -3,6 +3,7 @@
 #include "fesom_dyn.h"
 #include "fesom_ice_coupling.h"
 #include "fesom_ice_evp.h"
+#include "fesom_ice_fct.h"
 #include "fesom_ice_thermo.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -303,7 +304,8 @@ void fesom_ice_step(int                            step,
                     const struct fesom_tracers    *tracers,
                     struct fesom_forcing          *forcing,
                     const struct fesom_jra55      *jra,
-                    const struct fesom_sss_runoff *sr)
+                    const struct fesom_sss_runoff *sr,
+                    const struct fesom_ssh_stiff  *stiff)
 {
     (void)step;
     load_ice_env_once();
@@ -326,16 +328,22 @@ void fesom_ice_step(int                            step,
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
     }
-    if (!s_no_ice_adv) {
-        /* TODO Phase E5: fesom_ice_tg_rhs(ice, partit, mesh);
-         *                fesom_ice_fct_solve(ice, partit, mesh);
-         *                fesom_ice_cut_off(ice, partit, mesh); */
+    /* Phase E — FCT advection. Mirrors Fortran ice_setup_step.F90:258-261:
+     * call ice_TG_rhs; call ice_fct_solve. cut_off (line 295) follows
+     * unconditionally below. */
+    if (!s_no_ice_adv && stiff) {
+        fesom_ice_tg_rhs   (ice,       partit, mesh);
+        fesom_ice_fct_solve(ice, stiff, partit, mesh);
     }
+    /* cut_off (Fortran line 295): runs after FCT and BEFORE thermodynamics
+     * regardless of NO_ICE_ADV — Fortran does not gate it. Clamps tracers
+     * before thermo reads them. */
+    fesom_ice_cut_off(ice, partit, mesh);
+
     /* Thermodynamics + ice→ocean flux update. Both need forcing+jra+sr; without
      * them (e.g. pi-mesh smoke test) the step is silently a no-op. */
     if (!s_no_ice_thermo && forcing && jra && sr) {
         fesom_ice_thermodynamics(ice, partit, mesh, forcing, jra, sr);
-        fesom_ice_cut_off(ice, partit, mesh);                    /* Fortran ice_setup_step.F90:295 */
         /* Phase C2/C3: oce_fluxes overwrites heat_flux/water_flux with the
          * ice-mediated flx_h/flx_fw and computes virtual_salt + relax_salt. */
         fesom_ice_oce_fluxes(ice, partit, mesh, tracers, forcing, sr);
