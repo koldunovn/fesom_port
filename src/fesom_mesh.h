@@ -32,16 +32,7 @@ typedef struct fesom_mesh {
 
     /* edges */
     int    *edges;         /* [edge2D * 2] node IDs (0-based)                */
-    int    *edge_tri;      /* [edge2D * 2] adjacent element IDs (-1 = either
-                              true boundary OR halo elem not in local map).
-                              For boundary checks use partit->myList_edge2D
-                              compared to mesh->edge2D_in (Fortran convention)
-                              — relying on edge_tri[2nd] < 0 misclassifies any
-                              interior edge whose halo element is missing. */
-    int     edge2D_in;     /* global count of interior edges. Mesh files put
-                              interior edges at IDs [1, edge2D_in] and boundary
-                              edges at IDs [edge2D_in+1, edge2D]. Mirror of
-                              Fortran mesh%edge2D_in. */
+    int    *edge_tri;      /* [edge2D * 2] adjacent element IDs (-1 boundary) */
 
     /* vertical */
     int    *nlevels_nod2D;     /* [nod2D]   K_v⁺ (MAX over surrounding cells, from nlvls.out) */

@@ -373,15 +373,6 @@ static void read_edges(fesom_mesh *m, const char *mesh_dir)
     }
     fclose(fe);
     fclose(ft);
-
-    /* Count interior edges = those with both adjacent elements valid in the
-     * GLOBAL mesh. Mirrors Fortran mesh%edge2D_in (mesh-prep convention is
-     * to list interior edges first, boundary edges last). */
-    int interior = 0;
-    for (int i = 0; i < ne; ++i) {
-        if (m->edge_tri[2*i + 0] >= 0 && m->edge_tri[2*i + 1] >= 0) ++interior;
-    }
-    m->edge2D_in = interior;
 }
 
 /*--- Element orientation (test_tri port) ------------------------------------
@@ -863,13 +854,12 @@ static void build_node_g2l(int *lookup, fesom_partit *p, int global_nod2D)
 static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
 {
     /* Broadcast scalar dims (rank 0 has them after read_*). */
-    int dims[5];
+    int dims[4];
     if (p->mype == 0) {
         dims[0] = m->nod2D;  dims[1] = m->elem2D;
         dims[2] = m->edge2D; dims[3] = m->nl;
-        dims[4] = m->edge2D_in;
     }
-    MPI_CHECK(MPI_Bcast(dims, 5, MPI_INT, 0, p->MPI_COMM_FESOM));
+    MPI_CHECK(MPI_Bcast(dims, 4, MPI_INT, 0, p->MPI_COMM_FESOM));
     int g_nod2D  = dims[0];
     int g_elem2D = dims[1];
     int g_edge2D = dims[2];
@@ -877,7 +867,6 @@ static void scatter_mesh(fesom_mesh *m, fesom_partit *p)
     if (p->mype != 0) {
         m->nod2D = g_nod2D; m->elem2D = g_elem2D;
         m->edge2D = g_edge2D; m->nl = g_nl;
-        m->edge2D_in = dims[4];
     }
 
     /* zbar / Z are global (depth column shared across ranks) — small. */

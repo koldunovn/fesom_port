@@ -2,13 +2,11 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_ice_coupling.h"
-#include "fesom_ice_evp.h"
 #include "fesom_ice_thermo.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
 
-#include <mpi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -317,14 +315,7 @@ void fesom_ice_step(int                            step,
     }
 
     if (!s_no_ice_dyn) {
-        /* whichEVP=0 (standard EVP) only; mEVP/aEVP are out of scope. */
-        if (ice->whichEVP == 0) {
-            fesom_ice_evp_dynamics(ice, partit, mesh);
-        } else {
-            fprintf(stderr, "fesom_ice: whichEVP=%d not supported (only standard EVP=0)\n",
-                    ice->whichEVP);
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
+        /* TODO Phase D: fesom_ice_evp_dynamics(ice, partit, mesh); */
     }
     if (!s_no_ice_adv) {
         /* TODO Phase E5: fesom_ice_tg_rhs(ice, partit, mesh);
