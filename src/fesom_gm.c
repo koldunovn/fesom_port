@@ -119,11 +119,10 @@ void fesom_compute_sigma_xy(struct fesom_aux *aux,
                             struct fesom_partit *partit)
 {
     const int  nl       = mesh->nl;
-    const int  nl1      = nl - 1;             /* mid-layer count */
     const int  myDim    = mesh->myDim_nod2D;
     const real_t rho_ref = (real_t)FESOM_DENSITY_0;
 
-    const real_t *T = tracers->data[FESOM_TRACER_T].values;
+    const real_t *T = tracers->data[FESOM_TRACER_T].values;   /* [N * nl] stride */
     const real_t *S = tracers->data[FESOM_TRACER_S].values;
     const real_t *alpha = aux->sw_alpha;     /* [N * nl] */
     const real_t *beta  = aux->sw_beta;      /* [N * nl] */
@@ -155,9 +154,10 @@ void fesom_compute_sigma_xy(struct fesom_aux *aux,
             real_t a = mesh->elem_area[el];
 
             for (int nz = ule; nz < nle; ++nz) {
-                size_t i0 = (size_t)v0 * nl1 + nz;
-                size_t i1 = (size_t)v1 * nl1 + nz;
-                size_t i2 = (size_t)v2 * nl1 + nz;
+                /* Tracer T/S are stored with stride nl (per fesom_tracers_alloc) — NOT nl-1. */
+                size_t i0 = (size_t)v0 * nl + nz;
+                size_t i1 = (size_t)v1 * nl + nz;
+                size_t i2 = (size_t)v2 * nl + nz;
                 /* Note: Fortran loop bound is `ule_el..nle_el-1` per
                  * element; per-node accumulator only valid in
                  * [ule_node, nle_node-1] but that's a superset — for

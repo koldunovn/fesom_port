@@ -146,6 +146,28 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D(dyn->w_e, nl, p);
     fesom_exchange_nod3D(dyn->w_i, nl, p);
 
+    /* 13a. Phase G6b — bolus velocity add (Fortran oce_ale_tracer.F90:199-211).
+     * Wraps BOTH advection (13) and diffusion (13b) so each tracer sees the
+     * bolus-augmented velocity field. Subtracted back after diffusion. */
+    if (ctx->gm) {
+        const int E_loop = mesh->myDim_elem2D + mesh->eDim_elem2D;
+        const int N_loop = mesh->myDim_nod2D + mesh->eDim_nod2D;
+        for (int e = 0; e < E_loop; ++e) {
+            for (int nz = 0; nz < nl; ++nz) {
+                size_t k = (size_t)e * nl * 2 + nz * 2;
+                dyn->uv[k + 0] += dyn->fer_uv[k + 0];
+                dyn->uv[k + 1] += dyn->fer_uv[k + 1];
+            }
+        }
+        for (int n = 0; n < N_loop; ++n) {
+            for (int nz = 0; nz < nl; ++nz) {
+                size_t k = (size_t)n * nl + nz;
+                dyn->w  [k] += dyn->fer_w[k];
+                dyn->w_e[k] += dyn->fer_w[k];
+            }
+        }
+    }
+
     /* 13. tracer advection: T then S.
      * FESOM_NO_TRADV=1 → skip advection (diagnostic for MPI drift hunt). */
     static int nt_adv_checked = 0, nt_adv_skip = 0;
@@ -174,6 +196,29 @@ int fesom_timestep(int                          step_n,
         fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers, ctx->gm);
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
+    }
+
+    /* 13c. Phase G6b — bolus velocity sub (Fortran oce_ale_tracer.F90:284-295).
+     * Restore dyn->uv / dyn->w / dyn->w_e to their pre-add values so the
+     * remainder of the timestep (and the next step) sees the original
+     * velocity field. */
+    if (ctx->gm) {
+        const int E_loop = mesh->myDim_elem2D + mesh->eDim_elem2D;
+        const int N_loop = mesh->myDim_nod2D + mesh->eDim_nod2D;
+        for (int e = 0; e < E_loop; ++e) {
+            for (int nz = 0; nz < nl; ++nz) {
+                size_t k = (size_t)e * nl * 2 + nz * 2;
+                dyn->uv[k + 0] -= dyn->fer_uv[k + 0];
+                dyn->uv[k + 1] -= dyn->fer_uv[k + 1];
+            }
+        }
+        for (int n = 0; n < N_loop; ++n) {
+            for (int nz = 0; nz < nl; ++nz) {
+                size_t k = (size_t)n * nl + nz;
+                dyn->w  [k] -= dyn->fer_w[k];
+                dyn->w_e[k] -= dyn->fer_w[k];
+            }
+        }
     }
 
     /* 14. commit thickness: hnode := hnode_new, helem from vertex mean. */
