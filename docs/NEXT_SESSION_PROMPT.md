@@ -1,205 +1,172 @@
-# Next session: debug Phase D EVP multi-rank crash
+# Next session: Phase D5 (oce_fluxes_mom) → Phase E (FCT advection)
 
 ## TL;DR
 
-Phase A-C of the FESOM2 sea-ice port are committed and working. Phase D
-(standard EVP) is on branch `debug-evp` but crashes at multi-rank. 1-rank
-passes 200 steps; 16-rank crashes at step 2 (BC on) or step 70 (BC off).
-A code-level halo-loop audit against Fortran ice_EVP.F90 is clean. Need to
-add runtime NaN detection to find the first bad node and trace from there.
+Phase D EVP is **done and validated** at 1, 8, 16 ranks (200 steps clean,
+T.min=−2.06°C, bit-identical step-1 stats). The previous "16-rank crash at
+step 2" was a JRA forcing OOB read fixed in commit `55f6b6c` (now on `main`
+via `918b0d4`). Two phases remain to finish sea-ice port:
+
+- **Phase D5**: port `oce_fluxes_mom` so ice mediates atmospheric stress on
+  the ocean (today the ocean still sees raw bulk wind stress under ice cover).
+- **Phase E**: port FCT advection of `a_ice`, `m_ice`, `m_snow`.
+
+Both are scoped in `docs/plans/20260425-sea-ice-port.md` (Tasks D5 → D6 → E1…E8).
 
 ## Read these memory files first (in order)
-
-These give you full background before touching code:
 
 ```
 ~/.claude/projects/-home-a-a270088-port2/memory/MEMORY.md
 ~/.claude/projects/-home-a-a270088-port2/memory/project_sea_ice_port_state.md
+~/.claude/projects/-home-a-a270088-port2/memory/feedback_array_size_vs_reader_loop.md
 ~/.claude/projects/-home-a-a270088-port2/memory/feedback_write_loops_halo.md
+~/.claude/projects/-home-a-a270088-port2/memory/feedback_phc_rank_dependent.md
+~/.claude/projects/-home-a-a270088-port2/memory/reference_evp_dump_diagnostic.md
 ~/.claude/projects/-home-a-a270088-port2/memory/feedback_unique_outdir_per_job.md
 ~/.claude/projects/-home-a-a270088-port2/memory/feedback_levante_build.md
-~/.claude/projects/-home-a-a270088-port2/memory/feedback_port_fidelity.md
 ```
 
-The first two are the most important — `project_sea_ice_port_state.md` has
-the full debug status from the last session.
+`feedback_array_size_vs_reader_loop.md` and `feedback_write_loops_halo.md`
+are critical for Phase E — FCT is exactly where this bug class hides.
 
-## Repo state
-
-Current working directory: `/home/a/a270088/port2/fesom2_port`
+## Repo state (start of next session)
 
 ```
-main          e60a418  Revert "Phase D EVP" — current Phase C baseline (works at 16 ranks)
-              163090d  Phase D EVP commit (cherry-pick exists on debug-evp)
-              edc9e65  Phases A-C
+main          918b0d4  Merge debug-evp: Phase D EVP + JRA halo fix (HEAD)
+              55f6b6c  Fix multi-rank sea-ice EVP crash: JRA forcing halo coverage
+              edc9e65  Phases A–C
               3da152b  Phase 4 wrap-up (ocean only, pre-sea-ice)
-
-debug-evp     0490c13  Phase D EVP cherry-pick (BROKEN at multi-rank)
-              + stash{0}  BC-disabled debug edit (for bisecting)
+debug-evp     == main  (merged; safe to delete or reuse for next phase)
 ```
 
-Always do clean builds:
+Always:
 ```
 bash -l configure.sh --clean
 ```
 
-Always use a unique OUT_DIR per SLURM job (concurrent jobs writing to the
-same dir destroyed several hours of debug last session — see
-`feedback_unique_outdir_per_job.md`).
+Always use unique OUT_DIR per SLURM job (`feedback_unique_outdir_per_job.md`).
 
-## The bug
+## What's already in tree
 
-**Symptom:** Phase D EVP code (commit 163090d, on branch `debug-evp`):
-- 1-rank @ 200 steps: PASS, T.min=−2.06°C, identical to Fortran-style result
-- 16-rank @ 200 steps: CRASH at step 2 (BC on) or step 70 (BC off), CG NaN
+- Sea-ice Phases A–D fully wired in `fesom_ice.{c,h}`,
+  `fesom_ice_thermo.{c,h}`, `fesom_ice_coupling.{c,h}`, `fesom_ice_evp.{c,h}`.
+- EVP debug instrumentation env-gated by `FESOM_EVP_DUMP_DIR` plus an
+  always-on `if (ice_strength[el] > 1e7) fprintf(stderr, ...)` in EVP Step 3.
+  See `reference_evp_dump_diagnostic.md`. Use this for any multi-rank
+  divergence hunt — it earned its keep finding the JRA bug.
+- Diff scripts under `scripts/`: `evp_dump_diff.py`, `evp_dump_qcheck.py`,
+  `phc_dump_diff.py`. Job templates `job_core2_{1,8,16}r_evp_dump`,
+  `job_core2_8r_evp`.
 
-**Already-tried bisects (all multi-rank, branch `debug-evp`):**
+## Phase D5 — port `oce_fluxes_mom`
 
-| Test | Result | Conclusion |
-|---|---|---|
-| Full Phase D | crash step 2 | Reproducible |
-| Subcycle disabled (skip stress_tensor + stress2rhs + velocity update) | PASS 200 | Bug is in subcycle body |
-| evp_rheol_steps=1 (1 iter instead of 120) | crash step 2 | Bug appears in single iter, not from accumulation over 120 |
-| Subcycle on, BC loop disabled | crash step 70 (slow buildup) | BC isn't the root, but accelerates blowup |
-| 1-rank, subcycle on, BC off | PASS 200 | Confirms multi-rank-only bug |
+**Source**: `~/port2/fesom2/src/ice_oce_coupling.F90:53` (subroutine `oce_fluxes_mom`).
 
-**Code-level audit done — all CLEAN against Fortran:**
-- Every C `for ... < myDim_*2D` loop bound matches Fortran loop bound in `ice_EVP.F90`
-- Only halo exchange in Fortran EVPdynamics is `exchange_nod(U_ice, V_ice)` at end of subcycle (line 827) — present in C
-- Thermo only halo-exchanges `ustar` (line 238 in F) — present in C
-- ocean2ice halo-exchanges `u_w`, `v_w` (line 244) — present in C
-- Verified empirically that the partition is overlap-based (rank 0 and rank 1 share 130 elements in their myDim_elem2D), so Fortran's "Pattern A" scatter from `myDim_elem2D` only is correct
-- mesh `metric_factor`, `elem_cos`, `elem_area` halo-exchanged (mirrors Fortran lines 2521-2522) — present in C
-- `gradient_sca` only allocated for myDim_elem2D in Fortran too — matches port
+**Goal**: blend bulk wind stress with ice-ocean drag from `cd_oce_ice` and
+ice velocity, write into `dyn->stress_surf` (per-element). Currently
+`dyn->stress_surf` is the unmodified bulk stress from
+`fesom_bulk_compute` — under ice cover this is wrong.
 
-So static reading isn't finding the bug. Need runtime instrumentation.
+**Design**:
+- Add `fesom_ice_oce_fluxes_mom` to `fesom_ice_coupling.{c,h}`.
+- Call from `fesom_step.c` BEFORE `compute_vel_rhs` (which consumes
+  `stress_surf`). Place AFTER `fesom_ice_step` so `ice->uice/vice` are
+  populated by the EVP just run.
+- Per Fortran: element-based loop (`do el=1, myDim_elem2D`), reads
+  `u_ice/v_ice` at the 3 vertices (halo OK from end-of-EVP exchange), reads
+  `a_ice` per element (from vertex average), writes 2 components of
+  `stress_surf[el]`.
+- **Loop bound for stress_surf write**: check Fortran. If
+  `do el = 1, myDim_elem2D + eDim_elem2D` then C must too. Apply the audit
+  rule from `feedback_write_loops_halo.md` — this is the cheapest safety net.
 
-## What to try next
+**Validation** (Task D6 in plan):
+1. Clean build.
+2. Run `job_core2_16_fix` 200 steps; under ice cover the polar `|stress_surf|`
+   should be visibly smaller than pre-D5 (because ice is now mediating).
+3. Multi-rank cross-check: `|Δuice|_∞ < 1e-6` between 8/16/32 ranks at step 200.
+4. Watch the always-on HUGE-ice_strength stderr — should never fire.
 
-**Step 1: NaN detection at the source**
+**Watchouts for D5**:
+- The EVP halo exchange of u_ice/v_ice already happens at end of subcycle.
+  After `fesom_ice_step`, halo of u_ice IS valid for stress_mom to read.
+- Scattered prior attempt at `/tmp/sea_ice_modified.patch` may be stale —
+  re-derive from Fortran.
+- `oce_fluxes_mom` does NOT touch `stress_node_surf` (that's still bulk-direct
+  for the ocean RHS at nodes). Read Fortran carefully.
 
-Add diagnostic prints to `src/fesom_ice_evp.c` in `fesom_ice_evp_dynamics` —
-after each subcycle iteration, scan `u_ice` and `v_ice` for NaN/Inf and
-`fprintf(stderr, ...)` the first bad local node index + global node id +
-which rank.
+## Phase E — FCT advection (highest-risk)
 
-Suggested code (insert just after `fesom_exchange_nod2D(v_ice, partit);` at
-end of subcycle):
+**Source**: `~/port2/fesom2/src/ice_fct.F90` (1624 LoC). Plan Tasks E1–E8.
 
-```c
-for (int n = 0; n < N; ++n) {
-    if (!isfinite(u_ice[n]) || !isfinite(v_ice[n])) {
-        fprintf(stderr, "[rank %d] NaN at iter %d local n=%d gid=%d "
-                        "(myDim=%d, eDim=%d) u=%g v=%g a_ice=%g\n",
-                partit->mype, sub, n, partit->myList_nod2D[n],
-                mesh->myDim_nod2D, mesh->eDim_nod2D,
-                (double)u_ice[n], (double)v_ice[n], (double)a_ice[n]);
-        break;
-    }
-}
+**Why high-risk**: ocean FCT had two halo-write bugs (`init_tracers_AB` and
+`fct_ttf_max/min`) that took days to find. The same bug class will recur.
+**Apply the proactive audit**: grep every C `for.*<.*myDim_(nod|elem)2D;`
+write-loop in `fesom_ice_fct.c` against the matching Fortran loop bound,
+BEFORE running anything. The plan calls this Task E7 — do it as you write,
+not after.
+
+**Tasks (from plan)**:
+- E1: `ice_mass_matrix_fill` (one-time setup)
+- E2: `ice_TG_rhs` + `ice_TG_rhs_div`
+- E3: `ice_solve_low_order` + `ice_solve_high_order`
+- E4: `ice_fem_fct` (Zalesak limiter)
+- E5: `ice_fct_solve` (driver)
+- E6: wire into `fesom_ice_step`
+- E7: proactive halo-write audit
+- E8: validation
+
+After E6: between EVP and thermo in `fesom_ice_step`, call
+`fesom_ice_tg_rhs → fesom_ice_fct_solve → fesom_ice_cut_off` (mirroring
+`ice_setup_step.F90:258-295`).
+
+**Validation** (Task E8): full month at multi-rank; ice-cover area in
+correct order of magnitude (~10% of ocean area); a_ice physically bounded
+(0…1); compare T.min trajectory to Fortran reference if available.
+
+## Workflow rules earned the hard way
+
+1. **Always clean build** (`bash -l configure.sh --clean`).
+2. **Unique OUT_DIR per SLURM job** (and unique `FESOM_EVP_DUMP_DIR` if
+   using diagnostics) — `feedback_unique_outdir_per_job.md`.
+3. **2× repeat tests** before declaring "validated". One PASS isn't enough.
+4. **Commit at every working state** with a clear message.
+5. **Follow Fortran literally** — no "simplifying" loop bounds, no
+   "saving memory" by sizing arrays smaller. The forced halo coverage
+   isn't accidental.
+6. **PHC IC differs across rank counts** — accept it. Don't burn cycles
+   diffing PHC at 1-rank vs N-rank. See `feedback_phc_rank_dependent.md`.
+7. **Use the dump diagnostic** — set `FESOM_EVP_DUMP_DIR` and run
+   `scripts/evp_dump_diff.py` whenever multi-rank diverges from 1-rank.
+   The HUGE diagnostic is always on; check stderr first.
+
+## Quick commands
+
+```bash
+# Dev cycle
+cd ~/port2/fesom2_port
+bash -l configure.sh --clean
+
+# 16-rank smoke test (200 steps)
+sbatch job_core2_16_fix
+
+# 16-rank with full dumps (NSTEPS=2 for diagnostic)
+sbatch job_core2_16r_evp_dump
+
+# Diff against 1-rank reference
+python3 scripts/evp_dump_diff.py <1r_dir> <16r_dir>
 ```
 
-Then submit a 16-rank job (NSTEPS=2, FESOM_PRINT_EVERY=1, fresh OUT_DIR)
-and look at the first NaN report.
+## Bug class to watch for in Phase E
 
-**Step 2: Trace inputs at the bad node**
+The exact pattern that bit us in Phase D was: array sized myDim,
+read at halo by a compute-over-halo kernel → garbage halo values →
+downstream physics explodes. In Phase E, the analogues are arrays like
+`fct_tmax`, `fct_tmin`, `fct_plus`, `fct_minus`, `fct_fluxes`,
+`values_rhs`, `values_div_rhs`, `dvalues`, `valuesl`. Each:
+1. allocated to size N (check what N is — `myDim` or `myDim+eDim`?)
+2. written by which function with which loop bound?
+3. read by which function with which loop bound?
 
-Once you know which node first goes NaN, find what input value at that node
-is wrong. Likely candidates:
-- `inv_mass[n]` — if NaN, drag → NaN, velocity → NaN
-- `u_w[n]` or `v_w[n]` — if NaN at halo (ocean2ice halo coverage)
-- `inv_areamass[n]` — if NaN
-- `stress_atmice_x[n]` (should be 0; if not, something corrupted)
-
-**Step 3: Backwards trace**
-
-If e.g. `inv_mass` is NaN at a halo node where Step 2 of EVPdynamics didn't
-write it (myDim only), then maybe something earlier wrote NaN to it. Or
-maybe `a_ice` at that node is NaN.
-
-The hint from the user during the last session was Russian:
-
-> "скорее всего где то забыты коммуникации, или же цикл не включает гало
-> (в некоторых местах мы делаем вычисления и по гало, чтобы избежать
-> коммуникации"
-
-Translation: "most likely there are forgotten communications somewhere, or
-a loop that doesn't include halo (in some places we compute over halo too
-to avoid communication)". Keep this lens — even though static audit is
-clean, NaN detection will find the actual missing piece.
-
-## Files to focus on
-
-```
-/home/a/a270088/port2/fesom2_port/src/fesom_ice_evp.c    # the suspect
-/home/a/a270088/port2/fesom2_port/src/fesom_ice_evp.h
-/home/a/a270088/port2/fesom2_port/src/fesom_ice.c         # dispatcher + step driver
-/home/a/a270088/port2/fesom2/src/ice_EVP.F90              # Fortran ground truth (read in full)
-```
-
-Reference (do NOT modify Fortran source — it's the ground truth):
-```
-/home/a/a270088/port2/fesom2/src/ice_EVP.F90
-/home/a/a270088/port2/fesom2/src/MOD_ICE.F90
-/home/a/a270088/port2/fesom2/src/oce_mesh.F90        # mesh setup, halo exchanges
-```
-
-## Job script template
-
-There's a `job_core2_16_fix` template at the repo root. Always:
-1. `cp job_core2_16_fix /tmp/job_my_test`
-2. Edit OUT_DIR to a UNIQUE name like `/work/ab0995/a270088/port/core2_16r_evp_nantrace_$(date +%s)`
-3. `mkdir -p $OUT_DIR`
-4. `sbatch /tmp/job_my_test`
-
-For 1-rank tests:
-```
-sed -i 's|--ntasks=16|--ntasks=1|; s|--ntasks-per-node=16|--ntasks-per-node=1|' /tmp/job_my_test
-```
-
-Note 1-rank takes ~14 min wallclock for CORE2 200 steps; 16-rank is ~3 min.
-
-## Workflow rules from last session
-
-1. **ALWAYS clean build** (`bash -l configure.sh --clean`). Stale objects
-   from previous source state will silently link with new source — symptom
-   looks like flaky behavior. Burned hours on this.
-2. **ALWAYS unique OUT_DIR per SLURM job.** Concurrent jobs sharing the
-   same `/work/.../` directory clobber each other's `run.log` and
-   `snap_*.nc`, producing logs that look like crashes but aren't. Burned
-   hours on this too.
-3. **2× repeat tests** before declaring a phase "validated". One PASS is
-   not enough — the EVP commit was based on a single PASS that turned out
-   not to reproduce.
-4. **Commit at every working state** with a clear message about what's
-   verified. The Phase C commit (`edc9e65`) saved us today; without it the
-   session would have been a total loss.
-5. **Follow Fortran literally.** When tempted to invent a structure
-   Fortran doesn't have (like a `edge_is_boundary` per-edge array), stop
-   and find the Fortran convention instead (`myList_edge2D > edge2D_in`
-   was the right answer).
-
-## What's already saved
-
-- This prompt: `/home/a/a270088/port2/fesom2_port/docs/NEXT_SESSION_PROMPT.md`
-- Sea-ice port plan: `/home/a/a270088/port2/fesom2_port/docs/plans/20260425-sea-ice-port.md`
-- Phase D EVP code: branch `debug-evp` in this repo
-- D5 attempt patch (`oce_fluxes_mom`): saved at `/tmp/sea_ice_modified.patch` and `/tmp/sea_ice_work/` (may be cleared by /tmp policy — back up if needed)
-
-## When EVP is fixed
-
-1. Verify with **3 fresh runs** at 16-rank (different OUT_DIRs) all passing
-2. Verify at 1-rank still passing
-3. Verify at 32-rank passing (different partition exposes different halo
-   patterns)
-4. Commit to `debug-evp`
-5. `git checkout main && git merge debug-evp`
-6. Move to D5 (oce_fluxes_mom) — saved attempt is mostly correct, just
-   needs to ride on a working EVP
-
-## Then Phase E
-
-FCT advection of ice tracers. Plan calls it the highest-risk phase
-(`init_tracers_AB` and `fct_ttf_max/min` halo bugs in ocean FCT are
-expected to recur). Do the proactive halo audit per
-`feedback_write_loops_halo.md` as you write it.
+If READER bound > WRITER bound (or > allocation size): bug. The Fortran
+sizes them all `myDim+eDim` — match it in C.
