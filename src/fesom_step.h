@@ -38,12 +38,20 @@ struct fesom_forcing;
  *   - update_stiff_mat_ale (linfs branch skips it)
  */
 struct fesom_partit;
+struct fesom_ice;
+struct fesom_jra55;
+struct fesom_sss_runoff;
 
 typedef struct fesom_step_ctx {
     fesom_ssh_stiff           *stiff;
     fesom_solverinfo          *solver;
     fesom_tracer_adv_scratch  *tra_sc;
     struct fesom_partit       *partit;     /* needed for halo exchanges */
+    struct fesom_ice          *ice;        /* sea-ice state; NULL = no ice */
+    /* Optional pointers for the sea-ice thermodynamics path. NULL is fine
+     * if the FESOM_NO_ICE_THERMO env knob is set. */
+    const struct fesom_jra55      *jra;
+    const struct fesom_sss_runoff *sr;
 } fesom_step_ctx;
 
 /*

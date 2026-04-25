@@ -85,6 +85,12 @@ typedef struct fesom_mesh {
     real_t *helem;            /* [elem2D * nl]  layer thickness at cells     */
     real_t *hbar;             /* [nod2D]                                     */
     real_t *hbar_old;         /* [nod2D]                                     */
+
+    /* Boundary mask: 1 on interior nodes, 0 on open-boundary edge endpoints.
+       Allocated and populated by fesom_ice_init (mirrors MOD_ICE.F90:889-895
+       which moved the alloc into ice_init for namelist-timing reasons).
+       Read by ice EVP. NULL until fesom_ice_init runs. */
+    real_t *bc_index_nod2D;   /* [myDim+eDim] */
 } fesom_mesh;
 
 void fesom_mesh_init(fesom_mesh *m);

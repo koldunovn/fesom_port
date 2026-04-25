@@ -11,6 +11,7 @@
 #include "fesom_eos.h"
 #include "fesom_forcing.h"
 #include "fesom_halo.h"
+#include "fesom_ice.h"
 #include "fesom_mesh.h"
 #include "fesom_momentum.h"
 #include "fesom_partit.h"
@@ -157,6 +158,9 @@ int fesom_timestep(int                          step_n,
     fesom_ale_commit_thickness(mesh);
     fesom_exchange_nod3D (mesh->hnode, nl, p);   /* both already same — but be explicit */
     fesom_exchange_elem3D(mesh->helem, nl, p);   /* Fortran oce_ale.F90:1027,1249 */
+
+    /* Sea-ice step is now called from fesom_main BEFORE the ocean step
+     * (ice writes heat_flux/water_flux that the ocean step consumes). */
 
     return cg_iters;
 }

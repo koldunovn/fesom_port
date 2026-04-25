@@ -11,6 +11,7 @@
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
+#include "fesom_ice_types.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -268,6 +269,7 @@ void fesom_io_write_snapshot(const char                  *path,
                              const struct fesom_dyn      *dyn,
                              const struct fesom_tracers  *tracers,
                              const struct fesom_aux      *aux,
+                             const struct fesom_ice      *ice,
                              struct fesom_partit         *partit)
 {
     const int nl     = mesh->nl;
@@ -288,6 +290,10 @@ void fesom_io_write_snapshot(const char                  *path,
     real_t *g_Kv = NULL, *g_Av = NULL;
     real_t *g_lon = NULL, *g_lat = NULL;
     int    *g_elem_nodes = NULL, *g_nlev_nod = NULL, *g_nlev_elem = NULL;
+    /* sea-ice fields (NULL if ice == NULL) */
+    real_t *g_aice = NULL, *g_mice = NULL, *g_msnow = NULL;
+    real_t *g_uice = NULL, *g_vice = NULL;
+    real_t *g_hice = NULL, *g_hsnow = NULL;
     if (mype == 0) {
         g_T    = malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
         g_S    = malloc((size_t)nod2D  * (size_t)nl * sizeof(real_t));
@@ -309,6 +315,17 @@ void fesom_io_write_snapshot(const char                  *path,
                     g_pgfx && g_pgfy && g_Kv && g_Av && g_lon && g_lat &&
                     g_elem_nodes && g_nlev_nod && g_nlev_elem,
                     "io: oom (global buffers)");
+        if (ice) {
+            g_aice  = malloc((size_t)nod2D * sizeof(real_t));
+            g_mice  = malloc((size_t)nod2D * sizeof(real_t));
+            g_msnow = malloc((size_t)nod2D * sizeof(real_t));
+            g_uice  = malloc((size_t)nod2D * sizeof(real_t));
+            g_vice  = malloc((size_t)nod2D * sizeof(real_t));
+            g_hice  = malloc((size_t)nod2D * sizeof(real_t));
+            g_hsnow = malloc((size_t)nod2D * sizeof(real_t));
+            FESOM_CHECK(g_aice && g_mice && g_msnow && g_uice && g_vice
+                     && g_hice && g_hsnow, "io: oom (ice global buffers)");
+        }
     }
 
     /* ---- Gather per-vertex coordinates (geo radians → degrees on rank 0) -- */
@@ -364,6 +381,16 @@ void fesom_io_write_snapshot(const char                  *path,
     gather_elem(aux->pgf_y,                           nl, &gp, g_pgfy, comm);
     gather_node(aux->Kv,                              nl, &gp, g_Kv,   comm);
     gather_elem(aux->Av,                              nl, &gp, g_Av,   comm);
+
+    if (ice) {
+        gather_node(ice->data[FESOM_ICE_AICE].values,  1, &gp, g_aice,  comm);
+        gather_node(ice->data[FESOM_ICE_MICE].values,  1, &gp, g_mice,  comm);
+        gather_node(ice->data[FESOM_ICE_MSNOW].values, 1, &gp, g_msnow, comm);
+        gather_node(ice->uice,   1, &gp, g_uice,  comm);
+        gather_node(ice->vice,   1, &gp, g_vice,  comm);
+        gather_node(ice->h_ice,  1, &gp, g_hice,  comm);
+        gather_node(ice->h_snow, 1, &gp, g_hsnow, comm);
+    }
 
     /* Non-rank-0 ranks are done. */
     if (mype != 0) {
@@ -424,6 +451,18 @@ void fesom_io_write_snapshot(const char                  *path,
     NC_CHECK(nc_def_var(ncid, "Kv",             NC_DOUBLE, 3, dims_t_T,   &var_Kv));
     NC_CHECK(nc_def_var(ncid, "Av",             NC_DOUBLE, 3, dims_t_uv,  &var_Av));
 
+    int var_aice = -1, var_mice = -1, var_msnow = -1;
+    int var_uice = -1, var_vice = -1, var_hice = -1, var_hsnow = -1;
+    if (ice) {
+        NC_CHECK(nc_def_var(ncid, "a_ice",  NC_DOUBLE, 2, dims_t_eta, &var_aice));
+        NC_CHECK(nc_def_var(ncid, "m_ice",  NC_DOUBLE, 2, dims_t_eta, &var_mice));
+        NC_CHECK(nc_def_var(ncid, "m_snow", NC_DOUBLE, 2, dims_t_eta, &var_msnow));
+        NC_CHECK(nc_def_var(ncid, "uice",   NC_DOUBLE, 2, dims_t_eta, &var_uice));
+        NC_CHECK(nc_def_var(ncid, "vice",   NC_DOUBLE, 2, dims_t_eta, &var_vice));
+        NC_CHECK(nc_def_var(ncid, "h_ice",  NC_DOUBLE, 2, dims_t_eta, &var_hice));
+        NC_CHECK(nc_def_var(ncid, "h_snow", NC_DOUBLE, 2, dims_t_eta, &var_hsnow));
+    }
+
     /* CF-compliant time units so xarray.open_mfdataset can decode without
      * `decode_times=False`. We don't have a real model calendar yet, so
      * the reference date is a Phase-1 placeholder; it's just an offset for
@@ -448,6 +487,16 @@ void fesom_io_write_snapshot(const char                  *path,
     NC_CHECK(nc_put_att_text(ncid, var_pgfy, "units", 5, "m/s^2"));
     NC_CHECK(nc_put_att_text(ncid, var_Kv,   "units", 5, "m^2/s"));
     NC_CHECK(nc_put_att_text(ncid, var_Av,   "units", 5, "m^2/s"));
+
+    if (ice) {
+        NC_CHECK(nc_put_att_text(ncid, var_aice,  "units", 1, "1"));
+        NC_CHECK(nc_put_att_text(ncid, var_mice,  "units", 1, "m"));
+        NC_CHECK(nc_put_att_text(ncid, var_msnow, "units", 1, "m"));
+        NC_CHECK(nc_put_att_text(ncid, var_uice,  "units", 3, "m/s"));
+        NC_CHECK(nc_put_att_text(ncid, var_vice,  "units", 3, "m/s"));
+        NC_CHECK(nc_put_att_text(ncid, var_hice,  "units", 1, "m"));
+        NC_CHECK(nc_put_att_text(ncid, var_hsnow, "units", 1, "m"));
+    }
 
     int    step_attr = step_n;
     double dt_attr   = (double)dt;
@@ -529,6 +578,16 @@ void fesom_io_write_snapshot(const char                  *path,
 
     free(buf_nl); free(buf_nl_e); free(buf_w);
 
+    if (ice) {
+        NC_CHECK(nc_put_vara_double(ncid, var_aice,  start1, count1, g_aice));
+        NC_CHECK(nc_put_vara_double(ncid, var_mice,  start1, count1, g_mice));
+        NC_CHECK(nc_put_vara_double(ncid, var_msnow, start1, count1, g_msnow));
+        NC_CHECK(nc_put_vara_double(ncid, var_uice,  start1, count1, g_uice));
+        NC_CHECK(nc_put_vara_double(ncid, var_vice,  start1, count1, g_vice));
+        NC_CHECK(nc_put_vara_double(ncid, var_hice,  start1, count1, g_hice));
+        NC_CHECK(nc_put_vara_double(ncid, var_hsnow, start1, count1, g_hsnow));
+    }
+
     NC_CHECK(nc_close(ncid));
 
     free(g_T); free(g_S); free(g_eta); free(g_w); free(g_uv);
@@ -536,6 +595,8 @@ void fesom_io_write_snapshot(const char                  *path,
     free(g_Kv); free(g_Av);
     free(g_lon); free(g_lat);
     free(g_elem_nodes); free(g_nlev_nod); free(g_nlev_elem);
+    free(g_aice); free(g_mice); free(g_msnow);
+    free(g_uice); free(g_vice); free(g_hice); free(g_hsnow);
 
     gather_plan_free(&gp);
 }

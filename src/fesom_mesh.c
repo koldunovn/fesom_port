@@ -58,6 +58,7 @@ void fesom_mesh_free(fesom_mesh *m)
     free(m->helem);
     free(m->hbar);
     free(m->hbar_old);
+    free(m->bc_index_nod2D);
     memset(m, 0, sizeof(*m));
 }
 

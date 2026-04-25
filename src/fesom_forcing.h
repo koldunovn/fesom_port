@@ -29,6 +29,13 @@ typedef struct fesom_forcing {
     real_t *Ssurf;           /* [nod2D]  monthly SSS climatology, PSU       */
     real_t *virtual_salt;    /* [nod2D]  rsss·water_flux (linfs only)        */
     real_t *relax_salt;      /* [nod2D]  surf_relax_S·(Ssurf - S_top)        */
+
+    /* Per-node bulk transfer coefficients for the open-water (atm-ocean) path.
+       Computed by fesom_bulk_compute via L&Y09; consumed by sea-ice
+       thermodynamics (fesom_ice_thermodynamics). Mirrors Fortran
+       Ch_atm_oce_arr / Ce_atm_oce_arr in g_forcing_arrays. */
+    real_t *Ch_atm_oce;      /* [nod2D]  sensible-heat transfer coeff (open water) */
+    real_t *Ce_atm_oce;      /* [nod2D]  evaporation transfer coeff   (open water) */
 } fesom_forcing;
 
 void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh);

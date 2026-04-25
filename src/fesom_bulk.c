@@ -257,6 +257,10 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
         ncar_ocean_fluxes_mode(ta, qa, ua, va, T_oc, u_w, v_w,
                                jra->z_wind, jra->z_tair, jra->z_shum,
                                &cd, &ce, &ch);
+        /* save per-node ch/ce for the sea-ice thermodynamics path
+         * (Fortran: Ch_atm_oce_arr / Ce_atm_oce_arr in g_forcing_arrays) */
+        forcing->Ch_atm_oce[n] = ch;
+        forcing->Ce_atm_oce[n] = ce;
 
         /* Wind speed for obudget — Fortran ice_thermo_oce uses sqrt(u_wind² + v_wind²). */
         real_t ug = sqrt(ua*ua + va*va);

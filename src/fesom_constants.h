@@ -84,4 +84,10 @@ extern real_t fesom_phase1_dt;
 #define FESOM_PHASE1_SOLTOL    1.0e-5
 #define FESOM_PHASE1_MAXITER   500
 
+/* Sea-ice exchange coefficients over ice (Fortran gen_modules_forcing.F90:17-19;
+   namelist /forcing_exchange_coeff/ defaults). */
+#define FESOM_CH_ATM_ICE       1.75e-3   /* sensible-heat over ice */
+#define FESOM_CE_ATM_ICE       1.75e-3   /* evaporation over ice   */
+#define FESOM_CD_ATM_ICE       1.32e-3   /* drag over ice          */
+
 #endif /* FESOM_CONSTANTS_H */

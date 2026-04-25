@@ -7,6 +7,7 @@
 #include "fesom_forcing.h"
 #include "fesom_forcing_analytical.h"
 #include "fesom_ic.h"
+#include "fesom_ice.h"
 #include "fesom_io.h"
 #include "fesom_halo.h"
 #include "fesom_jra55.h"
@@ -309,6 +310,13 @@ int main(int argc, char **argv)
     fesom_tracers tracers; fesom_tracers_alloc(&tracers, &mesh);
     fesom_aux     aux;     fesom_aux_alloc    (&aux,    &mesh);
     fesom_forcing forcing; fesom_forcing_alloc(&forcing, &mesh);
+
+    /* Sea-ice state (Phase A: allocator + no-op driver only).
+     * fesom_ice_setup needs the ocean dt to compute Tevp_inv, so it runs
+     * after the dt CLI override has been applied. */
+    fesom_ice ice;
+    fesom_ice_init (&ice, &mpi, &mesh);
+    fesom_ice_setup(&ice, &mpi, &mesh);
 
     /* Cheap accounting: total bytes allocated for the 3D state arrays (rough). */
     size_t bytes = 0;
@@ -694,6 +702,10 @@ skip_rest_state:
                                /*amp_C=*/      5.0);
     }
 
+    /* Sea-ice cold-start IC: must run AFTER tracer IC so SST is set.
+     * Mirrors Fortran ice_initial_state at ice_setup_step.F90:500-521. */
+    fesom_ice_initial_state(&ice, &tracers, &mpi, &mesh);
+
     /* Phase 3 step 24: JRA55-do daily forcing.
        If jra55_year > 0, init JRA55 reader + bulk formulae + SSS restoring +
        CORE2 runoff; the timestep loop below calls fesom_jra55_step,
@@ -769,7 +781,10 @@ skip_rest_state:
         fesom_step_ctx ctx = { .stiff = &stiff,
                                .solver = &solver,
                                .tra_sc = &tra_sc,
-                               .partit = &mpi };
+                               .partit = &mpi,
+                               .ice    = &ice,
+                               .jra    = use_jra ? &jra : NULL,
+                               .sr     = use_sr  ? &sr  : NULL };
         const int nsteps      = (nsteps_cli > 0)     ? nsteps_cli     : 500;
         const int snap_every  = (snap_every_cli > 0) ? snap_every_cli : 25;
         /* FESOM_PRINT_EVERY env override — useful for tracking instability
@@ -807,7 +822,7 @@ skip_rest_state:
             char path[1024];
             snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, 0);
             fesom_io_write_snapshot(path, 0, FESOM_PHASE1_DT,
-                                    &mesh, &dyn, &tracers, &aux, &mpi);
+                                    &mesh, &dyn, &tracers, &aux, &ice, &mpi);
         }
         if (mpi.mype == 0) {
             printf("# step iters | uv eta w | T-range S-range | stress hf wf vs rs | hp pgf rho bv-range Kv Av\n");
@@ -865,6 +880,19 @@ skip_rest_state:
                 memcpy(tracers.data[FESOM_TRACER_T].values, T_ic, ts_nbytes);
                 memcpy(tracers.data[FESOM_TRACER_S].values, S_ic, ts_nbytes);
             }
+
+            /* Sea-ice step runs BEFORE the ocean step within each iteration,
+             * mirroring the Fortran flow in oce_timestep_ale. The ice step:
+             *   1. ocean2ice — copies ocean surface state into ice->srfoce_*
+             *   2. thermodynamics — writes ice tracers + flx_h + flx_fw
+             *   3. cut_off — clamps ice tracers
+             *   4. oce_fluxes — overwrites heat_flux/water_flux/virtual_salt/relax_salt
+             *      from the ice-mediated fluxes (Phase C2).
+             * The ocean step that follows then sees the updated forcing. */
+            fesom_ice_step(n, &ice, &mpi, &mesh,
+                           &dyn, &tracers, &forcing,
+                           use_jra ? &jra : NULL,
+                           use_sr  ? &sr  : NULL);
 
             /* Per-step heartbeat on rank 0 — independent of print_every so
              * we always see SOMETHING happening even if the model is hung
@@ -1007,7 +1035,7 @@ skip_rest_state:
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
                 fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT,
-                                        &mesh, &dyn, &tracers, &aux, &mpi);
+                                        &mesh, &dyn, &tracers, &aux, &ice, &mpi);
             }
         }
         free(T_ic); free(S_ic);
@@ -1061,6 +1089,7 @@ skip_rest_state:
     if (use_sr)  fesom_sss_runoff_free(&sr);
     if (use_jra) fesom_jra55_free(&jra);
     fesom_forcing_free(&forcing);
+    fesom_ice_free    (&ice);
     fesom_aux_free    (&aux);
     fesom_tracers_free(&tracers);
     fesom_dyn_free    (&dyn);

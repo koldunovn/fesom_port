@@ -357,15 +357,11 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
      * `feedback_write_loops_halo.md`. */
     const int N_full = mesh->myDim_nod2D + mesh->eDim_nod2D;
 
-    /* Apply river runoff to water_flux. In the standard Fortran (no-ICEPACK)
-     * path, runoff is folded into fresh_wa_flux inside therm_ice (called from
-     * thermodynamics loop, ice_thermo_oce.F90:270-323). We don't run therm_ice
-     * (no sea ice yet); our bulk obudget computes water_flux = E-P-S only.
-     * Replicating the Fortran ICEPACK formula (line 378):
-     *     water_flux(n) = -(fresh_wa_flux*inv_rhowat) - runoff(n) */
-    for (int n = 0; n < N_full; ++n) {
-        forcing->water_flux[n] -= forcing->runoff[n];
-    }
+    /* Phase C3b: removed runoff subtraction.
+     * Runoff is now folded into ice->flx_fw inside fesom_therm_ice (via
+     * `prec = rain + runo + snow*(1-A)`), then plumbed into water_flux by
+     * fesom_ice_oce_fluxes. Subtracting again here would double-count.
+     * See feedback_runoff_fold_when_ice.md (resolved 2026-04-25). */
 
     /* Fortran lines 436-457 — virtual_salt = rsss * water_flux, then
      * subtract global mean to enforce zero net salt flux. */

@@ -8,6 +8,7 @@ struct fesom_dyn;
 struct fesom_tracers;
 struct fesom_aux;
 struct fesom_partit;
+struct fesom_ice;
 
 /*
  * Write one snapshot of the model state to a NetCDF file.
@@ -44,6 +45,13 @@ struct fesom_partit;
  *     pgf_x, pgf_y (nz_1, elem)    pressure-gradient force, m/s²
  *     Kv (nz_1, nod2), Av (nz_1, elem)   vertical diffusivity / viscosity
  *
+ *   sea-ice state (only when ice != NULL; all per-node, single level):
+ *     a_ice (nod2)                 ice area fraction
+ *     m_ice (nod2)                 ice volume per area, m
+ *     m_snow(nod2)                 snow volume per area, m
+ *     uice (nod2), vice (nod2)     ice velocity, m/s
+ *     h_ice (nod2), h_snow (nod2)  diagnostic ice/snow thickness, m
+ *
  *   time dimension:
  *     time = 1 (UNLIMITED, model_time_seconds for this snapshot).
  *     All time-varying state variables get `time` as the outermost axis so
@@ -65,6 +73,7 @@ void fesom_io_write_snapshot(const char                  *path,
                              const struct fesom_dyn      *dyn,
                              const struct fesom_tracers  *tracers,
                              const struct fesom_aux      *aux,
+                             const struct fesom_ice      *ice,
                              struct fesom_partit         *partit);
 
 #endif /* FESOM_IO_H */
