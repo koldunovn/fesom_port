@@ -23,9 +23,13 @@ void fesom_aux_alloc(fesom_aux *a, const struct fesom_mesh *mesh)
     a->pgf_x          = calloc(e_nl, sizeof(real_t));
     a->pgf_y          = calloc(e_nl, sizeof(real_t));
 
+    /* Phase G2a: MLD1_ind (filled by fesom_pressure_bv). */
+    a->MLD1_ind       = calloc((size_t)N, sizeof(int));
+
     FESOM_CHECK(a->density_m_rho0 && a->hpressure && a->bvfreq
              && a->sw_alpha && a->sw_beta && a->Kv
-             && a->Av && a->pgf_x && a->pgf_y,
+             && a->Av && a->pgf_x && a->pgf_y
+             && a->MLD1_ind,
              "fesom_aux alloc: out of memory");
 }
 
@@ -40,5 +44,6 @@ void fesom_aux_free(fesom_aux *a)
     free(a->Av);
     free(a->pgf_x);
     free(a->pgf_y);
+    free(a->MLD1_ind);
     memset(a, 0, sizeof(*a));
 }

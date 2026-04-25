@@ -6,6 +6,7 @@
 #include "fesom_eos.h"
 #include "fesom_forcing.h"
 #include "fesom_forcing_analytical.h"
+#include "fesom_gm.h"
 #include "fesom_ic.h"
 #include "fesom_ice.h"
 #include "fesom_ice_coupling.h"
@@ -334,6 +335,7 @@ int main(int argc, char **argv)
     fesom_tracers tracers; fesom_tracers_alloc(&tracers, &mesh);
     fesom_aux     aux;     fesom_aux_alloc    (&aux,    &mesh);
     fesom_forcing forcing; fesom_forcing_alloc(&forcing, &mesh);
+    fesom_gm      gm;      fesom_gm_alloc     (&gm,     &mesh);
 
     /* Sea-ice state (Phase A: allocator + no-op driver only).
      * fesom_ice_setup needs the ocean dt to compute Tevp_inv, so it runs
@@ -1132,6 +1134,7 @@ skip_rest_state:
     if (use_jra) fesom_jra55_free(&jra);
     fesom_forcing_free(&forcing);
     fesom_ice_free    (&ice);
+    fesom_gm_free     (&gm);
     fesom_aux_free    (&aux);
     fesom_tracers_free(&tracers);
     fesom_dyn_free    (&dyn);

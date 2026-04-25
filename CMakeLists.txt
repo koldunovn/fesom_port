@@ -76,6 +76,7 @@ add_executable(fesom_port
   src/fesom_ice_coupling.c
   src/fesom_ice_evp.c
   src/fesom_ice_fct.c
+  src/fesom_gm.c
 )
 target_include_directories(fesom_port PRIVATE src ${NC_INCDIR})
 target_link_libraries(fesom_port PRIVATE m ${NC_LIBS} MPI::MPI_C)

@@ -40,6 +40,13 @@ typedef struct fesom_dyn {
                            by PP mixing (Fortran tracers%data%uvnode is held
                            in dynamics%uvnode). */
 
+    /* GM bolus velocity. Allocated by fesom_dyn_alloc; written by
+     * fesom_fer_gamma2vel (G4) for fer_uv and inside vert_vel_linfs (G6a)
+     * for fer_w. Zero when GM is off. Mirror of dynamics%fer_uv / fer_w
+     * (MOD_DYN.F90). */
+    real_t *fer_uv;     /* [(myDim+eDim+eXDim) * nl * 2]   element-centered */
+    real_t *fer_w;      /* [(myDim+eDim) * nl]             node-centered    */
+
     /* Work arrays for visc_filt_bcksct (opt_visc=5). Mirror of
        dynamics%work%u_b/v_b/u_c/v_c (MOD_DYN.F90 t_dyn_work). */
     real_t *u_b;        /* [elem2D * nl] per-element raw harmonic-visc update */

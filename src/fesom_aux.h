@@ -23,6 +23,13 @@ struct fesom_mesh;
  *   pgf_y           [elem2D * nl]  pressure-gradient force, y-component (m/s²)
  *
  * KPP additions (Kv per tracer, blmc, ghats, OBL depth) are deferred to Phase 4.
+ *
+ * GM/Redi additions (Phase G2a):
+ *   MLD1_ind        [nod2D]        mixed-layer-depth index per node, computed
+ *                                  by fesom_pressure_bv. Used by init_Redi_GM
+ *                                  with K_GM_bvref=1 (default) to pick the
+ *                                  reference buoyancy at the bottom of the ML.
+ *                                  Mirror of o_ARRAYS::MLD1_ind.
  */
 typedef struct fesom_aux {
     real_t *density_m_rho0;
@@ -35,6 +42,8 @@ typedef struct fesom_aux {
     real_t *Av;
     real_t *pgf_x;
     real_t *pgf_y;
+
+    int    *MLD1_ind;       /* [nod2D] — populated by fesom_pressure_bv */
 } fesom_aux;
 
 void fesom_aux_alloc(fesom_aux *a, const struct fesom_mesh *mesh);

@@ -35,10 +35,14 @@ void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
     d->d_eta       = calloc(n,      sizeof(real_t));
     d->ssh_rhs     = calloc(n,      sizeof(real_t));
     d->ssh_rhs_old = calloc(n,      sizeof(real_t));
+    /* GM bolus velocity (Phase G1) — zero until G4/G6a write to them. */
+    d->fer_uv      = calloc(e_nl_2, sizeof(real_t));
+    d->fer_w       = calloc(n_nl,   sizeof(real_t));
     FESOM_CHECK(d->uv && d->uv_rhs && d->uv_rhsAB && d->w && d->w_e && d->w_i
              && d->cfl_z && d->uvnode
              && d->u_b && d->v_b && d->u_c && d->v_c
-             && d->eta_n && d->d_eta && d->ssh_rhs && d->ssh_rhs_old,
+             && d->eta_n && d->d_eta && d->ssh_rhs && d->ssh_rhs_old
+             && d->fer_uv && d->fer_w,
              "fesom_dyn alloc: out of memory");
 }
 
@@ -60,5 +64,7 @@ void fesom_dyn_free(fesom_dyn *d)
     free(d->d_eta);
     free(d->ssh_rhs);
     free(d->ssh_rhs_old);
+    free(d->fer_uv);
+    free(d->fer_w);
     memset(d, 0, sizeof(*d));
 }
