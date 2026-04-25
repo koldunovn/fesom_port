@@ -741,7 +741,7 @@ skip_rest_state:
         /* Compute the very-first surface state for this set of bulk inputs
            so the first timestep sees forcing immediately. uvnode is zero at
            IC (UV=0); T_oc from initial T field. */
-        fesom_jra55_step(&jra, &mesh, jra55_year, /*daynew=*/1, /*timenew=*/0.0);
+        fesom_jra55_step(&jra, &mesh, &mpi, jra55_year, /*daynew=*/1, /*timenew=*/0.0);
         fesom_compute_vel_nodes(&mesh, &dyn);
         fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &mpi);
         real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
@@ -842,7 +842,7 @@ skip_rest_state:
                 double t_sec = (double)(n - 1) * (double)FESOM_PHASE1_DT;
                 daynew  = (int)floor(t_sec / 86400.0) + 1;
                 timenew = t_sec - (daynew - 1) * 86400.0;
-                fesom_jra55_step(&jra, &mesh, jra55_year, daynew, (real_t)timenew);
+                fesom_jra55_step(&jra, &mesh, &mpi, jra55_year, daynew, (real_t)timenew);
                 fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &mpi);
             }
             if (use_sr) {

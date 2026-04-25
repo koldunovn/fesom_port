@@ -6,6 +6,45 @@
 #include "fesom_types.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+/* --- debug-only dumps for multi-rank EVP divergence diagnosis ---
+ * Gated by FESOM_EVP_DUMP_DIR env var. When unset, every dump call is one
+ * NULL check + one int increment. Fires only on the first call to
+ * fesom_ice_evp_dynamics (== ocean step 1) and only inside iter 0 of the
+ * subcycle. See docs/NEXT_SESSION_PROMPT.md.
+ */
+static int         s_evp_call_step  = 0;
+static const char *s_evp_dump_dir   = NULL;
+static int         s_evp_dump_loaded = 0;
+
+static void evp_dump_load_env(void)
+{
+    if (s_evp_dump_loaded) return;
+    s_evp_dump_dir = getenv("FESOM_EVP_DUMP_DIR");
+    s_evp_dump_loaded = 1;
+}
+
+static void evp_dump(int step, const char *point, const char *cls,
+                     const real_t * const *vals, int nvals,
+                     int N, const int *gids, int rank)
+{
+    if (!s_evp_dump_dir) return;
+    char path[1024];
+    snprintf(path, sizeof(path),
+             "%s/evp_dump_s%d_%s_%s_rank%d.txt",
+             s_evp_dump_dir, step, point, cls, rank);
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "evp_dump: cannot open %s\n", path); return; }
+    fprintf(f, "# step=%d point=%s array=%s rank=%d N=%d\n", step, point, cls, rank, N);
+    for (int n = 0; n < N; ++n) {
+        fprintf(f, "%d", gids[n]);
+        for (int k = 0; k < nvals; ++k) fprintf(f, " %.17g", vals[k][n]);
+        fputc('\n', f);
+    }
+    fclose(f);
+}
 
 /*
  * Mirror of Fortran stress_tensor at ice_EVP.F90:46.
@@ -202,6 +241,25 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
     real_t ax = cos(ice->theta_io);
     real_t ay = sin(ice->theta_io);
 
+    evp_dump_load_env();
+    ++s_evp_call_step;
+    /* Dump on step 1 AND step 2 — step 2 is where 8/16-rank crash. Tag the
+     * dump filenames with the step so 1-rank vs N-rank diff stays clean. */
+    int dump_now = (s_evp_dump_dir != NULL)
+                && (s_evp_call_step == 1 || s_evp_call_step == 2);
+
+    if (dump_now) {
+        /* Q: raw inputs to EVPdynamics at this step. */
+        const real_t *qn[5] = { a_ice, m_ice, m_snow, elevation,
+                                ice->srfoce_temp };
+        evp_dump(s_evp_call_step, "Q", "node", qn, 5,
+                 mesh->myDim_nod2D, partit->myList_nod2D, partit->mype);
+
+        const real_t *uv0[2] = { u_ice, v_ice };
+        evp_dump(s_evp_call_step, "U0", "node", uv0, 2,
+                 mesh->myDim_nod2D, partit->myList_nod2D, partit->mype);
+    }
+
     /* Step 1: zero inv_areamass/inv_mass/rhs_a/rhs_m on myDim+eDim
      * (Fortran line 434, halo included intentionally) */
     for (int n = 0; n < N; ++n) {
@@ -248,6 +306,24 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
         real_t str = ice->pstar * msum * exp(-ice->c_pressure * (1.0 - asum));
         ice_strength[el] = 0.5 * str;
 
+        /* Diagnostic: catch the "exploding ice_strength" pattern. */
+        if (ice_strength[el] > 1.0e7) {
+            int gn0 = partit->myList_nod2D[n0];
+            int gn1 = partit->myList_nod2D[n1];
+            int gn2 = partit->myList_nod2D[n2];
+            int gel = partit->myList_elem2D[el];
+            int my  = mesh->myDim_nod2D;
+            fprintf(stderr,
+              "[rank %d step %d] HUGE ice_strength=%.3e at el local=%d gid=%d "
+              "vertices: (n=%d gid=%d %s a=%.4f m=%.4f) "
+              "(n=%d gid=%d %s a=%.4f m=%.4f) "
+              "(n=%d gid=%d %s a=%.4f m=%.4f)\n",
+              partit->mype, s_evp_call_step, ice_strength[el], el, gel,
+              n0, gn0, n0<my?"OWNED":"HALO ", a_ice[n0], m_ice[n0],
+              n1, gn1, n1<my?"OWNED":"HALO ", a_ice[n1], m_ice[n1],
+              n2, gn2, n2<my?"OWNED":"HALO ", a_ice[n2], m_ice[n2]);
+        }
+
         real_t aa = 9.81 * mesh->elem_area[el] / 3.0;
         real_t *gs = &mesh->gradient_sca[6*el];
         real_t e0 = elevation[n0], e1 = elevation[n1], e2 = elevation[n2];
@@ -267,12 +343,33 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
         rhs_m[n] /= mesh->area[n*nl + 0];
     }
 
+    if (dump_now) {
+        const real_t *nv[4] = { inv_mass, inv_areamass, rhs_a, rhs_m };
+        evp_dump(s_evp_call_step, "P", "node", nv, 4,
+                 mesh->myDim_nod2D, partit->myList_nod2D, partit->mype);
+        const real_t *ev[1] = { ice_strength };
+        evp_dump(s_evp_call_step, "P", "elem", ev, 1,
+                 mesh->myDim_elem2D, partit->myList_elem2D, partit->mype);
+    }
+
     /* Step 5: EVP subcycle (Fortran lines 652-832).
      * 120 iterations of stress_tensor + stress2rhs + velocity update +
      * boundary conditions + halo exchange of (uice, vice). */
     for (int sub = 0; sub < ice->evp_rheol_steps; ++sub) {
         fesom_ice_stress_tensor(ice, partit, mesh);
+        if (dump_now && sub == 0) {
+            const real_t *sv[3] = {
+                ice->work.sigma11, ice->work.sigma12, ice->work.sigma22
+            };
+            evp_dump(s_evp_call_step, "1", "elem", sv, 3,
+                     mesh->myDim_elem2D, partit->myList_elem2D, partit->mype);
+        }
         fesom_ice_stress2rhs   (ice, partit, mesh);
+        if (dump_now && sub == 0) {
+            const real_t *rv[2] = { u_rhs, v_rhs };
+            evp_dump(s_evp_call_step, "2", "node", rv, 2,
+                     mesh->myDim_nod2D, partit->myList_nod2D, partit->mype);
+        }
 
         /* Save old velocity (myDim+eDim — Fortran line 671) */
         for (int n = 0; n < N; ++n) {
@@ -305,6 +402,12 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
             }
         }
 
+        if (dump_now && sub == 0) {
+            const real_t *uv[2] = { u_ice, v_ice };
+            evp_dump(s_evp_call_step, "3", "node", uv, 2,
+                     mesh->myDim_nod2D, partit->myList_nod2D, partit->mype);
+        }
+
         /* Coastal boundary condition: zero velocity at open-boundary edge endpoints.
          * Mirror of Fortran ice_EVP.F90:727 — `if (myList_edge2D(ed) > edge2D_in)`.
          * Using global edge ID + edge2D_in (not local edge_tri[2nd] < 0) avoids
@@ -319,9 +422,21 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
             u_ice[e1] = 0.0; v_ice[e1] = 0.0;
         }
 
+        if (dump_now && sub == 0) {
+            const real_t *uv[2] = { u_ice, v_ice };
+            evp_dump(s_evp_call_step, "4", "node", uv, 2,
+                     mesh->myDim_nod2D, partit->myList_nod2D, partit->mype);
+        }
+
         /* Halo exchange of u_ice, v_ice (Fortran line 827) */
         fesom_exchange_nod2D(u_ice, partit);
         fesom_exchange_nod2D(v_ice, partit);
+    }
+
+    if (dump_now) {
+        const real_t *uv_end[2] = { u_ice, v_ice };
+        evp_dump(s_evp_call_step, "END", "node", uv_end, 2,
+                 mesh->myDim_nod2D, partit->myList_nod2D, partit->mype);
     }
 
     (void)u_old; (void)v_old;  /* saved per-iter for downstream diagnostics; not used here */

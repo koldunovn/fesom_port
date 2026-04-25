@@ -479,6 +479,33 @@ void fesom_phc_load_ic(const char                  *path,
 
     NC_CHECK(nc_close(ncid));
 
+    /* Debug dump: post-bilin pre-extrap surface T,S. */
+    {
+        const char *dd = getenv("FESOM_EVP_DUMP_DIR");
+        if (dd && partit) {
+            char dpath[1024];
+            snprintf(dpath, sizeof(dpath),
+                     "%s/phc_dump_preextrap_rank%d.txt", dd, partit->mype);
+            FILE *df = fopen(dpath, "w");
+            if (df) {
+                fprintf(df, "# var=T_surface,S_surface,bilin_i,bilin_j,lon,lat rank=%d N=%d\n",
+                        partit->mype, mesh->myDim_nod2D);
+                for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+                    int gid = partit->myList_nod2D[n];
+                    size_t k = FESOM_NODE3D(n, 0, mesh->nl);
+                    double xlon = (double)mesh->geo_coord_nod2D[2*n + 0]
+                                / FESOM_RAD;
+                    double xlat = (double)mesh->geo_coord_nod2D[2*n + 1]
+                                / FESOM_RAD;
+                    fprintf(df, "%d %.17g %.17g %d %d %.17g %.17g\n", gid,
+                            (double)T[k], (double)S[k],
+                            bilin_i[n], bilin_j[n], xlon, xlat);
+                }
+                fclose(df);
+            }
+        }
+    }
+
     /* Extrapolate to fill any remaining dummy-tagged ocean nodes. */
     extrap_nod3D(mesh, partit, T);
     extrap_nod3D(mesh, partit, S);
@@ -541,4 +568,26 @@ void fesom_phc_load_ic(const char                  *path,
     }
     printf("[fesom_phc] T ∈ [%.4f, %.4f] °C   S ∈ [%.4f, %.4f] PSU\n",
            (double)Tmin, (double)Tmax, (double)Smin, (double)Smax);
+
+    /* Debug dump: post-PHC-load surface T per gid (gated on FESOM_EVP_DUMP_DIR). */
+    {
+        const char *dd = getenv("FESOM_EVP_DUMP_DIR");
+        if (dd && partit) {
+            char dpath[1024];
+            snprintf(dpath, sizeof(dpath),
+                     "%s/phc_dump_postload_rank%d.txt", dd, partit->mype);
+            FILE *df = fopen(dpath, "w");
+            if (df) {
+                fprintf(df, "# var=T_surface,S_surface rank=%d N=%d\n",
+                        partit->mype, mesh->myDim_nod2D);
+                for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+                    int gid = partit->myList_nod2D[n];
+                    size_t k = FESOM_NODE3D(n, 0, mesh->nl);
+                    fprintf(df, "%d %.17g %.17g\n", gid,
+                            (double)T[k], (double)S[k]);
+                }
+                fclose(df);
+            }
+        }
+    }
 }
