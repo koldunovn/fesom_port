@@ -178,9 +178,15 @@ int fesom_timestep(int                          step_n,
     }
     if (!nt_adv_skip) {
         fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_T, mesh, dyn, tracers);
+        if (ctx->gm) {
+            fesom_diff_ver_part_redi_expl(FESOM_TRACER_T, ctx->gm, aux, mesh, tracers, p);
+        }
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
 
         fesom_tracer_advect_one_fct(ctx->tra_sc, FESOM_TRACER_S, mesh, dyn, tracers);
+        if (ctx->gm) {
+            fesom_diff_ver_part_redi_expl(FESOM_TRACER_S, ctx->gm, aux, mesh, tracers, p);
+        }
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
     }
 

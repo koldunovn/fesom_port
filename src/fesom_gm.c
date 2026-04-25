@@ -45,6 +45,9 @@ void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh)
     size_t n_nlm1 = (size_t)N * (size_t)(nl - 1);
     size_t n_nlm1x3 = n_nlm1 * 3;
 
+    int E_full = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    size_t e_nl1x2 = (size_t)E_full * (size_t)(nl - 1) * 2;
+
     g->sigma_xy      = calloc(n_nlx2,    sizeof(real_t));
     g->neutral_slope = calloc(n_nlm1x3,  sizeof(real_t));
     g->slope_tapered = calloc(n_nlm1x3,  sizeof(real_t));
@@ -54,6 +57,7 @@ void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh)
     g->Ki            = calloc(n_nl,      sizeof(real_t));
     g->fer_C         = calloc((size_t)N, sizeof(real_t));
     g->fer_scal      = calloc((size_t)N, sizeof(real_t));
+    g->tr_xy         = calloc(e_nl1x2,   sizeof(real_t));
 
     GM_CHECK(g->sigma_xy,      "sigma_xy");
     GM_CHECK(g->neutral_slope, "neutral_slope");
@@ -64,6 +68,7 @@ void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh)
     GM_CHECK(g->Ki,            "Ki");
     GM_CHECK(g->fer_C,         "fer_C");
     GM_CHECK(g->fer_scal,      "fer_scal");
+    GM_CHECK(g->tr_xy,         "tr_xy");
 
     /* Initial value matches Fortran oce_setup_step.F90:934.
      * init_Redi_GM (G3) overwrites this every step, but pre-G3 readers
@@ -84,6 +89,7 @@ void fesom_gm_free(fesom_gm *g)
     free(g->Ki);
     free(g->fer_C);
     free(g->fer_scal);
+    free(g->tr_xy);
     memset(g, 0, sizeof(*g));
 }
 
@@ -599,6 +605,179 @@ void fesom_fer_solve_gamma(const struct fesom_aux *aux,
     /* Halo exchange fer_gamma (Fortran 162). 2 components per (n, nz). */
     if (partit && partit->npes > 1) {
         fesom_halo_exchange(gm->fer_gamma, FESOM_HALO_NOD2D, nl, 2, partit);
+    }
+}
+
+/* ============================================================ */
+/* G7a — diff_ver_part_redi_expl (oce_ale_tracer.F90:1086-1169)  */
+/* ============================================================ */
+/*
+ * Vertical-explicit Redi: adds the off-diagonal Redi tensor's
+ * vertical projection of horizontal tracer gradients to del_ttf
+ * for the given tracer.
+ *
+ * Per-tracer flow:
+ *   1. Compute gm->tr_xy per element from valuesAB (matches
+ *      Fortran ttf which is the AB-extrapolated tracer field).
+ *      Halo-exchange (Fortran exchange_elem at oce_tracer_mod.F90:143).
+ *   2. Per-node, area-weighted average tr_xy → tr_xynodes
+ *      (Fortran 1117-1135). NO halo exchange of tr_xynodes per
+ *      Fortran comment "no halo exchange of tr_xynodes is needed".
+ *   3. Build zbar_n / z_n on the OLD vertical mesh (uses hnode,
+ *      NOT hnode_new — Fortran 1148-1154).
+ *   4. vd_flux at interfaces, then accumulate divergence into
+ *      del_ttf (Fortran 1157-1166).
+ *
+ * Layouts:
+ *   tr_xy[el * (nl-1) * 2 + nz * 2 + comp]
+ *   slope_tapered[n * (nl-1) * 3 + nz * 3 + comp]   (comp 0=x, 1=y, 2=|s|)
+ *   Ki[n * nl + nz]
+ *   del_ttf[n * nl + nz]   (stride nl per fesom_tracers_alloc)
+ *
+ * tr_xynodes is a per-node temporary; for our nl≤48 we keep it on
+ * the stack as a 2D (2 × nl) buffer per node and consume it in pass 2.
+ * The Fortran allocates it for ALL nodes simultaneously
+ * (`tr_xynodes(2, nl-1, N)`); we reuse a per-node stack version
+ * because pass 2 reads only the current node.
+ */
+void fesom_diff_ver_part_redi_expl(int                          tr_idx,
+                                   fesom_gm                    *gm,
+                                   const struct fesom_aux      *aux,
+                                   const struct fesom_mesh     *mesh,
+                                   struct fesom_tracers        *tracers,
+                                   struct fesom_partit         *partit)
+{
+    (void)aux;   /* not used in this routine — Ki and slope_tapered come from gm */
+    if (!gm) return;
+
+    const int    nl     = mesh->nl;
+    const int    nl1    = nl - 1;
+    const int    myDim  = mesh->myDim_nod2D;
+    const int    Etot   = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    const real_t dt     = (real_t)FESOM_PHASE1_DT;
+
+    real_t *valsAB = tracers->data[tr_idx].valuesAB;       /* [N * nl] */
+    /* Fortran writes Redi flux into del_ttf BEFORE ale_reconstruct
+     * (oce_ale_tracer.F90:394 → 468-471). Our C port runs ale_reconstruct
+     * INSIDE fesom_tracer_advect_one_fct, so del_ttf is dead by the time
+     * we get here. Apply the Redi contribution directly to T values with
+     * the same `/hnode_new` factor that reconstruct would have applied. */
+    real_t *vals    = tracers->data[tr_idx].values;        /* [N * nl] */
+
+    /* ---- Step 1: tr_xy = ∇_h(valsAB) per element ------------ */
+    /* Bounds: Fortran allocates and fills tr_xy for full element halo
+     * (myDim+eDim+eXDim) so all readers (including diff_part_hor_redi)
+     * have valid data. We fill myDim_elem2D then halo-exchange. */
+    real_t *txy = gm->tr_xy;
+    /* Zero the full extent so halo entries (eDim+eXDim) start clean. */
+    memset(txy, 0, (size_t)Etot * (size_t)nl1 * 2 * sizeof(real_t));
+
+    for (int el = 0; el < mesh->myDim_elem2D; ++el) {
+        int v0 = mesh->elem_nodes[3*el + 0];
+        int v1 = mesh->elem_nodes[3*el + 1];
+        int v2 = mesh->elem_nodes[3*el + 2];
+        const real_t *g = &mesh->gradient_sca[6 * el];
+        int nle = mesh->nlevels[el] - 1;        /* exclusive */
+        int ule = mesh->ulevels[el] - 1;        /* 0-based */
+        for (int nz = ule; nz < nle; ++nz) {
+            real_t T0 = valsAB[(size_t)v0 * nl + nz];
+            real_t T1 = valsAB[(size_t)v1 * nl + nz];
+            real_t T2 = valsAB[(size_t)v2 * nl + nz];
+            txy[(size_t)el * nl1 * 2 + nz * 2 + 0] = g[0]*T0 + g[1]*T1 + g[2]*T2;
+            txy[(size_t)el * nl1 * 2 + nz * 2 + 1] = g[3]*T0 + g[4]*T1 + g[5]*T2;
+        }
+    }
+    if (partit && partit->npes > 1) {
+        /* Fortran exchange_elem(tr_xy) — full element halo, both components. */
+        fesom_halo_exchange(txy, FESOM_HALO_ELEM2D_FULL, nl1, 2, partit);
+    }
+
+    /* ---- Step 2: per-node Redi vertical-explicit flux ------ */
+    real_t txn[NL_MAX], tyn[NL_MAX];
+    real_t zbar_n[NL_MAX], z_n[NL_MAX];
+    real_t vd_flux[NL_MAX];
+    FESOM_CHECK(nl <= NL_MAX, "diff_ver_part_redi_expl: nl %d > NL_MAX", nl);
+
+    const real_t *st = gm->slope_tapered;
+    const real_t *Ki = gm->Ki;
+
+    for (int n = 0; n < myDim; ++n) {
+        int nle = mesh->nlevels_nod2D[n] - 1;     /* exclusive */
+        int ule = mesh->ulevels_nod2D[n] - 1;     /* 0-based */
+        if (nle <= ule) continue;
+
+        /* 2a. tr_xynodes = (1/3) · Σ tr_xy * elem_area / areasvol[nz,n].
+         * Fortran 1117-1135. Iterate the per-node level range. */
+        for (int nz = 0; nz < nl1; ++nz) { txn[nz] = 0.0; tyn[nz] = 0.0; }
+        for (int nz = ule; nz < nle; ++nz) {
+            real_t Tx = 0.0, Ty = 0.0;
+            int o0 = mesh->nod_in_elem2D_offsets[n];
+            int o1 = mesh->nod_in_elem2D_offsets[n + 1];
+            for (int k = o0; k < o1; ++k) {
+                int el = mesh->nod_in_elem2D[k];
+                int el_nle = mesh->nlevels[el] - 1;     /* exclusive */
+                int el_ule = mesh->ulevels[el] - 1;
+                if (nz >= el_ule && nz < el_nle) {
+                    real_t a = mesh->elem_area[el];
+                    Tx += txy[(size_t)el * nl1 * 2 + nz * 2 + 0] * a;
+                    Ty += txy[(size_t)el * nl1 * 2 + nz * 2 + 1] * a;
+                }
+            }
+            real_t inv = 1.0 / (3.0 * mesh->areasvol[(size_t)n * nl + nz]);
+            txn[nz] = Tx * inv;
+            tyn[nz] = Ty * inv;
+        }
+
+        /* 2b. Build zbar_n, z_n on OLD mesh (Fortran 1146-1154 uses hnode
+         * NOT hnode_new). For full cells / no cavity, the bottom interface
+         * sits at mesh->zbar[nle]. */
+        for (int nz = 0; nz < nl; ++nz) zbar_n[nz] = 0.0;
+        for (int nz = 0; nz < nl1; ++nz) z_n[nz] = 0.0;
+        zbar_n[nle] = mesh->zbar[nle];
+        z_n[nle - 1] = zbar_n[nle] + mesh->hnode[(size_t)n * nl + (nle - 1)] * 0.5;
+        for (int nz = nle - 1; nz >= ule + 1; --nz) {
+            zbar_n[nz]    = zbar_n[nz + 1]
+                          + mesh->hnode[(size_t)n * nl + nz];
+            z_n[nz - 1]   = zbar_n[nz]
+                          + mesh->hnode[(size_t)n * nl + (nz - 1)] * 0.5;
+        }
+        zbar_n[ule] = zbar_n[ule + 1]
+                    + mesh->hnode[(size_t)n * nl + ule];
+
+        /* 2c. vd_flux at interfaces (Fortran 1157-1162). vd_flux[ule] and
+         * vd_flux[nle] act as zero boundaries (we never write them, and
+         * the divergence loop below reads them as 0 since we memset). */
+        for (int nz = 0; nz < nl; ++nz) vd_flux[nz] = 0.0;
+        for (int nz = ule + 1; nz < nle; ++nz) {
+            real_t st_x_up = st[(size_t)n * nl1 * 3 + (nz - 1) * 3 + 0];
+            real_t st_y_up = st[(size_t)n * nl1 * 3 + (nz - 1) * 3 + 1];
+            real_t st_x_dn = st[(size_t)n * nl1 * 3 + nz       * 3 + 0];
+            real_t st_y_dn = st[(size_t)n * nl1 * 3 + nz       * 3 + 1];
+            real_t Ki_up   = Ki[(size_t)n * nl + (nz - 1)];
+            real_t Ki_dn   = Ki[(size_t)n * nl + nz];
+
+            real_t up = (z_n[nz - 1] - zbar_n[nz])
+                      * (st_x_up * txn[nz - 1] + st_y_up * tyn[nz - 1])
+                      * Ki_up;
+            real_t dn = (zbar_n[nz] - z_n[nz])
+                      * (st_x_dn * txn[nz]     + st_y_dn * tyn[nz])
+                      * Ki_dn;
+            real_t mid = z_n[nz - 1] - z_n[nz];
+            real_t a_int = mesh->area[(size_t)n * nl + nz];
+            vd_flux[nz] = (up + dn) / mid * a_int;
+        }
+
+        /* 2d. T += (vd_flux[nz] - vd_flux[nz+1]) * dt / (areasvol*hnode_new)
+         * Fortran 1163-1165 writes to del_ttf; reconstruct (468-471) then
+         * does T += del_ttf/hnode_new. Composed: same as the line below. */
+        for (int nz = ule; nz < nle; ++nz) {
+            real_t av = mesh->areasvol[(size_t)n * nl + nz];
+            real_t hn = mesh->hnode_new[(size_t)n * nl + nz];
+            if (av > 0.0 && hn > 0.0) {
+                vals[(size_t)n * nl + nz] +=
+                    (vd_flux[nz] - vd_flux[nz + 1]) * dt / (av * hn);
+            }
+        }
     }
 }
 

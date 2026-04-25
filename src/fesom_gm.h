@@ -42,6 +42,11 @@ typedef struct fesom_gm {
     real_t *Ki;
     real_t *fer_C;
     real_t *fer_scal;
+    /* G7 scratch — per-element horizontal gradient of the active tracer
+     * (Fortran tr_xy from oce_tracer_mod.F90:178-181). One tracer at a
+     * time; fesom_diff_ver_part_redi_expl rebuilds and halo-exchanges.
+     * Layout: [E_full * (nl-1) * 2], comp innermost. */
+    real_t *tr_xy;
 } fesom_gm;
 
 void fesom_gm_alloc(fesom_gm *g, const struct fesom_mesh *mesh);
@@ -76,5 +81,18 @@ void fesom_fer_gamma2vel         (struct fesom_dyn         *dyn,
                                   const struct fesom_mesh  *mesh,
                                   const fesom_gm           *gm,
                                   struct fesom_partit      *partit);
+
+/* --- Phase G7a: vertical-explicit Redi (oce_ale_tracer.F90:1086-1169)
+ *
+ * Adds the off-diagonal Redi tensor's vertical projection to del_ttf
+ * for the given tracer. Uses valuesAB as the active field (matches
+ * Fortran ttf). Computes gm->tr_xy as scratch and halo-exchanges it.
+ * No-op if gm == NULL or redi_on == 0. */
+void fesom_diff_ver_part_redi_expl(int                          tr_idx,
+                                   fesom_gm                    *gm,
+                                   const struct fesom_aux      *aux,
+                                   const struct fesom_mesh     *mesh,
+                                   struct fesom_tracers        *tracers,
+                                   struct fesom_partit         *partit);
 
 #endif /* FESOM_GM_H */
