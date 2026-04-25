@@ -56,4 +56,16 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
 void fesom_pressure_force_linfs_fullcell(const struct fesom_mesh *mesh,
                                          struct fesom_aux        *aux);
 
+/*
+ * Compute thermal expansion (sw_alpha) and saline contraction (sw_beta)
+ * coefficients per node per level, from McDougall (1987). Mirror of
+ * oce_ale_pressure_bv.F90:2751-2846 sw_alpha_beta. Outputs into
+ * aux->sw_alpha and aux->sw_beta.
+ *
+ * Halo-exchanged at end (the caller may add an explicit exchange too).
+ */
+void fesom_compute_sw_alpha_beta(const struct fesom_tracers *tracers,
+                                 const struct fesom_mesh    *mesh,
+                                 struct fesom_aux           *aux);
+
 #endif /* FESOM_EOS_H */

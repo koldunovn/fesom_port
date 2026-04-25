@@ -37,6 +37,9 @@ int fesom_timestep(int                          step_n,
 
     /*  1. EOS + hydrostatic pressure + N²  */
     fesom_pressure_bv(tracers, mesh, aux);
+    /* sw_alpha / sw_beta — McDougall (1987). Needed by GM/Redi (and KPP).
+     * Mirror of Fortran oce_ale.F90:3475 sw_alpha_beta. */
+    fesom_compute_sw_alpha_beta(tracers, mesh, aux);
     /* exchange the per-node 3D outputs (Fortran oce_ale_pressure_bv.F90:2844-) */
     fesom_exchange_nod3D(aux->density_m_rho0, nl, p);
     fesom_exchange_nod3D(aux->hpressure,      nl, p);
@@ -164,7 +167,7 @@ int fesom_timestep(int                          step_n,
         nt_dif_checked = 1;
     }
     if (!nt_dif_skip) {
-        fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers);
+        fesom_impl_vert_diff_tracers(mesh, aux, forcing, tracers, ctx->gm);
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_T].values, nl, p);
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
     }

@@ -11,21 +11,24 @@
  *
  * Fields not yet ported are taken as literal zero with a comment naming the
  * Fortran symbol:
- *   Ki(nz,n)            → 0   (Redi diffusivity; isredi=0 multiplies it out)
- *   slope_tapered(...)  → 0   (same)
  *   virtual_salt(n)     → 0   (zlevel/zstar only; we are linfs)
  *   relax_salt(n)       → 0   (Phase 3 step 25 will fill from SSS restoring)
  *   real_salt_flux(n)   → 0   (sea-ice; not ported)
  *   is_nonlinfs         → 0   (we are linfs)
- *   isredi              → 0   (Redi off)
  *   do_wimpl            → 0   (Fortran sets false when tra_adv_lim=='FCT')
  *   KPP nonlocal flux   → skipped (use_kpp_nonlclflx=false)
+ *
+ * Phase G5: Ki(nz,n) and slope_tapered(...) are now read when `gm` is
+ * non-NULL. The Ty / Ty1 projection of horizontal-Redi onto the vertical
+ * axis augments the diagonal diffusivity. With gm=NULL the additions
+ * collapse to zero — preserving the pre-G5 numerical path.
  */
 #include "fesom_tracer_diff.h"
 
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_forcing.h"
+#include "fesom_gm.h"
 #include "fesom_mesh.h"
 #include "fesom_tracers.h"
 #include "fesom_types.h"
@@ -83,19 +86,25 @@ static void diff_ver_part_impl_ale(int                          tr_num,
                                    const struct fesom_mesh     *mesh,
                                    const struct fesom_aux      *aux,
                                    const struct fesom_forcing  *forcing,
-                                   struct fesom_tracers        *tracers)
+                                   struct fesom_tracers        *tracers,
+                                   const struct fesom_gm       *gm)
 {
     const int    myDim_nod2D = mesh->myDim_nod2D;
     const int    nl          = mesh->nl;
+    const int    nl1         = nl - 1;          /* slope_tapered second axis size */
     const real_t dt          = (real_t)FESOM_PHASE1_DT;
 
     /* Fortran:
      *   if ((trim(tracers%data(tr_num)%tra_adv_lim)=='FCT')
      *       .OR. (.not. dynamics%use_wsplit)) do_wimpl=.false.
      *   if (Redi) isredi=1._WP
-     * For us: tra_adv_lim is FCT for both T and S → do_wimpl=.false.; Redi=.false. */
+     * For us: tra_adv_lim is FCT for both T and S → do_wimpl=.false. */
     const int    do_wimpl    = 0;
-    const real_t isredi      = 0.0;
+    /* Phase G5: isredi switches on iff a GM/Redi state struct is provided.
+     * gm=NULL → falls back to pre-G5 numerics (Ty/Ty1 ≡ 0). */
+    const real_t isredi      = (gm != NULL) ? 1.0 : 0.0;
+    const real_t *st         = gm ? gm->slope_tapered : NULL;  /* [N * nl1 * 3] */
+    const real_t *Ki         = gm ? gm->Ki            : NULL;  /* [N * nl] */
 
     real_t *trarr = tracers->data[tr_num].values;
     /* Fortran tracers%data(tr_num)%ID is 1 for T, 2 for S. Our enum:
@@ -155,9 +164,16 @@ static void diff_ver_part_impl_ale(int                          tr_num,
             zinv2 = 1.0 / (Z_n[nz] - Z_n[nz + 1]);
             zinv  = 1.0 * dt;       /* Fortran line 758 */
 
-            /* Isoneutral diffusivity (Fortran 761-763): both Ki & slope_tapered
-             * are 0 in our state ⇒ Ty1 = 0; isredi = 0 also forces it to zero. */
+            /* Isoneutral K33 augmentation (Fortran 761-763, Phase G5). */
             real_t Ty1 = 0.0;
+            if (gm) {
+                real_t st_nz   = st[(size_t)n * nl1 * 3 + nz       * 3 + 2];
+                real_t st_nz1  = st[(size_t)n * nl1 * 3 + (nz + 1) * 3 + 2];
+                real_t Ki_nz   = Ki[(size_t)n * nl + nz];
+                real_t Ki_nz1  = Ki[(size_t)n * nl + (nz + 1)];
+                Ty1 = (Z_n[nz] - zbar_n[nz + 1]) * zinv2 * st_nz  * st_nz  * Ki_nz
+                    + (zbar_n[nz + 1] - Z_n[nz + 1]) * zinv2 * st_nz1 * st_nz1 * Ki_nz1;
+            }
             Ty1 = Ty1 * isredi;
 
             /* a/b/c at the surface (Fortran 766-769) */
@@ -178,8 +194,21 @@ static void diff_ver_part_impl_ale(int                          tr_num,
         for (int nz = nzmin + 1; nz <= nzmax - 2; ++nz) {
             zinv2 = 1.0 / (Z_n[nz] - Z_n[nz + 1]);
 
+            /* Isoneutral K33 augmentation (Fortran 794-799, Phase G5). */
             real_t Ty  = 0.0;
             real_t Ty1 = 0.0;
+            if (gm) {
+                real_t st_m1  = st[(size_t)n * nl1 * 3 + (nz - 1) * 3 + 2];
+                real_t st_nz  = st[(size_t)n * nl1 * 3 + nz       * 3 + 2];
+                real_t st_nz1 = st[(size_t)n * nl1 * 3 + (nz + 1) * 3 + 2];
+                real_t Ki_m1  = Ki[(size_t)n * nl + (nz - 1)];
+                real_t Ki_nz  = Ki[(size_t)n * nl + nz];
+                real_t Ki_nz1 = Ki[(size_t)n * nl + (nz + 1)];
+                Ty  = (Z_n[nz - 1] - zbar_n[nz]) * zinv1 * st_m1 * st_m1 * Ki_m1
+                    + (zbar_n[nz]  - Z_n[nz])    * zinv1 * st_nz * st_nz * Ki_nz;
+                Ty1 = (Z_n[nz]     - zbar_n[nz + 1]) * zinv2 * st_nz  * st_nz  * Ki_nz
+                    + (zbar_n[nz + 1] - Z_n[nz + 1]) * zinv2 * st_nz1 * st_nz1 * Ki_nz1;
+            }
             Ty  = Ty  * isredi;
             Ty1 = Ty1 * isredi;
 
@@ -204,7 +233,16 @@ static void diff_ver_part_impl_ale(int                          tr_num,
             const int nz = nzmax - 1;
             zinv = 1.0 * dt;        /* Fortran line 834 */
 
+            /* Isoneutral K33 augmentation (Fortran 837-839, Phase G5). */
             real_t Ty = 0.0;
+            if (gm) {
+                real_t st_m1 = st[(size_t)n * nl1 * 3 + (nz - 1) * 3 + 2];
+                real_t st_nz = st[(size_t)n * nl1 * 3 + nz       * 3 + 2];
+                real_t Ki_m1 = Ki[(size_t)n * nl + (nz - 1)];
+                real_t Ki_nz = Ki[(size_t)n * nl + nz];
+                Ty = (Z_n[nz - 1] - zbar_n[nz]) * zinv1 * st_m1 * st_m1 * Ki_m1
+                   + (zbar_n[nz]  - Z_n[nz])    * zinv1 * st_nz * st_nz * Ki_nz;
+            }
             Ty = Ty * isredi;
 
             a[nz] = -(aux->Kv[FESOM_NODE3D(n, nz, nl)] + Ty) * zinv1 * zinv
@@ -283,8 +321,9 @@ static void diff_ver_part_impl_ale(int                          tr_num,
 void fesom_impl_vert_diff_tracers(const struct fesom_mesh    *mesh,
                                   const struct fesom_aux     *aux,
                                   const struct fesom_forcing *forcing,
-                                  struct fesom_tracers       *tracers)
+                                  struct fesom_tracers       *tracers,
+                                  const struct fesom_gm      *gm)
 {
-    diff_ver_part_impl_ale(FESOM_TRACER_T, mesh, aux, forcing, tracers);
-    diff_ver_part_impl_ale(FESOM_TRACER_S, mesh, aux, forcing, tracers);
+    diff_ver_part_impl_ale(FESOM_TRACER_T, mesh, aux, forcing, tracers, gm);
+    diff_ver_part_impl_ale(FESOM_TRACER_S, mesh, aux, forcing, tracers, gm);
 }

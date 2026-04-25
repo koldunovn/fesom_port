@@ -227,3 +227,65 @@ void fesom_pressure_force_linfs_fullcell(const struct fesom_mesh *mesh,
         }
     }
 }
+
+/*--- sw_alpha_beta (oce_ale_pressure_bv.F90:2751-2846) -------------------------
+ * McDougall (1987) thermal expansion and saline contraction coefficients per
+ * node per level. Inputs: potential T (°C), S (PSU); pressure proxy = |Z[nz]|.
+ *
+ * For our linfs / no-cavity / no-partial-cells config Z_3d_n[nz, n] = Z[nz].
+ *
+ * Halo: Fortran exchange_nod on sw_alpha and sw_beta at end. We mirror.
+ * ----------------------------------------------------------------------------- */
+void fesom_compute_sw_alpha_beta(const struct fesom_tracers *tracers,
+                                 const struct fesom_mesh    *mesh,
+                                 struct fesom_aux           *aux)
+{
+    const int nl     = mesh->nl;
+    const int myDim  = mesh->myDim_nod2D;
+    const real_t *T  = tracers->data[FESOM_TRACER_T].values;
+    const real_t *S  = tracers->data[FESOM_TRACER_S].values;
+
+    for (int n = 0; n < myDim; ++n) {
+        int nzmax = mesh->nlevels_nod2D[n] - 1;     /* layer count exclusive */
+        int nzmin = mesh->ulevels_nod2D[n] - 1;     /* 0-based */
+        for (int nz = nzmin; nz < nzmax; ++nz) {
+            real_t t1 = T[FESOM_NODE3D(n, nz, nl)] * 1.00024;
+            real_t s1 = S[FESOM_NODE3D(n, nz, nl)];
+            real_t p1 = fabs(mesh->Z[nz]);
+
+            real_t t1_2 = t1*t1;
+            real_t t1_3 = t1_2*t1;
+            real_t t1_4 = t1_3*t1;
+            real_t p1_2 = p1*p1;
+            real_t p1_3 = p1_2*p1;
+            real_t s35  = s1 - 35.0;
+            real_t s35_2 = s35*s35;
+
+            real_t beta = 0.785567e-3
+                        - 0.301985e-5*t1
+                        + 0.555579e-7*t1_2
+                        - 0.415613e-9*t1_3
+                        + s35*(-0.356603e-6 + 0.788212e-8*t1
+                              + 0.408195e-10*p1 - 0.602281e-15*p1_2)
+                        + s35_2*(0.515032e-8)
+                        + p1*(-0.121555e-7 + 0.192867e-9*t1 - 0.213127e-11*t1_2)
+                        + p1_2*(0.176621e-12 - 0.175379e-14*t1)
+                        + p1_3*(0.121551e-17);
+
+            real_t a_over_b = 0.665157e-1
+                            + 0.170907e-1*t1
+                            - 0.203814e-3*t1_2
+                            + 0.298357e-5*t1_3
+                            - 0.255019e-7*t1_4
+                            + s35*(0.378110e-2 - 0.846960e-4*t1
+                                  - 0.164759e-6*p1 - 0.251520e-11*p1_2)
+                            + s35_2*(-0.678662e-5)
+                            + p1*(0.380374e-4 - 0.933746e-6*t1 + 0.791325e-8*t1_2)
+                            + p1_2*t1_2*(0.512857e-12)
+                            - p1_3*(0.302285e-13);
+
+            aux->sw_beta [FESOM_NODE3D(n, nz, nl)] = beta;
+            aux->sw_alpha[FESOM_NODE3D(n, nz, nl)] = a_over_b * beta;
+        }
+    }
+}
