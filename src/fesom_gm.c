@@ -299,14 +299,162 @@ void fesom_compute_neutral_slope(struct fesom_aux *aux,
     }
 }
 
+/* ============================================================ */
+/* G3 — init_Redi_GM (oce_fer_gm.F90:215-506)                   */
+/* ============================================================ */
+/*
+ * Per-step coefficient builder for GM (fer_K, fer_C, fer_scal) and
+ * Redi (Ki). Three logical phases:
+ *
+ *   Pass 1 (F1 = horizontal scaling) — per-node loop using the
+ *     conservative level extrema nlevels_nod2D_min / ulevels_nod2D_max
+ *     (which are exactly what Fortran derives inline at lines 252-257).
+ *     Computes fer_scal, fer_K[nzmin,n], fer_C[n] (all GM); Ki[nzmin,n]
+ *     is filled here too but immediately overwritten in the next pass
+ *     since Fer_GM ∧ Redi is true in our config.
+ *
+ *   Pass 2 (Redi=GM sync) — Ki[nzmin,n] = max(fer_scal·Redi_Kmax, K_GM_min)
+ *     (Fortran lines 351-359; the FESOM 1.4 carry-over).
+ *
+ *   Pass 3 (F2 = vertical scaling) — per-node loop using regular
+ *     per-node nlevels_nod2D / ulevels_nod2D. Applies the
+ *     scaling_GMzexp depth-exp scaling to both fer_K and Ki. Redi
+ *     also gets the Redi_Ktaper sqrt(fer_tapfac) tapering.
+ *
+ * Active sub-features only (default namelist.oce):
+ *   Fer_GM=T, Redi=T, K_GM_resscalorder=2 (real, not int → 1/2=0.5),
+ *   scaling_resolution=T, scaling_GMzexp=T, Redi_Ktaper=T,
+ *   K_GM_max=1000, K_GM_min=2, Redi_Kmin=100, K_GM_cmin=0.1, K_GM_cm=3,
+ *   GMzexp_zref=500, GMzexp_smin=0.6, refscalresol=100km.
+ *   Skipped: scaling_Rossby, FESOM14, GINsea, Ferreira (and so the
+ *   K_GM_bvref=1 MLD-reference branch never runs); also K_GM_Ktaper,
+ *   K_GM_rampmax/min, scaling_LDD97. Redi_Kmax=0 auto-syncs to K_GM_max.
+ *
+ * Halo: Fortran exchanges fer_c, fer_K, Ki (lines 503-505). Mirror.
+ */
 void fesom_init_redi_gm(struct fesom_aux *aux,
                         const struct fesom_mesh *mesh,
                         fesom_gm *gm,
                         struct fesom_partit *partit)
 {
-    (void)aux; (void)mesh; (void)gm; (void)partit;
-    fprintf(stderr, "fesom_init_redi_gm: not yet ported (Phase G3)\n");
-    abort();
+    (void)aux;   /* unused in active branches (would be needed for Ferreira/MLD ref) */
+
+    const int    nl       = mesh->nl;
+    const int    myDim    = mesh->myDim_nod2D;
+    const real_t pi       = 3.14159265358979323846;
+
+    /* Active-config namelist constants. */
+    const real_t K_GM_max     = 1000.0;
+    const real_t K_GM_min     = 2.0;
+    const real_t K_GM_cmin    = 0.1;
+    const real_t K_GM_cm      = 3.0;
+    const real_t Redi_Kmin    = 100.0;
+    const real_t Redi_Kmax    = K_GM_max;     /* auto-sync (Fortran 240-242) */
+    const real_t GMzexp_zref  = 500.0;
+    const real_t GMzexp_smin  = 0.6;
+    const real_t refscalresol = 100000.0;     /* 100 km */
+    const real_t inv_refscalresol_sq = 1.0 / (refscalresol * refscalresol);
+
+    /* --- Pass 1: F1(x,y) per-node scalar ------------------------- */
+    /* Bounds nzmin/nzmax mirror Fortran's inline min(nlevels)/max(ulevels)
+     * over surrounding elements (= our G0 mesh prereqs). 0-based. */
+    for (int n = 0; n < myDim; ++n) {
+        int nzmax = mesh->nlevels_nod2D_min[n] - 1;   /* exclusive */
+        int nzmin = mesh->ulevels_nod2D_max[n] - 1;   /* 0-based */
+
+        /* baroclinic wave speed cm — depth integral of |N|. */
+        real_t cm_sum = 0.0;
+        for (int nz = nzmin; nz < nzmax; ++nz) {
+            real_t bv0 = aux->bvfreq[(size_t)n * nl + nz];
+            real_t bv1 = aux->bvfreq[(size_t)n * nl + (nz + 1)];
+            real_t v0 = (bv0 > 0.0) ? sqrt(bv0) : 0.0;
+            real_t v1 = (bv1 > 0.0) ? sqrt(bv1) : 0.0;
+            cm_sum += mesh->hnode_new[(size_t)n * nl + nz] * 0.5 * (v0 + v1);
+        }
+        /* Limited from below by K_GM_cmin, and divided by π·K_GM_cm
+         * (Fortran 268-269). c1 itself is only used by scaling_Rossby
+         * which is off — we still compute cm. */
+        real_t cm = cm_sum / pi / K_GM_cm;
+        if (cm < K_GM_cmin) cm = K_GM_cmin;
+
+        /* scaling — start at 1, no Rossby-radius cutoff, area-based
+         * resolution scaling for K_GM_resscalorder=2. */
+        real_t area_n = mesh->area[(size_t)n * nl + 0];   /* surface CV area */
+        real_t scaling = sqrt(area_n * inv_refscalresol_sq * 2.0);
+        if (scaling > 1.0) scaling = 1.0;          /* Fortran: fer_scal=min(scaling,1) */
+
+        gm->fer_scal[n] = scaling;
+
+        /* fer_K[nzmin,n] = max(fer_scal*K_GM_max, K_GM_min). Fortran 328-330.
+         * Stored 0-based — `nzmin` is the 0-based level index. */
+        real_t k_top = scaling * K_GM_max;
+        if (k_top < K_GM_min) k_top = K_GM_min;
+        gm->fer_K[(size_t)n * nl + nzmin] = k_top;
+        gm->fer_C[n] = cm * cm;
+
+        /* Redi placeholder (always overwritten in pass 2 below) — the
+         * Fortran K_hor**x branch from lines 340-344 is dead in our
+         * config because Fer_GM ∧ Redi triggers the override below. */
+
+        /* --- Pass 2 (inline): Redi = GM sync (Fortran 351-359) ---
+         * Ki[nzmin,n] = max(fer_scal*Redi_Kmax, K_GM_min). */
+        real_t ki_top = scaling * Redi_Kmax;
+        if (ki_top < K_GM_min) ki_top = K_GM_min;
+        gm->Ki[(size_t)n * nl + nzmin] = ki_top;
+    }
+
+    /* --- Pass 3: F2(z) per-node, per-level vertical scaling ------ */
+    real_t zscaling[NL_MAX];
+    for (int n = 0; n < myDim; ++n) {
+        int nzmax = mesh->nlevels_nod2D[n] - 1;       /* exclusive */
+        int nzmin = mesh->ulevels_nod2D[n] - 1;       /* 0-based */
+
+        /* zscaling: GMzexp_smin + (1-GMzexp_smin)*exp(-|z|/zref);
+         * clamp to [GMzexp_smin, 1]. Fortran 437-441. */
+        for (int nz = 0; nz < nl; ++nz) zscaling[nz] = 1.0;
+        for (int nz = nzmin; nz <= nzmax; ++nz) {
+            real_t z = mesh->zbar_3d_n[(size_t)n * nl + nz];
+            real_t v = GMzexp_smin
+                     + (1.0 - GMzexp_smin) * exp(-fabs(z) / GMzexp_zref);
+            if (v > 1.0)          v = 1.0;
+            if (v < GMzexp_smin)  v = GMzexp_smin;
+            zscaling[nz] = v;
+        }
+
+        /* Apply F2 to fer_K (Fer_GM). Fortran 459-464. */
+        real_t k_top = gm->fer_K[(size_t)n * nl + nzmin];
+        for (int nz = nzmin + 1; nz <= nzmax; ++nz) {
+            gm->fer_K[(size_t)n * nl + nz] = k_top * zscaling[nz];
+        }
+        gm->fer_K[(size_t)n * nl + nzmin] = k_top * zscaling[nzmin];
+        /* K_GM_Ktaper = false → skip the GM tapering branch. */
+
+        /* Apply F2 to Ki (Redi). Fortran 482-487. */
+        real_t ki_top = gm->Ki[(size_t)n * nl + nzmin];
+        for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+            gm->Ki[(size_t)n * nl + nz] =
+                ki_top * 0.5 * (zscaling[nz] + zscaling[nz + 1]);
+        }
+        gm->Ki[(size_t)n * nl + nzmin] =
+            ki_top * 0.5 * (zscaling[nzmin] + zscaling[nzmin + 1]);
+
+        /* Redi_Ktaper = true (Fortran 490-497):
+         *   Ki[nz,n] = Ki[nz,n] * sqrt(tapfac) + Redi_Kmin * |sqrt(tapfac)-1|
+         */
+        for (int nz = nzmin; nz < nzmax; ++nz) {
+            real_t tf = gm->fer_tapfac[(size_t)n * nl + nz];
+            real_t s  = sqrt(tf);
+            real_t k  = gm->Ki[(size_t)n * nl + nz];
+            gm->Ki[(size_t)n * nl + nz] = k * s + Redi_Kmin * fabs(s - 1.0);
+        }
+    }
+
+    /* --- Halo exchange (Fortran lines 503-505) -------------------- */
+    if (partit && partit->npes > 1) {
+        fesom_exchange_nod2D(gm->fer_C, partit);
+        fesom_halo_exchange(gm->fer_K, FESOM_HALO_NOD2D, nl, 1, partit);
+        fesom_halo_exchange(gm->Ki,    FESOM_HALO_NOD2D, nl, 1, partit);
+    }
 }
 
 void fesom_fer_solve_gamma(const struct fesom_aux *aux,
