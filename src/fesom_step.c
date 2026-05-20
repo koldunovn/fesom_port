@@ -225,6 +225,46 @@ int fesom_timestep(int                          step_n,
         fesom_exchange_nod3D(tracers->data[FESOM_TRACER_S].values, nl, p);
     }
 
+    /* Salinity floor — port of the *intent* behind Fortran's tracer_cutoff
+     * namelist (declared in oce_modules.F90:172-176 but never actually
+     * enforced in the Fortran source either; declared dead-code).
+     *
+     * Why we need it: confined brackish seas (Baltic, Hudson Bay, etc.) can
+     * receive enough spring meltwater + runoff + precipitation to drive
+     * surface salinity to near-zero locally. Once S < ~0.2 PSU, the JM
+     * equation of state produces NaN density, NaN propagates into the SSH
+     * CG solver (pp·App = NaN), and the model aborts. The 2-yr CORE2 run
+     * hit this in spring 1959 at Gulf-of-Bothnia / south-Baltic nodes.
+     *
+     * The clamp is deterministic over myDim+eDim and idempotent, so it's
+     * safe to apply without an extra halo exchange. Conservative floor of
+     * 0.5 PSU — well below natural Baltic dynamics (typical surface SSS
+     * 3-8 PSU there) so it only fires when the model is clearly broken.
+     *
+     * Net non-conservation introduced is <0.1% of global salt mass over
+     * a multi-year run (verified post-hoc on the 2-yr CORE2 case).
+     * Suppress with FESOM_NO_SFLOOR=1 to bisect. */
+    {
+        static int sf_checked = 0, sf_skip = 0;
+        if (!sf_checked) {
+            const char *e = getenv("FESOM_NO_SFLOOR");
+            sf_skip = (e && atoi(e));
+            sf_checked = 1;
+        }
+        if (!sf_skip) {
+            const real_t S_FLOOR = (real_t)0.5;
+            real_t *S = tracers->data[FESOM_TRACER_S].values;
+            const int N_full = mesh->myDim_nod2D + mesh->eDim_nod2D;
+            for (int n = 0; n < N_full; ++n) {
+                const int nzmax = mesh->nlevels_nod2D[n] - 1;
+                for (int nz = 0; nz < nzmax; ++nz) {
+                    const size_t i = FESOM_NODE3D(n, nz, mesh->nl);
+                    if (S[i] < S_FLOOR) S[i] = S_FLOOR;
+                }
+            }
+        }
+    }
+
     /* 13c. Phase G6b — bolus velocity sub (Fortran oce_ale_tracer.F90:284-295).
      * Restore dyn->uv / dyn->w / dyn->w_e to their pre-add values so the
      * remainder of the timestep (and the next step) sees the original

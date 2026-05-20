@@ -1,6 +1,7 @@
 #ifndef FESOM_SSS_RUNOFF_H
 #define FESOM_SSS_RUNOFF_H
 
+#include "fesom_calendar.h"
 #include "fesom_types.h"
 
 struct fesom_mesh;
@@ -67,6 +68,20 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
                            struct fesom_partit        *partit,
                            int yearnew, int month_now,
                            int update_monthly_flag);
+
+/* Calendar-driven adapter for fesom_sss_runoff_step. Computes month_now
+ * from `cal->month` and update_monthly_flag from `n_step == 1` OR a
+ * MONTHLY-period crossing between `prev` and `cal`. Caller maintains
+ * `prev` as the calendar state from the previous timestep — i.e. saves
+ * `cal` before calling `fesom_calendar_advance`. */
+void fesom_sss_runoff_step_cal(fesom_sss_runoff           *sr,
+                               const struct fesom_mesh    *mesh,
+                               const struct fesom_tracers *tracers,
+                               struct fesom_forcing       *forcing,
+                               struct fesom_partit        *partit,
+                               int                         n_step,
+                               const fesom_calendar_t     *prev,
+                               const fesom_calendar_t     *cal);
 
 /* Helper used by both SSS reader and the runoff reader.
  * Literal port of read_other_NetCDF (gen_modules_read_NetCDF.F90:6-184).

@@ -1,0 +1,4 @@
+# Streams config for the 2-year CORE2 run.
+# Every default variable gets BOTH daily and monthly mean output.
+# (Default behaviour without this file: monthly only.)
+sst,sss,ssh,a_ice,m_ice,m_snow,uice,vice,temp,salt,u,v,w,Kv,Av,density,bvfreq    daily,monthly

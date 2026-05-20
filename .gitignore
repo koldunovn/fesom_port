@@ -7,3 +7,10 @@ core.*
 .idea/
 compile_commands.json
 runs/
+
+# SLURM run outputs / regression baselines — large netCDF, never commit
+build_dbg/
+tests/regression_reference/
+*.nc
+slurm.*.out
+slurm.*.err

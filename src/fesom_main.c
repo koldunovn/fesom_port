@@ -1,6 +1,7 @@
 #include "fesom_ale.h"
 #include "fesom_aux.h"
 #include "fesom_bulk.h"
+#include "fesom_calendar.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_eos.h"
@@ -817,11 +818,19 @@ skip_rest_state:
                                .jra    = use_jra ? &jra : NULL,
                                .sr     = use_sr  ? &sr  : NULL };
         const int nsteps      = (nsteps_cli > 0)     ? nsteps_cli     : 500;
-        const int snap_every  = (snap_every_cli > 0) ? snap_every_cli : 25;
+        /* snap_every semantics:
+         *   > 0  → snapshot every N steps
+         *   = 0  → use default (25)              [legacy default]
+         *   < 0  → DISABLE snapshots entirely    [for production runs] */
+        const int snap_every  = (snap_every_cli > 0) ? snap_every_cli
+                              : (snap_every_cli == 0 ? 25 : 0);
         /* FESOM_PRINT_EVERY env override — useful for tracking instability
          * onset without changing snapshot cadence. Defaults to snap_every. */
         const char *pe_env = getenv("FESOM_PRINT_EVERY");
-        const int print_every = (pe_env && atoi(pe_env) > 0) ? atoi(pe_env) : snap_every;
+        /* Default print_every to snap_every if positive, else a safe
+         * non-zero fallback (1000) — n % print_every must never divide by 0. */
+        const int print_every = (pe_env && atoi(pe_env) > 0) ? atoi(pe_env)
+                              : (snap_every > 0 ? snap_every : 1000);
 
         /* Physics-bisect knobs (for MPI drift hunt — developer hint: one of
          * wind / fluxes / tracer update is amplifying partition-dependent
@@ -849,48 +858,53 @@ skip_rest_state:
 
         printf("[fesom_port] timestep loop: %d steps, dt=%.0f s, print every %d, snapshot every %d\n",
                nsteps, FESOM_PHASE1_DT, print_every, snap_every);
-        if (out_dir) {
+
+        /* Task 6: orchestrator owns the calendar + the monthly streams. Init
+         * BEFORE the step-0 snapshot so that snapshot's `time` attribute
+         * can be anchored to the model calendar (Task 9). */
+        fesom_io_t io;
+        {
+            /* When JRA55 is on (typical), the model calendar must start
+             * at jra55_year so that fesom_jra55_step_cal indexes the
+             * forcing files correctly. With JRA55 disabled (analytical-
+             * forcing smoke runs only) the calendar still needs a start
+             * date for CF time stamps; pick 1958 to match the project's
+             * de-facto default and avoid confusion when files written by
+             * an analytical run sit alongside JRA55-driven output. */
+            int start_year = (jra55_year > 0) ? jra55_year : 1958;
+            const char *io_out = (out_dir != NULL) ? out_dir : ".";
+            /* Optional override file: FESOM_IO_CONFIG=<path>. Empty / unset
+             * → use compiled-in monthly-only default. */
+            const char *cfg_path = getenv("FESOM_IO_CONFIG");
+            fesom_io_init(&io, io_out, FESOM_CAL_GREGORIAN,
+                          start_year, 1, 1,
+                          cfg_path,
+                          &mesh, &mpi);
+        }
+
+        if (out_dir && snap_every > 0) {
             char path[1024];
             snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, 0);
-            fesom_io_write_snapshot(path, 0, FESOM_PHASE1_DT,
+            fesom_io_write_snapshot(path, 0, FESOM_PHASE1_DT, &io.calendar,
                                     &mesh, &dyn, &tracers, &aux, &ice, &mpi);
         }
         if (mpi.mype == 0) {
             printf("# step iters | uv eta w | T-range S-range | stress hf wf vs rs | hp pgf rho bv-range Kv Av\n");
             fflush(stdout);
         }
-        /* Cumulative days at the start of each month (non-leap year, since
-           the JRA55 calendar conversion above is gregorian — but for monthly
-           SSS climatology we just need a 1-12 month index). */
-        static const int days_in_month[12] = {
-            31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
-        };
-        int month_prev = -1;
+
         for (int n = 1; n <= nsteps; ++n) {
-            int    daynew  = 1;
-            double timenew = 0.0;
             if (use_jra) {
-                double t_sec = (double)(n - 1) * (double)FESOM_PHASE1_DT;
-                daynew  = (int)floor(t_sec / 86400.0) + 1;
-                timenew = t_sec - (daynew - 1) * 86400.0;
-                fesom_jra55_step(&jra, &mesh, &mpi, jra55_year, daynew, (real_t)timenew);
+                /* Calendar crosses year boundaries cleanly now that
+                 * fesom_jra55_step_cal calls open_year on rollover; the
+                 * old "cal.year == jra55_year" safety overlap from Task 2
+                 * was retired with multi-year support. */
+                fesom_jra55_step_cal(&jra, &mesh, &mpi, &io.calendar);
                 fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &mpi);
             }
             if (use_sr) {
-                /* Convert daynew → month_now (1..12), non-leap year. */
-                int month_now = 1;
-                int doy_remain = daynew;
-                for (int mi = 0; mi < 12; ++mi) {
-                    if (doy_remain <= days_in_month[mi]) { month_now = mi + 1; break; }
-                    doy_remain -= days_in_month[mi];
-                }
-                /* Fortran update_monthly_flag fires at start (mstep==1) and at
-                   midnight at end of each month. We approximate with: first
-                   step OR month change. */
-                int update_monthly_flag = (n == 1) || (month_now != month_prev);
-                fesom_sss_runoff_step(&sr, &mesh, &tracers, &forcing, &mpi,
-                                      jra55_year, month_now, update_monthly_flag);
-                month_prev = month_now;
+                fesom_sss_runoff_step_cal(&sr, &mesh, &tracers, &forcing, &mpi,
+                                          n, &io.prev_calendar, &io.calendar);
             }
             /* Physics-bisect toggles (env-gated). Applied AFTER bulk+runoff
              * writes forcing, BEFORE fesom_timestep reads it. */
@@ -949,6 +963,14 @@ skip_rest_state:
                                        &tracers, &forcing);
             if (mpi.mype == 0) {
                 fprintf(stderr, "[step %d] done — %d CG iters\n", n, iters);
+            }
+
+            /* Drive output streams + advance calendar. Per-step cost is
+             * a local-only sum into accumulators (no MPI on hot path);
+             * gather + write happens only on calendar boundaries. */
+            {
+                fesom_state st = { &mesh, &dyn, &tracers, &aux, &ice, &forcing };
+                fesom_io_step(&io, (double)FESOM_PHASE1_DT, &st, &mpi);
             }
             if (n == 1 || n % print_every == 0 || n == nsteps) {
                 /* Iterate myDim only for stat collection — halo entries are
@@ -1076,14 +1098,17 @@ skip_rest_state:
                     MPI_Abort(mpi.MPI_COMM_FESOM, 99);
                 }
             }
-            if (out_dir && (n % snap_every == 0)) {
+            if (out_dir && snap_every > 0 && (n % snap_every == 0)) {
                 char path[1024];
                 snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, n);
-                fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT,
+                fesom_io_write_snapshot(path, n, FESOM_PHASE1_DT, &io.calendar,
                                         &mesh, &dyn, &tracers, &aux, &ice, &mpi);
             }
         }
         free(T_ic); free(S_ic);
+
+        /* Mid-window flush + close monthly stream files. */
+        fesom_io_finalize(&io, &mpi);
     }
 
     fesom_tracer_adv_free(&tra_sc);

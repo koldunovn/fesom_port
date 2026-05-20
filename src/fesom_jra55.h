@@ -3,8 +3,9 @@
 
 #include "fesom_types.h"
 
-struct fesom_partit;
+#include "fesom_calendar.h"
 
+struct fesom_partit;
 struct fesom_mesh;
 
 /*
@@ -170,5 +171,20 @@ void fesom_jra55_step(fesom_jra55 *jra,
                       const struct fesom_mesh *mesh,
                       struct fesom_partit     *partit,
                       int yearnew, int daynew, real_t timenew);
+
+/* Calendar-driven adapter for fesom_jra55_step. Extracts year/day-of-year/
+ * seconds-in-day from the model calendar and delegates to fesom_jra55_step.
+ * Bit-identical to the legacy caller for runs <= 1 calendar year — see
+ * Task 3 of the IO-system plan for the rdate-equivalence argument that
+ * extends this to multi-year runs once the JRA55 reader gains year-rollover
+ * support.
+ *
+ * NOTE: callers must still arrange for fesom_jra55_open_year() to be called
+ * when the calendar crosses a year boundary; this adapter does not do it.
+ * For single-year runs (Task 3 gate), no rollover happens. */
+void fesom_jra55_step_cal(fesom_jra55 *jra,
+                          const struct fesom_mesh *mesh,
+                          struct fesom_partit     *partit,
+                          const fesom_calendar_t  *cal);
 
 #endif /* FESOM_JRA55_H */

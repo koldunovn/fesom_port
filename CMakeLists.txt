@@ -77,6 +77,42 @@ add_executable(fesom_port
   src/fesom_ice_evp.c
   src/fesom_ice_fct.c
   src/fesom_gm.c
+  src/fesom_calendar.c
+  src/fesom_io_stream.c
+  src/fesom_io_stream_dispatch.c
+  src/fesom_io_config.c
 )
 target_include_directories(fesom_port PRIVATE src ${NC_INCDIR})
 target_link_libraries(fesom_port PRIVATE m ${NC_LIBS} MPI::MPI_C)
+
+# --- Tests --------------------------------------------------------------
+# Calendar is pure logic — no MPI, no netCDF — so test_calendar links only
+# fesom_calendar.c and the math library. CTest invocation: `ctest -V`.
+enable_testing()
+add_executable(test_calendar
+  tests/test_calendar.c
+  src/fesom_calendar.c
+)
+target_include_directories(test_calendar PRIVATE src)
+target_link_libraries(test_calendar PRIVATE m)
+add_test(NAME calendar COMMAND test_calendar)
+
+# Stream dispatcher unit test: no netCDF, no fesom_io.c, just MPI for
+# the FESOM_DIE → MPI_Abort symbol on the never-taken error path.
+add_executable(test_io_stream_unit
+  tests/test_io_stream_unit.c
+  src/fesom_io_stream_dispatch.c
+)
+target_include_directories(test_io_stream_unit PRIVATE src)
+target_link_libraries(test_io_stream_unit PRIVATE m MPI::MPI_C)
+add_test(NAME io_stream_unit COMMAND test_io_stream_unit)
+
+# Config-file parser test: pure C, no MPI/netCDF.
+add_executable(test_io_config
+  tests/test_io_config.c
+  src/fesom_io_config.c
+)
+target_include_directories(test_io_config PRIVATE src)
+target_compile_definitions(test_io_config PRIVATE _POSIX_C_SOURCE=200809L)
+target_link_libraries(test_io_config PRIVATE m)
+add_test(NAME io_config COMMAND test_io_config)

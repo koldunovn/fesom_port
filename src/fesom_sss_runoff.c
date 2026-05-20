@@ -423,3 +423,31 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
         free(flux);
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* Task 4 of IO-system overhaul: calendar-driven adapter.
+ *
+ * Legacy caller built month_now from a static non-leap days_in_month[12]
+ * table in fesom_main.c, and update_monthly_flag from a manual
+ * month_prev != month_now comparison. Both come off the model calendar now:
+ *   month_now           = cal->month
+ *   update_monthly_flag = (n_step == 1) || crossed(prev, cal, MONTHLY)
+ *
+ * For runs starting on Jan 1 the n_step==1 trigger fires regardless of
+ * `prev`, matching the legacy "fire on mstep==1" semantic exactly. */
+void fesom_sss_runoff_step_cal(fesom_sss_runoff           *sr,
+                               const struct fesom_mesh    *mesh,
+                               const struct fesom_tracers *tracers,
+                               struct fesom_forcing       *forcing,
+                               struct fesom_partit        *partit,
+                               int                         n_step,
+                               const fesom_calendar_t     *prev,
+                               const fesom_calendar_t     *cal)
+{
+    int yearnew  = cal->year;
+    int month_now = cal->month;
+    int update_monthly_flag = (n_step == 1)
+                            || fesom_calendar_crossed(prev, cal, FESOM_PERIOD_MONTHLY);
+    fesom_sss_runoff_step(sr, mesh, tracers, forcing, partit,
+                          yearnew, month_now, update_monthly_flag);
+}

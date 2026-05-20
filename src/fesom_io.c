@@ -12,6 +12,7 @@
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_ice_types.h"
+#include "fesom_io_config.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -31,27 +32,13 @@
 } while (0)
 
 /* ------------------------------------------------------------------ */
-/* Gather plan: cached per call (could be hoisted to an io_state if    */
-/* IO becomes a hotspot — for now Phase 1 snapshots are infrequent).   */
+/* gather_plan implementation. Struct definition + public prototypes  */
+/* live in fesom_io.h so fesom_io_stream.c can reuse the plumbing.    */
 /* ------------------------------------------------------------------ */
-typedef struct gather_plan {
-    int  npes;
-    int  mype;
-    int  myDim_n;            /* this rank's interior node count        */
-    int  myDim_e;            /* this rank's interior element count     */
-    int *all_n;              /* [npes] per-rank myDim_nod2D (rank 0)   */
-    int *all_e;              /* [npes] per-rank myDim_elem2D (rank 0)  */
-    int *displ_n;            /* [npes] node-count displacements        */
-    int *displ_e;            /* [npes] element-count displacements     */
-    int  total_n;            /* sum of all_n  == mesh->nod2D           */
-    int  total_e;            /* sum of all_e  == mesh->elem2D          */
-    int *gathered_myList_n;  /* [total_n] rank-0 view of myList_nod2D  */
-    int *gathered_myList_e;  /* [total_e] rank-0 view of myList_elem2D */
-} gather_plan;
 
-static void gather_plan_init(gather_plan *gp,
-                             const struct fesom_mesh *mesh,
-                             struct fesom_partit *partit)
+void gather_plan_init(gather_plan *gp,
+                      const struct fesom_mesh *mesh,
+                      struct fesom_partit *partit)
 {
     memset(gp, 0, sizeof(*gp));
     gp->npes    = partit->npes;
@@ -100,7 +87,7 @@ static void gather_plan_init(gather_plan *gp,
                 0, partit->MPI_COMM_FESOM);
 }
 
-static void gather_plan_free(gather_plan *gp)
+void gather_plan_free(gather_plan *gp)
 {
     free(gp->all_n);   free(gp->all_e);
     free(gp->displ_n); free(gp->displ_e);
@@ -110,10 +97,10 @@ static void gather_plan_free(gather_plan *gp)
 
 /* Gather an [my_n × stride] node-indexed buffer to rank 0's
  * [total_n × stride] global buffer indexed by global node id (0-based). */
-static void gather_node(const real_t *local, int stride,
-                        const gather_plan *gp,
-                        real_t *global,
-                        MPI_Comm comm)
+void gather_node(const real_t *local, int stride,
+                 const gather_plan *gp,
+                 real_t *global,
+                 MPI_Comm comm)
 {
     real_t *recv = NULL;
     int *counts = NULL, *displs = NULL;
@@ -143,10 +130,10 @@ static void gather_node(const real_t *local, int stride,
 }
 
 /* Same for element-indexed [my_e × stride] → [total_e × stride]. */
-static void gather_elem(const real_t *local, int stride,
-                        const gather_plan *gp,
-                        real_t *global,
-                        MPI_Comm comm)
+void gather_elem(const real_t *local, int stride,
+                 const gather_plan *gp,
+                 real_t *global,
+                 MPI_Comm comm)
 {
     real_t *recv = NULL;
     int *counts = NULL, *displs = NULL;
@@ -265,6 +252,7 @@ static void extract_uv_component(const real_t *uv, real_t *dst,
 void fesom_io_write_snapshot(const char                  *path,
                              int                          step_n,
                              real_t                       dt,
+                             const fesom_calendar_t      *cal,
                              const struct fesom_mesh     *mesh,
                              const struct fesom_dyn      *dyn,
                              const struct fesom_tracers  *tracers,
@@ -463,14 +451,17 @@ void fesom_io_write_snapshot(const char                  *path,
         NC_CHECK(nc_def_var(ncid, "h_snow", NC_DOUBLE, 2, dims_t_eta, &var_hsnow));
     }
 
-    /* CF-compliant time units so xarray.open_mfdataset can decode without
-     * `decode_times=False`. We don't have a real model calendar yet, so
-     * the reference date is a Phase-1 placeholder; it's just an offset for
-     * the seconds value xarray attaches to each snapshot. */
-    NC_CHECK(nc_put_att_text(ncid, var_time, "units", strlen("seconds since 1900-01-01 00:00:00"),
-                             "seconds since 1900-01-01 00:00:00"));
-    NC_CHECK(nc_put_att_text(ncid, var_time, "calendar", 8, "standard"));
-    NC_CHECK(nc_put_att_text(ncid, var_time, "long_name", 10, "model time"));
+    /* CF-compliant time stamp anchored to the model calendar. Replaces the
+     * earlier "1900-01-01" placeholder so xarray.open_mfdataset on a stack
+     * of snapshots produces dates in the run's actual year (e.g. 1958). */
+    {
+        char units_buf[64];
+        fesom_calendar_units_string(cal, units_buf, sizeof units_buf);
+        const char *cal_name = fesom_calendar_cf_name(cal->kind);
+        NC_CHECK(nc_put_att_text(ncid, var_time, "units",     strlen(units_buf), units_buf));
+        NC_CHECK(nc_put_att_text(ncid, var_time, "calendar",  strlen(cal_name),  cal_name));
+        NC_CHECK(nc_put_att_text(ncid, var_time, "long_name", 10, "model time"));
+    }
     NC_CHECK(nc_put_att_text(ncid, var_lon,  "units", 12, "degrees_east"));
     NC_CHECK(nc_put_att_text(ncid, var_lat,  "units", 13, "degrees_north"));
     NC_CHECK(nc_put_att_text(ncid, var_zbar, "units", 1, "m"));
@@ -505,10 +496,15 @@ void fesom_io_write_snapshot(const char                  *path,
 
     NC_CHECK(nc_enddef(ncid));
 
-    /* ---- time scalar (single record) ------------------------------- */
+    /* ---- time scalar (single record) -------------------------------
+     * Pulled from the model calendar so the value lines up with the
+     * "seconds since YYYY-MM-DD" units written above. Equals
+     * step_n * dt for runs starting at YYYY-01-01 00:00:00, which is
+     * what fesom_io_init enforces. step_n / dt remain available for the
+     * "step" / "dt" global attributes set just above. */
     {
         size_t start[1] = {0}, count[1] = {1};
-        double t_val = (double)step_n * (double)dt;
+        double t_val = fesom_calendar_seconds_since_origin(cal);
         NC_CHECK(nc_put_vara_double(ncid, var_time, start, count, &t_val));
     }
 
@@ -599,4 +595,298 @@ void fesom_io_write_snapshot(const char                  *path,
     free(g_uice); free(g_vice); free(g_hice); free(g_hsnow);
 
     gather_plan_free(&gp);
+}
+
+/* ====================================================================== */
+/* Task 6 — orchestrator + default monthly variable table.               */
+/*                                                                        */
+/* Each resolver ADDS its local-slice contribution to the accumulator    */
+/* buffer. For 1:1 fields the loop is just `out[i] += src[i]`. Synthesised */
+/* fields (sst from T-surface, u/v from uv components) do their own       */
+/* indexing.                                                             */
+/* ====================================================================== */
+
+static void resolve_temp(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->tracers->data[FESOM_TRACER_T].values;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_salt(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->tracers->data[FESOM_TRACER_S].values;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_sst(const fesom_state *s, real_t *out, size_t n)
+{
+    /* Surface slice of T tracer; tracer storage stride is `nl`. */
+    const real_t *T = s->tracers->data[FESOM_TRACER_T].values;
+    const int nl = s->mesh->nl;
+    for (size_t i = 0; i < n; ++i) out[i] += T[i * (size_t)nl + 0];
+}
+static void resolve_sss(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *S = s->tracers->data[FESOM_TRACER_S].values;
+    const int nl = s->mesh->nl;
+    for (size_t i = 0; i < n; ++i) out[i] += S[i * (size_t)nl + 0];
+}
+static void resolve_ssh(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->dyn->eta_n;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_u(const fesom_state *s, real_t *out, size_t n)
+{
+    /* uv layout: [elem][nl][2]. 3D_ELEM_MID accumulator: [elem][nl].
+     * Halo-exchanged at fesom_step.c:127 — replicated-element values
+     * agree across ranks at the moment of accumulation, so local-only
+     * sum stays consistent under MPI. */
+    const real_t *uv = s->dyn->uv;
+    const int nl = s->mesh->nl;
+    const size_t E = n / (size_t)nl;
+    for (size_t e = 0; e < E; ++e) {
+        for (int k = 0; k < nl; ++k) {
+            out[e * (size_t)nl + (size_t)k] += uv[e * (size_t)nl * 2 + (size_t)k * 2 + 0];
+        }
+    }
+}
+static void resolve_v(const fesom_state *s, real_t *out, size_t n)
+{
+    /* Same exchange-status note as resolve_u; both components share uv. */
+    const real_t *uv = s->dyn->uv;
+    const int nl = s->mesh->nl;
+    const size_t E = n / (size_t)nl;
+    for (size_t e = 0; e < E; ++e) {
+        for (int k = 0; k < nl; ++k) {
+            out[e * (size_t)nl + (size_t)k] += uv[e * (size_t)nl * 2 + (size_t)k * 2 + 1];
+        }
+    }
+}
+static void resolve_w(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->dyn->w;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_Kv(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->aux->Kv;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_Av(const fesom_state *s, real_t *out, size_t n)
+{
+    /* aux->Av is element-replicated; halo-exchanged at fesom_step.c:92,96.
+     * Local-only mean accumulation is correct (see resolve_u banner). */
+    const real_t *src = s->aux->Av;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_density(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->aux->density_m_rho0;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_bvfreq(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->aux->bvfreq;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_a_ice(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->ice->data[FESOM_ICE_AICE].values;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_m_ice(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->ice->data[FESOM_ICE_MICE].values;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_m_snow(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->ice->data[FESOM_ICE_MSNOW].values;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_uice(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->ice->uice;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+static void resolve_vice(const fesom_state *s, real_t *out, size_t n)
+{
+    const real_t *src = s->ice->vice;
+    for (size_t i = 0; i < n; ++i) out[i] += src[i];
+}
+
+/* Default monthly variable table. Lifetime = run.
+ * If sea ice isn't initialised, callers should pass nvars = 12 instead
+ * of FESOM_DEFAULT_MONTHLY_NVARS to skip the trailing 5 ice entries. */
+#define FESOM_DEFAULT_MONTHLY_NVARS 17
+
+static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_NVARS] = {
+    /* 3D ocean state */
+    { "temp",    "potential temperature",          "degC",   FESOM_VAR_3D_NODE_MID,   resolve_temp    },
+    { "salt",    "salinity",                       "PSU",    FESOM_VAR_3D_NODE_MID,   resolve_salt    },
+    { "ssh",     "sea surface height",             "m",      FESOM_VAR_2D_NODE,       resolve_ssh     },
+    { "sst",     "sea surface temperature",        "degC",   FESOM_VAR_2D_NODE,       resolve_sst     },
+    { "sss",     "sea surface salinity",           "PSU",    FESOM_VAR_2D_NODE,       resolve_sss     },
+    { "u",       "zonal velocity",                 "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_u       },
+    { "v",       "meridional velocity",            "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_v       },
+    { "w",       "vertical velocity at interfaces","m/s",    FESOM_VAR_3D_NODE_IFACE, resolve_w       },
+    { "Kv",      "vertical diffusivity",           "m^2/s",  FESOM_VAR_3D_NODE_MID,   resolve_Kv      },
+    { "Av",      "vertical viscosity",             "m^2/s",  FESOM_VAR_3D_ELEM_MID,   resolve_Av      },
+    { "density", "in-situ density minus rho0",     "kg/m^3", FESOM_VAR_3D_NODE_MID,   resolve_density },
+    { "bvfreq",  "Brunt-Vaisala frequency squared","s^-2",   FESOM_VAR_3D_NODE_MID,   resolve_bvfreq  },
+    /* Ice fields (skipped when state->ice == NULL — see fesom_io_init) */
+    { "a_ice",   "ice area fraction",              "1",      FESOM_VAR_2D_NODE,       resolve_a_ice   },
+    { "m_ice",   "ice volume per area",            "m",      FESOM_VAR_2D_NODE,       resolve_m_ice   },
+    { "m_snow",  "snow volume per area",           "m",      FESOM_VAR_2D_NODE,       resolve_m_snow  },
+    { "uice",    "ice zonal velocity",             "m/s",    FESOM_VAR_2D_NODE,       resolve_uice    },
+    { "vice",    "ice meridional velocity",        "m/s",    FESOM_VAR_2D_NODE,       resolve_vice    },
+};
+
+/* ====================================================================== */
+/* Orchestrator                                                          */
+/* ====================================================================== */
+
+/* Default cadence-kind mapping: STEP -> INSTANT, others -> MEAN. */
+static fesom_output_kind_t default_kind_for_period(fesom_period_kind_t p)
+{
+    return (p == FESOM_PERIOD_STEP) ? FESOM_OUT_INSTANT : FESOM_OUT_MEAN;
+}
+
+void fesom_io_init(fesom_io_t                  *io,
+                   const char                  *out_dir,
+                   fesom_calendar_kind_t        cal_kind,
+                   int                          year,
+                   int                          month,
+                   int                          day,
+                   const char                  *config_file_or_null,
+                   const struct fesom_mesh     *mesh,
+                   struct fesom_partit         *partit)
+{
+    memset(io, 0, sizeof(*io));
+    fesom_calendar_init(&io->calendar, cal_kind, year, month, day);
+    io->prev_calendar = io->calendar;
+
+    /* Heap-owned out_dir copy. */
+    {
+        size_t n = strlen(out_dir) + 1;
+        io->out_dir = malloc(n);
+        FESOM_CHECK(io->out_dir, "fesom_io_init: oom (out_dir)");
+        memcpy(io->out_dir, out_dir, n);
+    }
+
+    /* Optional override file. If parsing fails, abort — better to fail
+     * loud than to silently produce unexpected output. */
+    fesom_io_config_t cfg;
+    int have_cfg = 0;
+    if (config_file_or_null && config_file_or_null[0]) {
+        if (fesom_io_config_parse(config_file_or_null, &cfg) != 0) {
+            FESOM_DIE("fesom_io_init: failed to parse %s", config_file_or_null);
+        }
+        have_cfg = 1;
+        if (partit->mype == 0) {
+            printf("[fesom_io] config %s parsed: %d entries\n",
+                   config_file_or_null, cfg.n_entries);
+        }
+    }
+
+    /* For each variable in the default table, decide its cadence list:
+     *   - if config has an entry: use its cadences (REPLACE the default)
+     *   - else: keep the default [MONTHLY]
+     * Then bin the variables per cadence so each stream gets its var list. */
+    int per_cad_count[5] = {0};
+    /* First pass: count vars per cadence to size buffers. */
+    for (int v = 0; v < FESOM_DEFAULT_MONTHLY_NVARS; ++v) {
+        const fesom_io_config_entry_t *e =
+            have_cfg ? fesom_io_config_lookup(&cfg, fesom_default_monthly_table[v].name) : NULL;
+        if (e) {
+            for (int c = 0; c < e->n_cadences; ++c) per_cad_count[e->cadences[c]] += 1;
+        } else {
+            per_cad_count[FESOM_PERIOD_MONTHLY] += 1;
+        }
+    }
+    /* Allocate the per-cadence var arrays. */
+    int per_cad_idx[5] = {0};
+    for (int p = 0; p < 5; ++p) {
+        io->owned_nvars[p] = per_cad_count[p];
+        if (per_cad_count[p] > 0) {
+            io->owned_vars[p] = malloc((size_t)per_cad_count[p] * sizeof(fesom_var_desc_t));
+            FESOM_CHECK(io->owned_vars[p], "fesom_io_init: oom (cadence %d)", p);
+        }
+    }
+    /* Second pass: fill them. Var descriptors are copied from the static
+     * table; resolver function pointers stay valid for the run. */
+    for (int v = 0; v < FESOM_DEFAULT_MONTHLY_NVARS; ++v) {
+        const fesom_io_config_entry_t *e =
+            have_cfg ? fesom_io_config_lookup(&cfg, fesom_default_monthly_table[v].name) : NULL;
+        if (e) {
+            for (int c = 0; c < e->n_cadences; ++c) {
+                fesom_period_kind_t p = e->cadences[c];
+                io->owned_vars[p][per_cad_idx[p]++] = fesom_default_monthly_table[v];
+            }
+        } else {
+            fesom_period_kind_t p = FESOM_PERIOD_MONTHLY;
+            io->owned_vars[p][per_cad_idx[p]++] = fesom_default_monthly_table[v];
+        }
+    }
+    if (have_cfg) fesom_io_config_free(&cfg);
+
+    /* Init each cadence's stream. Empty cadences stay inactive. */
+    for (int p = 0; p < 5; ++p) {
+        if (io->owned_nvars[p] == 0) continue;
+        fesom_io_stream_init(&io->streams[p],
+                             (fesom_period_kind_t)p,
+                             default_kind_for_period((fesom_period_kind_t)p),
+                             io->owned_vars[p],
+                             io->owned_nvars[p],
+                             mesh, partit, io->out_dir);
+        io->stream_active[p] = 1;
+    }
+
+    if (partit->mype == 0) {
+        const char *names[5] = { "step", "hourly", "daily", "monthly", "yearly" };
+        printf("[fesom_io] initialised: out_dir=%s, calendar=%s @ %04d-%02d-%02d\n",
+               io->out_dir, fesom_calendar_cf_name(cal_kind), year, month, day);
+        for (int p = 0; p < 5; ++p) {
+            if (!io->stream_active[p]) continue;
+            printf("[fesom_io]   %-7s : %d vars\n", names[p], io->owned_nvars[p]);
+        }
+    }
+}
+
+void fesom_io_step(fesom_io_t              *io,
+                   double                   dt,
+                   const fesom_state       *state,
+                   struct fesom_partit     *partit)
+{
+    /* Save previous-step calendar BEFORE advancing, so streams can detect
+     * period crossings via fesom_calendar_crossed(prev, curr, period). */
+    io->prev_calendar = io->calendar;
+    fesom_calendar_advance(&io->calendar, dt);
+
+    /* Drive each active stream. (At Task 6, only MONTHLY is active; the
+     * other slots are noops.) */
+    for (int p = 0; p < 5; ++p) {
+        if (!io->stream_active[p]) continue;
+        fesom_io_stream_step(&io->streams[p],
+                             state,
+                             &io->prev_calendar,
+                             &io->calendar,
+                             partit);
+    }
+}
+
+void fesom_io_finalize(fesom_io_t          *io,
+                       struct fesom_partit *partit)
+{
+    for (int p = 0; p < 5; ++p) {
+        if (io->stream_active[p]) {
+            fesom_io_stream_finalize(&io->streams[p], &io->calendar, partit);
+            fesom_io_stream_close(&io->streams[p]);
+            io->stream_active[p] = 0;
+        }
+        free(io->owned_vars[p]);
+        io->owned_vars[p]  = NULL;
+        io->owned_nvars[p] = 0;
+    }
+    free(io->out_dir);
+    io->out_dir = NULL;
 }

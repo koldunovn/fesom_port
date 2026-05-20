@@ -704,3 +704,41 @@ void fesom_jra55_step(fesom_jra55 *jra,
         fesom_exchange_nod2D(jra->prec_snow, partit);
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* Task 3 of IO-system overhaul: calendar-driven adapter.
+ *
+ * Maps cal -> (yearnew, daynew, timenew) for the existing fesom_jra55_step.
+ * The legacy caller in fesom_main.c computed daynew = floor(t_sec/86400)+1
+ * from a fixed run-start year; the adapter just reads year/day-of-year/
+ * seconds-in-day off the model calendar. The fesom_jra55_step internal
+ * "rdate = julday(year,1,1) + (daynew-1) + timenew/86400" formula is
+ * monotonic, so for a date crossing a year boundary the legacy
+ * (yearnew=Y, daynew=366) and the calendar-form (yearnew=Y+1, daynew=1)
+ * produce identical rdate values, hence identical interpolation. */
+void fesom_jra55_step_cal(fesom_jra55 *jra,
+                          const struct fesom_mesh *mesh,
+                          struct fesom_partit     *partit,
+                          const fesom_calendar_t  *cal)
+{
+    int yearnew = cal->year;
+
+    /* Multi-year rollover: when the calendar crosses Jan 1, swap in the
+     * next year's NetCDF files. Invalidate the per-year sbcdata cache
+     * indices first so the new year's getcoeffld can't false-match a
+     * t_indx left over from the previous year (the indices live on
+     * fesom_jra55_field across open_year calls). */
+    if (jra->fld[0].year_loaded != yearnew) {
+        for (int f = 0; f < FESOM_JRA_NFLD; ++f) {
+            jra->fld[f].sbcdata1_t_index = -1;
+            jra->fld[f].sbcdata2_t_index = -1;
+        }
+        fesom_jra55_open_year(jra, mesh, yearnew);
+    }
+
+    int daynew  = fesom_calendar_day_of_year(cal);
+    real_t timenew = (real_t)((double)cal->hour * 3600.0
+                            + (double)cal->minute * 60.0
+                            + cal->second);
+    fesom_jra55_step(jra, mesh, partit, yearnew, daynew, timenew);
+}

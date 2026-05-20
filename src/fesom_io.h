@@ -1,6 +1,9 @@
 #ifndef FESOM_IO_H
 #define FESOM_IO_H
 
+#include "fesom_calendar.h"
+#include "fesom_io_gather.h"
+#include "fesom_io_stream.h"
 #include "fesom_types.h"
 
 struct fesom_mesh;
@@ -9,6 +12,68 @@ struct fesom_tracers;
 struct fesom_aux;
 struct fesom_partit;
 struct fesom_ice;
+struct fesom_forcing;
+
+/* ------------------------------------------------------------------ */
+/* fesom_state — POD bundle of pointers into the model's per-step    */
+/* state. Built once per timestep by the orchestrator and passed by  */
+/* reference to each stream's resolver. No data is copied; lifetimes */
+/* are tied to the live model state for the duration of one          */
+/* fesom_io_step call.                                                */
+/* ------------------------------------------------------------------ */
+typedef struct fesom_state {
+    const struct fesom_mesh    *mesh;
+    const struct fesom_dyn     *dyn;
+    const struct fesom_tracers *tracers;
+    const struct fesom_aux     *aux;
+    const struct fesom_ice     *ice;       /* may be NULL (no sea ice) */
+    const struct fesom_forcing *forcing;
+} fesom_state;
+
+/* gather_plan API lives in fesom_io_gather.h (included above).      */
+
+/* ------------------------------------------------------------------ */
+/* Orchestrator. Owns the model-internal calendar and one stream per */
+/* cadence. Per-step, the main loop calls only fesom_io_step().      */
+/* ------------------------------------------------------------------ */
+typedef struct fesom_io {
+    fesom_calendar_t       calendar;
+    fesom_calendar_t       prev_calendar;
+    fesom_io_stream_t      streams[5];        /* indexed by fesom_period_kind_t */
+    int                    stream_active[5];  /* 1 = stream init'd, 0 = inactive */
+    /* Per-cadence var arrays, heap-owned and freed at finalize. Streams
+     * hold a const pointer into one of these. NULL for inactive cadences. */
+    struct fesom_var_desc *owned_vars[5];
+    int                    owned_nvars[5];
+    char                  *out_dir;           /* heap-owned copy */
+} fesom_io_t;
+
+/* Initialise the orchestrator. Sets up the calendar at (year, month, day),
+ * and configures the monthly stream with the compiled-in default variable
+ * table. Other four cadences (step/hourly/daily/yearly) are inactive at
+ * Task 6; Task 7 wires them on. `config_file` (override-file path) is
+ * accepted but parsed only in Task 8 — pass NULL for now. */
+void fesom_io_init(fesom_io_t                  *io,
+                   const char                  *out_dir,
+                   fesom_calendar_kind_t        cal_kind,
+                   int                          year,
+                   int                          month,
+                   int                          day,
+                   const char                  *config_file_or_null,
+                   const struct fesom_mesh     *mesh,
+                   struct fesom_partit         *partit);
+
+/* Per-step entry. Saves prev_calendar = calendar, advances calendar by dt,
+ * dispatches to each active stream's step. The only thing the main loop
+ * has to call to drive output. */
+void fesom_io_step(fesom_io_t              *io,
+                   double                   dt,
+                   const fesom_state       *state,
+                   struct fesom_partit     *partit);
+
+/* Mid-window flush + cleanup. Call at the end of the run. */
+void fesom_io_finalize(fesom_io_t          *io,
+                       struct fesom_partit *partit);
 
 /*
  * Write one snapshot of the model state to a NetCDF file.
@@ -69,6 +134,7 @@ struct fesom_ice;
 void fesom_io_write_snapshot(const char                  *path,
                              int                          step_n,
                              real_t                       dt,
+                             const fesom_calendar_t      *cal,
                              const struct fesom_mesh     *mesh,
                              const struct fesom_dyn      *dyn,
                              const struct fesom_tracers  *tracers,

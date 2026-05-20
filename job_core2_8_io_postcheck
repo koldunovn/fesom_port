@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --job-name=fesom_port_io_postcheck
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=8
+#SBATCH --ntasks=8
+#SBATCH --time=01:00:00
+#SBATCH -A ab0995
+#SBATCH -o /home/a/a270088/port2/fesom2_port/tests/regression_reference/core2_1day_post_io/slurm.%j.out
+#SBATCH -e /home/a/a270088/port2/fesom2_port/tests/regression_reference/core2_1day_post_io/slurm.%j.err
+
+# Post-Task-4 regression run. 172 steps × dt=500 = 1 model day.
+# Snapshot at end is compared against the pre-overhaul baseline captured
+# by job_core2_8_io_baseline, via scripts/diff_snap.py — must be
+# bit-identical.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+OUT_DIR="$REPO/tests/regression_reference/core2_1day_post_io"
+mkdir -p "$OUT_DIR"
+
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT_DIR/SHA.txt"
+( cd "$REPO" && git status --short )  > "$OUT_DIR/status.txt"
+
+BIN="$REPO/build/fesom_port"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+DT=500
+NSTEPS=172
+SNAP_EVERY=172
+JRA55_YEAR=1958
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+EXITCODE=$?
+date
+
+echo "Exit code: $EXITCODE"
+echo "Tail of run.log:"
+tail -60 "$OUT_DIR/run.log"
+echo "Tail of run.err:"
+tail -10 "$OUT_DIR/run.err"
+echo "Generated snapshot files:"
+ls -la "$OUT_DIR"/snap_*.nc 2>/dev/null
+exit $EXITCODE
