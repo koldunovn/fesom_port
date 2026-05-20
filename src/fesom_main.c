@@ -774,7 +774,7 @@ skip_rest_state:
            IC (UV=0); T_oc from initial T field. */
         fesom_jra55_step(&jra, &mesh, &mpi, jra55_year, /*daynew=*/1, /*timenew=*/0.0);
         fesom_compute_vel_nodes(&mesh, &dyn);
-        fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &mpi);
+        fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi);
         real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
         for (int e = 1; e < mesh.myDim_elem2D; ++e) {
             real_t t = forcing.stress_surf[2*e + 0];
@@ -908,7 +908,7 @@ skip_rest_state:
                  * old "cal.year == jra55_year" safety overlap from Task 2
                  * was retired with multi-year support. */
                 fesom_jra55_step_cal(&jra, &mesh, &mpi, &io.calendar);
-                fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &mpi);
+                fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi);
             }
             if (use_sr) {
                 fesom_sss_runoff_step_cal(&sr, &mesh, &tracers, &forcing, &mpi,
@@ -921,6 +921,8 @@ skip_rest_state:
                 int N = mesh.myDim_nod2D + mesh.eDim_nod2D;
                 memset(forcing.stress_surf,      0, (size_t)E * 2 * sizeof(real_t));
                 memset(forcing.stress_node_surf, 0, (size_t)N * 2 * sizeof(real_t));
+                memset(ice.stress_atmice_x,      0, (size_t)N * sizeof(real_t));
+                memset(ice.stress_atmice_y,      0, (size_t)N * sizeof(real_t));
             }
             if (no_hflux) {
                 int N = mesh.myDim_nod2D + mesh.eDim_nod2D;

@@ -8,6 +8,7 @@ struct fesom_jra55;
 struct fesom_dyn;
 struct fesom_tracers;
 struct fesom_forcing;
+struct fesom_ice;
 struct fesom_partit;
 
 /*
@@ -41,6 +42,7 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
                         const struct fesom_dyn    *dyn,
                         const struct fesom_tracers *tracers,
                         struct fesom_forcing       *forcing,
+                        struct fesom_ice           *ice,
                         struct fesom_partit        *partit);
 
 #endif /* FESOM_BULK_H */

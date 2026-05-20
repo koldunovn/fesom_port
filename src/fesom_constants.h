@@ -88,6 +88,8 @@ extern real_t fesom_phase1_dt;
    namelist /forcing_exchange_coeff/ defaults). */
 #define FESOM_CH_ATM_ICE       1.75e-3   /* sensible-heat over ice */
 #define FESOM_CE_ATM_ICE       1.75e-3   /* evaporation over ice   */
-#define FESOM_CD_ATM_ICE       1.32e-3   /* drag over ice          */
+#define FESOM_CD_ATM_ICE       1.2e-3    /* atm-ice momentum drag — CORE2
+                                            namelist.forcing Cd_atm_ice=0.0012
+                                            (NOT the 1.32e-3 module default) */
 
 #endif /* FESOM_CONSTANTS_H */

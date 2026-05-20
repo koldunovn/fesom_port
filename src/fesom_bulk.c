@@ -7,6 +7,7 @@
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
 #include "fesom_halo.h"
+#include "fesom_ice_types.h"
 #include "fesom_jra55.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -223,6 +224,7 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
                         const struct fesom_dyn    *dyn,
                         const struct fesom_tracers *tracers,
                         struct fesom_forcing       *forcing,
+                        struct fesom_ice           *ice,
                         struct fesom_partit        *partit)
 {
     /* Loop bound is myDim+eDim — matches Fortran ncar_ocean_fluxes_mode
@@ -245,6 +247,8 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
             forcing->stress_node_surf[2*n + 1] = 0.0;
             forcing->heat_flux [n] = 0.0;
             forcing->water_flux[n] = 0.0;
+            ice->stress_atmice_x[n] = 0.0;
+            ice->stress_atmice_y[n] = 0.0;
             continue;
         }
 
@@ -292,6 +296,17 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
         real_t mag = sqrt(dux*dux + dvy*dvy) * BULK_RHOAIR;
         forcing->stress_node_surf[2*n + 0] = cd * mag * dux;
         forcing->stress_node_surf[2*n + 1] = cd * mag * dvy;
+
+        /* Atmosphere-ICE momentum stress — Fortran gen_forcing_couple.F90:
+         * 759-763. Same bulk form but wind RELATIVE TO ICE and the constant
+         * atm-ice drag Cd_atm_ice (AOMIP_drag_coeff=.false. on CORE2). This
+         * is the EVP's direct wind forcing (inv_mass·stress_atmice in
+         * fesom_ice_evp.c); without it the sea ice never feels the wind. */
+        real_t dux_i = ua - ice->uice[n];
+        real_t dvy_i = va - ice->vice[n];
+        real_t mag_i = sqrt(dux_i*dux_i + dvy_i*dvy_i) * BULK_RHOAIR;
+        ice->stress_atmice_x[n] = FESOM_CD_ATM_ICE * mag_i * dux_i;
+        ice->stress_atmice_y[n] = FESOM_CD_ATM_ICE * mag_i * dvy_i;
     }
 
     /* Halo-exchange node-side fields written above so the element
