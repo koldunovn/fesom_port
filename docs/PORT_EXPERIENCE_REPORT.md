@@ -93,6 +93,7 @@ appears at some rank counts and not others.
 | `20715c6` | FCT step a1 `fct_ttf_max/min` halo | 16-rank S.min drift |
 | `028277d` | PHC + SSS/runoff halo | small residual `pgf` signature on 16 ranks |
 | `55f6b6c` | JRA forcing arrays sized myDim only | Sea-ice EVP `m_ice→7e6 m` at halo, `ice_strength→1e9` |
+| *(2026-05-20)* | `fesom_bulk_compute` Ch/Ce over myDim | **dt capped at 500**; SSH non-conservation, slow blow-up at dt=1800 |
 
 **How to catch proactively:**
 
@@ -103,6 +104,47 @@ grep -nE 'for.*<.*myDim_(nod|elem)2D;' src/*.c | grep -v eDim
 For every match, open the Fortran subroutine and check the loop bound.
 If Fortran says `myDim+eDim`, the C must too. We learned to do this audit
 **at write time**, not after a multi-rank divergence appears.
+
+**The most insidious instance (the dt=1800 blocker, 2026-05-20).** This one
+hid for weeks behind a *partial* fix and demands its own write-up because it
+breaks two comforting assumptions:
+
+- *"The field is allocated `myDim+eDim`, so it's fine."* It was. The bug was
+  the **write loop** (`fesom_bulk_compute` computed `Ch_atm_oce`/`Ce_atm_oce`
+  on `myDim` only). Fortran `ncar_ocean_fluxes_mode` (gen_bulk_formulae.F90:181)
+  loops `myDim+eDim`. Allocation size is necessary, not sufficient.
+- *"bulk_compute already halo-exchanges its outputs."* It exchanged
+  `stress_node_surf`/`heat_flux`/`water_flux` — but **not** the exchange
+  coefficients `Ch/Ce`, which sea-ice `thermodynamics` reads directly at eDim.
+  An exchange audit that checks "is there a `call exchange_*` for the outputs"
+  passes while the real consumer's input stays stale. (See the now-corrected
+  "bulk_compute halo exchange … No observable effect" line in
+  `MPI_PORT_REPORT.md` — that *was* this bug, fixed halfway.)
+
+**Consequence chain (why the symptom was a time-step limit, not a crash):**
+stale eDim `Ch/Ce` → sea-ice thermo diverges `a_ice` across ranks (444 nodes)
+→ divergent wind `stress_surf` on **replicated boundary elements** (2D elements
+that legitimately appear in `myDim` on >1 rank; their per-rank redundant
+computation must be bit-identical or the SSH edge-flux assembly stops
+telescoping) → `Σ ssh_rhs ≠ 0` (grew to 5.6e-6 relative) → non-conservative
+free surface → velocity blow-up whose onset scales with `dt²` (the stiffness
+matrix `M = area·(1+g·dt²·α²·Δ)`). At dt=500 the leak was tolerable; at
+dt=1800 it blew up. Fortran was stable at dt=1800, which (per the literal-port
+rule) *proved* it was a C bug, not a physics/linfs choice.
+
+**Diagnostic recipe that cracked it (re-add in minutes if multi-rank drifts again):**
+1. `Σ ssh_rhs` over **owned** nodes after assembly must be machine-zero
+   (telescoping). Print `sum`, `max|ssh_rhs|`, ratio. 1-rank ~1e-16 vs
+   multi-rank growing = a cross-rank assembly leak. (env `FESOM_DIAG_SSHRHS`)
+2. Per-cut-edge dump (edges with a halo endpoint): same global node-pair on
+   two ranks should give identical `(c1+c2)`. Identical geometry/`uv_rhs` but
+   divergent `(c1+c2)` ⇒ the differing input is an element field (here:
+   `stress_surf`).
+3. **Exchange-and-compare probe** — the general "which node field is stale at
+   eDim" finder: copy field → `exchange_nod(copy)` → diff `copy` vs original
+   over `[myDim, myDim+eDim)`. Nonzero ⇒ inconsistent at eDim. Run it over the
+   whole candidate-input list at once; it named `Ch/Ce` as the only stale ones.
+   This probe is the fastest tool for this entire bug class.
 
 ### 3.2 Array allocation size vs. reader's loop bound (cross-module)
 

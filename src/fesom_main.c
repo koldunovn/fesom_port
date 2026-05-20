@@ -797,6 +797,14 @@ skip_rest_state:
         fesom_forcing_set_analytical(&mesh, &forcing,
                                      /*tau0     = */ 0.05,    /* N/m² */
                                      /*Ly_factor= */ 2.0);    /* one cosine over 90° */
+        /* The node interpolation in set_analytical area-averages over
+           nod_in_elem2D, whose neighbour list is INCOMPLETE for eDim halo
+           nodes -> divergent eDim values. Exchange so eDim matches the owner,
+           mirroring the bulk path (fesom_bulk.c) and Fortran's
+           exchange_nod(stress_atmoce). Required for SSH-RHS conservation:
+           oce_fluxes_mom re-averages these node values onto (replicated)
+           elements every step. */
+        fesom_halo_exchange(forcing.stress_node_surf, FESOM_HALO_NOD2D, 1, 2, &mpi);
         real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
         for (int e = 1; e < mesh.myDim_elem2D; ++e) {
             real_t t = forcing.stress_surf[2*e + 0];

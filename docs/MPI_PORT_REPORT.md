@@ -81,7 +81,18 @@ glob_max, the IC produces step-1 values bit-identical to 1-rank.
 - **Preconditioner OOB read**: fixed (sized `diag_values` to N_alloc and
   halo-exchanged). Runtime values unchanged on 16-rank.
 - **bulk_compute halo exchange**: added for `stress_node_surf`, `heat_flux`,
-  `water_flux`. No observable effect.
+  `water_flux`. No observable effect *at the time* — but this fix was
+  INCOMPLETE and the gap became the dt=1800 blocker. `bulk_compute` also
+  writes `Ch_atm_oce`/`Ce_atm_oce` (NCAR exchange coefficients) and looped
+  `myDim` only, while Fortran `ncar_ocean_fluxes_mode`
+  (gen_bulk_formulae.F90:181) loops `myDim+eDim`. Exchanging the *fluxes* but
+  not the *coefficients* left Ch/Ce stale at eDim; sea-ice `thermodynamics`
+  reads them at eDim → divergent `a_ice` → divergent `stress_surf` on
+  replicated boundary elements → non-conservative SSH RHS → dt-dependent
+  blow-up. Real fix (2026-05-20): loop `bulk_compute` over `myDim+eDim` (one
+  line). Lesson: exchanging *some* outputs of a routine is not the same as
+  covering *every* field a downstream consumer reads at halo. See
+  PORT_EXPERIENCE_REPORT.md §3.1 "most insidious instance".
 - **`compute_hbar` / `compute_ssh_rhs_linfs` / `ale_vert_vel_linfs` edge
   loops**: changed `myDim+eDim_edge2D` → `myDim_edge2D` to match Fortran.
   No observable effect on 16-rank values.

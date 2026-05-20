@@ -225,7 +225,16 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
                         struct fesom_forcing       *forcing,
                         struct fesom_partit        *partit)
 {
-    int N = mesh->myDim_nod2D;
+    /* Loop bound is myDim+eDim — matches Fortran ncar_ocean_fluxes_mode
+     * (gen_bulk_formulae.F90:181) and the wind-stress loop
+     * (gen_forcing_couple.F90:738), both `do i=1,myDim_nod2D+eDim_nod2D`.
+     * Computing the exchange coefficients (Cd/Ch/Ce) and fluxes at eDim from
+     * the (already halo-consistent) JRA + ocean-surface inputs keeps
+     * Ch_atm_oce/Ce_atm_oce consistent at eDim. The sea-ice thermodynamics
+     * reads Ch/Ce directly over myDim+eDim; computing them on myDim only left
+     * eDim stale -> divergent a_ice across ranks -> divergent stress_surf on
+     * replicated boundary elements -> non-conservative SSH RHS -> dt blow-up. */
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
     int E = mesh->myDim_elem2D;
 
     /* For each node compute cd/ce/ch then qsr/qns/emp. */
