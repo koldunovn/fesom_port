@@ -96,4 +96,14 @@ void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
                             struct fesom_dyn        *dyn,
                             struct fesom_partit     *partit);
 
+/*
+ * Biharmonic flow-aware viscosity (opt_visc=7) — visc_filt_bidiff
+ * (oce_dyn.F90:592-744). This is what CORE2 runs (work_core opt_visc=7).
+ * Two-stage ∇⁴ operator (k⁴ grid-scale damping); required for dt=1800
+ * stability where the harmonic opt_visc=5 lets a 2Δx mode grow.
+ */
+void fesom_visc_filt_bidiff(const struct fesom_mesh *mesh,
+                            struct fesom_dyn        *dyn,
+                            struct fesom_partit     *partit);
+
 #endif /* FESOM_MOMENTUM_H */

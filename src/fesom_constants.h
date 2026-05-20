@@ -49,14 +49,20 @@
 #define FESOM_PHASE1_USE_WSPLIT       1
 #define FESOM_PHASE1_WSPLIT_MAXCFL    1.0
 
-/* Horizontal viscosity opt_visc=5 (visc_filt_bcksct). Pi namelist.dyn defaults.
+/* Horizontal viscosity coefficients (shared by all opt_visc schemes).
+   work_core/namelist.dyn: visc_gamma0=0.003, gamma1=0.1, gamma2=0.285.
    FRESH_START.md §14.7 explicitly warns: visc_gamma0 = 0.003, NOT 0.03. */
 #define FESOM_PHASE1_VISC_GAMMA0       0.003
 #define FESOM_PHASE1_VISC_GAMMA1       0.1
 #define FESOM_PHASE1_VISC_GAMMA2       0.285
+/* CORE2 uses opt_visc=7 (visc_filt_bidiff, biharmonic). The optional Laplacian
+   add-on is gated by visc_gamma{0,1}_h, both 0 in work_core (MOD_DYN default)
+   → pure biharmonic. opt_visc=5 (visc_filt_bcksct) is also ported but unused. */
+#define FESOM_PHASE1_VISC_GAMMA0_H     0.0
+#define FESOM_PHASE1_VISC_GAMMA1_H     0.0
 /* Pi default is 1.5 ("easy backscatter" returns 50% extra of smoothed
    energy). User asked to set this to 1.0 for now → no backscatter return,
-   pure smoothing. */
+   pure smoothing. (opt_visc=5 only.) */
 #define FESOM_PHASE1_VISC_EASYBSRETURN 1.0
 
 /* PP mixing — defaults from oce_modules.F90:25-78 */

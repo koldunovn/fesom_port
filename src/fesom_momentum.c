@@ -625,6 +625,114 @@ void fesom_visc_filt_bcksct(const struct fesom_mesh *mesh,
 }
 
 /*===========================================================================
+ * visc_filt_bidiff (oce_dyn.F90:592-744, opt_visc=7) — biharmonic, flow-aware.
+ *
+ * This is the scheme CORE2 actually runs (work_core/namelist.dyn opt_visc=7).
+ * Strictly energy-dissipative, momentum-conserving biharmonic operator: the
+ * ∇⁴ damps grid-scale (2Δx) modes as k⁴, far more strongly than the harmonic
+ * opt_visc=5 (visc_filt_bcksct) above — which is why opt_visc=7 is required for
+ * stability at dt=1800.
+ *
+ *   Stage 1 (edge loop): build the flow-aware Laplacian U_c,V_c at elements:
+ *     on each interior edge, vi = sqrt(max(γ0, max(γ1·|du|, γ2·|du|²))·len),
+ *     U_c[el1] -= du·vi; U_c[el2] += du·vi   (du = uv[el1]-uv[el2]).
+ *   exchange_elem(U_c,V_c).
+ *   Stage 2 (edge loop): apply the second Laplacian into uv_rhs:
+ *     vi = -dt·sqrt(...·len),  viLapl = dt·max(γ0h, γ1h·|du|)·len  (=0 for CORE2),
+ *     update = vi·(U_c[el1]-U_c[el2]) + viLapl·du,
+ *     uv_rhs[el1] -= update/area1;  uv_rhs[el2] += update/area2.
+ *
+ * Reuses dyn->u_b/v_b (element scratch) as the stage-1 Laplacian U_c/V_c —
+ * opt_visc=5 and opt_visc=7 never run together. Edge loop covers owned+halo
+ * edges so owned elements get all edge contributions; halo elements are fixed
+ * by the uv_rhs exchange in fesom_step after this returns.
+ */
+void fesom_visc_filt_bidiff(const struct fesom_mesh *mesh,
+                            struct fesom_dyn        *dyn,
+                            struct fesom_partit     *partit)
+{
+    const int Eedg = mesh->myDim_edge2D + mesh->eDim_edge2D;
+    const int nl   = mesh->nl;
+    const int E_alloc = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    const real_t dt  = (real_t)FESOM_PHASE1_DT;
+    const real_t g0  = (real_t)FESOM_PHASE1_VISC_GAMMA0;
+    const real_t g1  = (real_t)FESOM_PHASE1_VISC_GAMMA1;
+    const real_t g2  = (real_t)FESOM_PHASE1_VISC_GAMMA2;
+    const real_t g0h = (real_t)FESOM_PHASE1_VISC_GAMMA0_H;   /* 0 for CORE2 */
+    const real_t g1h = (real_t)FESOM_PHASE1_VISC_GAMMA1_H;   /* 0 for CORE2 */
+
+    real_t *Uc = dyn->u_b;     /* stage-1 Laplacian at elements (scratch) */
+    real_t *Vc = dyn->v_b;
+
+    /* Stage 1: U_c = V_c = 0 over full local extent (Fortran 621-625). */
+    memset(Uc, 0, (size_t)E_alloc * (size_t)nl * sizeof(real_t));
+    memset(Vc, 0, (size_t)E_alloc * (size_t)nl * sizeof(real_t));
+
+    /* Stage 1 edge loop (Fortran 631-665). Skip boundary edges (Fortran:
+       myList_edge2D > edge2D_in; serial/owned: el2 < 0). */
+    for (int ed = 0; ed < Eedg; ++ed) {
+        int el1 = mesh->edge_tri[2*ed + 0];
+        int el2 = mesh->edge_tri[2*ed + 1];
+        if (el1 < 0 || el2 < 0) continue;
+        real_t len = sqrt(mesh->elem_area[el1] + mesh->elem_area[el2]);
+        int nu1 = mesh->ulevels[el1] - 1, nu2 = mesh->ulevels[el2] - 1;
+        int nzmin = (nu1 > nu2) ? nu1 : nu2;            /* maxval(ulevels) */
+        int nl1 = mesh->nlevels[el1] - 1, nl2 = mesh->nlevels[el2] - 1;
+        int nzmax = (nl1 < nl2) ? nl1 : nl2;            /* minval(nlevels)-1 */
+        for (int nz = nzmin; nz < nzmax; ++nz) {
+            real_t u1 = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 0]
+                       - dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 0];
+            real_t v1 = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 1]
+                       - dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 1];
+            real_t vi = u1*u1 + v1*v1;
+            real_t inner = (g1*sqrt(vi) > g2*vi) ? g1*sqrt(vi) : g2*vi;
+            vi = sqrt((g0 > inner ? g0 : inner) * len);
+            real_t du = u1 * vi, dv = v1 * vi;
+            Uc[FESOM_ELEM3D(el1, nz, nl)] -= du;
+            Vc[FESOM_ELEM3D(el1, nz, nl)] -= dv;
+            Uc[FESOM_ELEM3D(el2, nz, nl)] += du;
+            Vc[FESOM_ELEM3D(el2, nz, nl)] += dv;
+        }
+    }
+
+    /* exchange_elem(U_c, V_c) — Fortran 670-672. */
+    if (partit && partit->npes > 1) {
+        fesom_halo_exchange(Uc, FESOM_HALO_ELEM3D, nl, 1, partit);
+        fesom_halo_exchange(Vc, FESOM_HALO_ELEM3D, nl, 1, partit);
+    }
+
+    /* Stage 2 edge loop (Fortran 677-742, non-subcycl branch). */
+    for (int ed = 0; ed < Eedg; ++ed) {
+        int el1 = mesh->edge_tri[2*ed + 0];
+        int el2 = mesh->edge_tri[2*ed + 1];
+        if (el1 < 0 || el2 < 0) continue;
+        real_t a1 = mesh->elem_area[el1], a2 = mesh->elem_area[el2];
+        real_t len = sqrt(a1 + a2);
+        int nu1 = mesh->ulevels[el1] - 1, nu2 = mesh->ulevels[el2] - 1;
+        int nzmin = (nu1 > nu2) ? nu1 : nu2;
+        int nl1 = mesh->nlevels[el1] - 1, nl2 = mesh->nlevels[el2] - 1;
+        int nzmax = (nl1 < nl2) ? nl1 : nl2;
+        for (int nz = nzmin; nz < nzmax; ++nz) {
+            real_t u1 = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 0]
+                       - dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 0];
+            real_t v1 = dyn->uv[FESOM_ELEMVEC(el1, nz, nl) + 1]
+                       - dyn->uv[FESOM_ELEMVEC(el2, nz, nl) + 1];
+            real_t vi = u1*u1 + v1*v1;
+            real_t inner = (g1*sqrt(vi) > g2*vi) ? g1*sqrt(vi) : g2*vi;
+            vi = -dt * sqrt((g0 > inner ? g0 : inner) * len);
+            real_t mag = sqrt(u1*u1 + v1*v1);
+            real_t viLapl = dt * ((g0h > g1h*mag) ? g0h : g1h*mag) * len;  /* 0 for CORE2 */
+            real_t du = vi * (Uc[FESOM_ELEM3D(el1, nz, nl)] - Uc[FESOM_ELEM3D(el2, nz, nl)]) + viLapl*u1;
+            real_t dv = vi * (Vc[FESOM_ELEM3D(el1, nz, nl)] - Vc[FESOM_ELEM3D(el2, nz, nl)]) + viLapl*v1;
+            dyn->uv_rhs[FESOM_ELEMVEC(el1, nz, nl) + 0] -= du / a1;
+            dyn->uv_rhs[FESOM_ELEMVEC(el1, nz, nl) + 1] -= dv / a1;
+            dyn->uv_rhs[FESOM_ELEMVEC(el2, nz, nl) + 0] += du / a2;
+            dyn->uv_rhs[FESOM_ELEMVEC(el2, nz, nl) + 1] += dv / a2;
+        }
+    }
+}
+
+/*===========================================================================
  * compute_hbar_ale (oce_ale.F90:1974-2116)
  *
  *   ssh_rhs_old = 0

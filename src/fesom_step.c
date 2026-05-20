@@ -101,8 +101,10 @@ int fesom_timestep(int                          step_n,
     fesom_halo_exchange(dyn->uv_rhs,   FESOM_HALO_ELEM3D, nl, 2, p);
     fesom_halo_exchange(dyn->uv_rhsAB, FESOM_HALO_ELEM3D, nl, 2, p);
 
-    /*  5. horizontal viscosity (opt_visc=5 with backscatter)  */
-    fesom_visc_filt_bcksct(mesh, dyn, p);
+    /*  5. horizontal viscosity. CORE2 runs opt_visc=7 (biharmonic, flow-aware);
+     *     the biharmonic ∇⁴ damps grid-scale 2Δx modes that opt_visc=5 lets grow
+     *     — required for dt=1800 stability (work_core/namelist.dyn opt_visc=7).  */
+    fesom_visc_filt_bidiff(mesh, dyn, p);
     /* uv_rhs is the final output; needed at halo for impl_vert_visc neighbour
      * reads through the TDMA SpMV. */
     fesom_halo_exchange(dyn->uv_rhs, FESOM_HALO_ELEM3D, nl, 2, p);
