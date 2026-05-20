@@ -49,7 +49,8 @@
 void fesom_compute_vel_rhs(const struct fesom_mesh *mesh,
                            const struct fesom_aux  *aux,
                            struct fesom_dyn        *dyn,
-                           int                      is_first_step)
+                           int                      is_first_step,
+                           struct fesom_partit     *partit)
 {
     const int E       = mesh->myDim_elem2D;     /* interior only — halo gets exchange */
     const int nl      = mesh->nl;
@@ -107,6 +108,12 @@ void fesom_compute_vel_rhs(const struct fesom_mesh *mesh,
         }
     }
 
+    /* Momentum advection (momadv_opt=2): add ke_adv into the current AB slot
+       (uv_rhsAB), exactly as Fortran does between the Coriolis loop and the AB2
+       assembly (oce_ale_vel_rhs.F90:271-273). uv (incl. halo) and w_e are from
+       the previous step, matching Fortran's lagged use. */
+    fesom_momentum_adv_scalar(mesh, dyn, partit);
+
     /* Final assembly with ff_step. Fortran tracks lfirst as a `save` flag —
        caller passes is_first_step here. */
     real_t ff_step = is_first_step ? 1.0 : ab2;
@@ -120,6 +127,141 @@ void fesom_compute_vel_rhs(const struct fesom_mesh *mesh,
                                      + dyn->uv_rhsAB[k + 0] * ff_step) * inv_area;
             dyn->uv_rhs[k + 1] = dt * (dyn->uv_rhs[k + 1]
                                      + dyn->uv_rhsAB[k + 1] * ff_step) * inv_area;
+        }
+    }
+}
+
+/*===========================================================================
+ * momentum_adv_scalar (oce_ale_vel_rhs.F90:335-589) — momadv_opt=2.
+ *
+ * Literal port. Computes the momentum advection on scalar (vertex) control
+ * volumes and ADDS it into uv_rhsAB (the current AB slot, which already holds
+ * the Coriolis term), exactly as Fortran does between the Coriolis loop and
+ * the AB2 assembly in compute_vel_rhs.
+ *
+ *   1. vertical advection  w·du/dz, w·dv/dz  → uvnode_rhs (per vertex)
+ *   2. horizontal advection (u·du/dx + v·du/dy) via the edge loop → uvnode_rhs
+ *   3. divide by scalar control-volume area (areasvol)
+ *   4. exchange uvnode_rhs
+ *   5. vertex → element: uv_rhsAB += elem_area·mean(3 vertices)
+ *
+ * Levels (0-based C): for node/elem x, top layer = ulevels[x]-1, bottom layer =
+ * nlevels[x]-2; interfaces share the same index (interface nz = top of layer nz).
+ * w_e is the vertical velocity at interfaces (lagged one step, as in Fortran).
+ *===========================================================================*/
+void fesom_momentum_adv_scalar(const struct fesom_mesh *mesh,
+                               struct fesom_dyn        *dyn,
+                               struct fesom_partit     *partit)
+{
+    const int nl = mesh->nl;
+    const real_t *uv  = dyn->uv;
+    real_t       *un  = dyn->uvnode_rhs;        /* [2*FESOM_NODE3D(n,nz,nl)+c] */
+    const real_t *we  = dyn->w_e;
+    enum { NL_MAX = 64 };
+
+    /* 1. vertical advection: w·du/dz at vertices (Fortran 369-420) */
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        int ul = mesh->ulevels_nod2D[n] - 1;     /* 0-based top layer */
+        int bl = mesh->nlevels_nod2D[n] - 2;     /* 0-based bottom layer */
+        real_t wu[NL_MAX], wv[NL_MAX];
+        for (int j = 0; j <= bl + 1; ++j) { wu[j] = 0.0; wv[j] = 0.0; }  /* interfaces */
+        int b = mesh->nod_in_elem2D_offsets[n], e = mesh->nod_in_elem2D_offsets[n + 1];
+        for (int k = b; k < e; ++k) {
+            int el  = mesh->nod_in_elem2D[k];
+            int ule = mesh->ulevels[el] - 1;     /* 0-based top layer of el */
+            int ble = mesh->nlevels[el] - 2;     /* 0-based bottom layer of el */
+            real_t a = mesh->elem_area[el];
+            if (ule == 0) {                      /* non-cavity surface interface */
+                wu[0] += uv[FESOM_ELEMVEC(el, 0, nl) + 0] * a;
+                wv[0] += uv[FESOM_ELEMVEC(el, 0, nl) + 1] * a;
+            }
+            for (int j = ule + 1; j <= ble; ++j) {   /* interior interfaces */
+                wu[j] += 0.5 * (uv[FESOM_ELEMVEC(el, j, nl) + 0] + uv[FESOM_ELEMVEC(el, j - 1, nl) + 0]) * a;
+                wv[j] += 0.5 * (uv[FESOM_ELEMVEC(el, j, nl) + 1] + uv[FESOM_ELEMVEC(el, j - 1, nl) + 1]) * a;
+            }
+        }
+        for (int j = ul; j <= bl; ++j) {         /* × vertical velocity at interfaces */
+            real_t w = we[FESOM_NODE3D(n, j, nl)];
+            wu[j] *= w; wv[j] *= w;
+        }
+        for (int nz = 0; nz < nl - 1; ++nz) {    /* init full column to 0 */
+            un[FESOM_ELEMVEC(n, nz, nl) + 0] = 0.0;
+            un[FESOM_ELEMVEC(n, nz, nl) + 1] = 0.0;
+        }
+        for (int nz = ul; nz <= bl; ++nz) {      /* w·du/dz; 1/3 from vertex area share */
+            real_t h3 = 3.0 * mesh->hnode[FESOM_NODE3D(n, nz, nl)];
+            un[FESOM_ELEMVEC(n, nz, nl) + 0] = -(wu[nz] - wu[nz + 1]) / h3;
+            un[FESOM_ELEMVEC(n, nz, nl) + 1] = -(wv[nz] - wv[nz + 1]) / h3;
+        }
+    }
+
+    /* 2. horizontal advection via edge loop (Fortran 427-544) */
+    for (int ed = 0; ed < mesh->myDim_edge2D; ++ed) {
+        int n1 = mesh->edges[2*ed + 0], n2 = mesh->edges[2*ed + 1];
+        int el1 = mesh->edge_tri[2*ed + 0], el2 = mesh->edge_tri[2*ed + 1];
+        if (el1 < 0) continue;
+        int ul1 = mesh->ulevels[el1] - 1, bl1 = mesh->nlevels[el1] - 2;
+        real_t dx1 = mesh->edge_cross_dxdy[4*ed + 0], dy1 = mesh->edge_cross_dxdy[4*ed + 1];
+        real_t un1[NL_MAX], un2[NL_MAX];
+        int my = mesh->myDim_nod2D;
+        if (el2 >= 0) {
+            int ul2 = mesh->ulevels[el2] - 1, bl2 = mesh->nlevels[el2] - 2;
+            real_t dx2 = mesh->edge_cross_dxdy[4*ed + 2], dy2 = mesh->edge_cross_dxdy[4*ed + 3];
+            int lo = ul1 < ul2 ? ul1 : ul2, hi = bl1 > bl2 ? bl1 : bl2;
+            for (int nz = lo; nz <= hi; ++nz) { un1[nz] = 0.0; un2[nz] = 0.0; }
+            for (int nz = ul1; nz <= bl1; ++nz)
+                un1[nz] =  uv[FESOM_ELEMVEC(el1,nz,nl)+1]*dx1 - uv[FESOM_ELEMVEC(el1,nz,nl)+0]*dy1;
+            for (int nz = ul2; nz <= bl2; ++nz)
+                un2[nz] = -uv[FESOM_ELEMVEC(el2,nz,nl)+1]*dx2 + uv[FESOM_ELEMVEC(el2,nz,nl)+0]*dy2;
+            if (n1 < my)
+                for (int nz = lo; nz <= hi; ++nz) {
+                    un[FESOM_ELEMVEC(n1,nz,nl)+0] += un1[nz]*uv[FESOM_ELEMVEC(el1,nz,nl)+0] + un2[nz]*uv[FESOM_ELEMVEC(el2,nz,nl)+0];
+                    un[FESOM_ELEMVEC(n1,nz,nl)+1] += un1[nz]*uv[FESOM_ELEMVEC(el1,nz,nl)+1] + un2[nz]*uv[FESOM_ELEMVEC(el2,nz,nl)+1];
+                }
+            if (n2 < my)
+                for (int nz = lo; nz <= hi; ++nz) {
+                    un[FESOM_ELEMVEC(n2,nz,nl)+0] -= un1[nz]*uv[FESOM_ELEMVEC(el1,nz,nl)+0] + un2[nz]*uv[FESOM_ELEMVEC(el2,nz,nl)+0];
+                    un[FESOM_ELEMVEC(n2,nz,nl)+1] -= un1[nz]*uv[FESOM_ELEMVEC(el1,nz,nl)+1] + un2[nz]*uv[FESOM_ELEMVEC(el2,nz,nl)+1];
+                }
+        } else {     /* boundary edge — only el1 contributes */
+            for (int nz = ul1; nz <= bl1; ++nz)
+                un1[nz] = uv[FESOM_ELEMVEC(el1,nz,nl)+1]*dx1 - uv[FESOM_ELEMVEC(el1,nz,nl)+0]*dy1;
+            if (n1 < my)
+                for (int nz = ul1; nz <= bl1; ++nz) {
+                    un[FESOM_ELEMVEC(n1,nz,nl)+0] += un1[nz]*uv[FESOM_ELEMVEC(el1,nz,nl)+0];
+                    un[FESOM_ELEMVEC(n1,nz,nl)+1] += un1[nz]*uv[FESOM_ELEMVEC(el1,nz,nl)+1];
+                }
+            if (n2 < my)
+                for (int nz = ul1; nz <= bl1; ++nz) {
+                    un[FESOM_ELEMVEC(n2,nz,nl)+0] -= un1[nz]*uv[FESOM_ELEMVEC(el1,nz,nl)+0];
+                    un[FESOM_ELEMVEC(n2,nz,nl)+1] -= un1[nz]*uv[FESOM_ELEMVEC(el1,nz,nl)+1];
+                }
+        }
+    }
+
+    /* 3. divide by scalar control-volume area (Fortran 550-555) */
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        int ul = mesh->ulevels_nod2D[n] - 1, bl = mesh->nlevels_nod2D[n] - 2;
+        for (int nz = ul; nz <= bl; ++nz) {
+            real_t inv = 1.0 / mesh->areasvol[FESOM_NODE3D(n, nz, nl)];
+            un[FESOM_ELEMVEC(n,nz,nl)+0] *= inv;
+            un[FESOM_ELEMVEC(n,nz,nl)+1] *= inv;
+        }
+    }
+
+    /* 4. exchange uvnode_rhs (Fortran 559) */
+    fesom_halo_exchange(un, FESOM_HALO_NOD3D, nl, 2, partit);
+
+    /* 5. vertex → element: uv_rhsAB += elem_area·mean(3 vertices) (Fortran 565-573) */
+    for (int el = 0; el < mesh->myDim_elem2D; ++el) {
+        int ul = mesh->ulevels[el] - 1, bl = mesh->nlevels[el] - 2;
+        int v0 = mesh->elem_nodes[3*el+0], v1 = mesh->elem_nodes[3*el+1], v2 = mesh->elem_nodes[3*el+2];
+        real_t a = mesh->elem_area[el];
+        for (int nz = ul; nz <= bl; ++nz) {
+            dyn->uv_rhsAB[FESOM_ELEMVEC(el,nz,nl)+0] += a * (un[FESOM_ELEMVEC(v0,nz,nl)+0]
+                + un[FESOM_ELEMVEC(v1,nz,nl)+0] + un[FESOM_ELEMVEC(v2,nz,nl)+0]) / 3.0;
+            dyn->uv_rhsAB[FESOM_ELEMVEC(el,nz,nl)+1] += a * (un[FESOM_ELEMVEC(v0,nz,nl)+1]
+                + un[FESOM_ELEMVEC(v1,nz,nl)+1] + un[FESOM_ELEMVEC(v2,nz,nl)+1]) / 3.0;
         }
     }
 }

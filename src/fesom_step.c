@@ -96,7 +96,7 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_elem3D(aux->Av, nl, p);
 
     /*  4. momentum RHS (Coriolis AB2 + SSH gradient + PGF)  */
-    fesom_compute_vel_rhs(mesh, aux, dyn, /*is_first_step=*/(step_n == 1));
+    fesom_compute_vel_rhs(mesh, aux, dyn, /*is_first_step=*/(step_n == 1), p);
     /* uv_rhs needed by visc_filt_bcksct on halo elements */
     fesom_halo_exchange(dyn->uv_rhs,   FESOM_HALO_ELEM3D, nl, 2, p);
     fesom_halo_exchange(dyn->uv_rhsAB, FESOM_HALO_ELEM3D, nl, 2, p);

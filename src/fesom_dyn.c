@@ -26,6 +26,7 @@ void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
     d->w_i         = calloc(n_nl,   sizeof(real_t));
     d->cfl_z       = calloc(n_nl,   sizeof(real_t));
     d->uvnode      = calloc(n_nl * 2, sizeof(real_t));
+    d->uvnode_rhs  = calloc(n_nl * 2, sizeof(real_t));
     size_t e_nl = (size_t)E * (size_t)mesh->nl;
     d->u_b = calloc(e_nl, sizeof(real_t));
     d->v_b = calloc(e_nl, sizeof(real_t));
@@ -39,7 +40,7 @@ void fesom_dyn_alloc(fesom_dyn *d, const struct fesom_mesh *mesh)
     d->fer_uv      = calloc(e_nl_2, sizeof(real_t));
     d->fer_w       = calloc(n_nl,   sizeof(real_t));
     FESOM_CHECK(d->uv && d->uv_rhs && d->uv_rhsAB && d->w && d->w_e && d->w_i
-             && d->cfl_z && d->uvnode
+             && d->cfl_z && d->uvnode && d->uvnode_rhs
              && d->u_b && d->v_b && d->u_c && d->v_c
              && d->eta_n && d->d_eta && d->ssh_rhs && d->ssh_rhs_old
              && d->fer_uv && d->fer_w,
@@ -56,6 +57,7 @@ void fesom_dyn_free(fesom_dyn *d)
     free(d->w_i);
     free(d->cfl_z);
     free(d->uvnode);
+    free(d->uvnode_rhs);
     free(d->u_b);
     free(d->v_b);
     free(d->u_c);

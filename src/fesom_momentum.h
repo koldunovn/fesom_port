@@ -7,6 +7,7 @@ struct fesom_mesh;
 struct fesom_aux;
 struct fesom_dyn;
 struct fesom_forcing;
+struct fesom_partit;
 
 /*
  * Phase 1 momentum substeps. Literal ports of:
@@ -15,8 +16,9 @@ struct fesom_forcing;
  *   update_vel                (oce_dyn.F90:73-173)
  *   compute_hbar_ale          (oce_ale.F90:1974-2116)
  *
+ *   momentum_adv_scalar       (oce_ale_vel_rhs.F90:335-589, momadv_opt=2)
+ *
  * Deferred from these subroutines (will be added in later steps/phases):
- *   - momentum_adv_scalar (momadv_opt=2): no advection in Phase 1 first slice
  *   - sea-ice (m_ice, m_snow): linfs has use_pice=0 anyway
  *   - sea-level pressure / atmospheric pressure / tides
  *   - kinetic-energy diagnostics (ldiag_ke=false)
@@ -36,7 +38,16 @@ struct fesom_forcing;
 void fesom_compute_vel_rhs(const struct fesom_mesh *mesh,
                            const struct fesom_aux  *aux,
                            struct fesom_dyn        *dyn,
-                           int                      is_first_step);
+                           int                      is_first_step,
+                           struct fesom_partit     *partit);
+
+/*
+ * momentum_adv_scalar (momadv_opt=2) — momentum advection on scalar control
+ * volumes; adds ke_adv into uv_rhsAB. Called from compute_vel_rhs.
+ */
+void fesom_momentum_adv_scalar(const struct fesom_mesh *mesh,
+                               struct fesom_dyn        *dyn,
+                               struct fesom_partit     *partit);
 
 /*
  * impl_vert_visc_ale — implicit vertical viscosity TDMA + wind stress + bottom

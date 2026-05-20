@@ -39,6 +39,9 @@ typedef struct fesom_dyn {
                            element-center UV via area-weighted mean. Required
                            by PP mixing (Fortran tracers%data%uvnode is held
                            in dynamics%uvnode). */
+    real_t *uvnode_rhs; /* [nod2D * nl * 2] momentum-advection RHS at NODES.
+                           Mirror of dynamics%work%uvnode_rhs; written by
+                           fesom_momentum_adv_scalar (momadv_opt=2). */
 
     /* GM bolus velocity. Allocated by fesom_dyn_alloc; written by
      * fesom_fer_gamma2vel (G4) for fer_uv and inside vert_vel_linfs (G6a)

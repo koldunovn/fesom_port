@@ -586,7 +586,7 @@ int main(int argc, char **argv)
      * inconsistent and the next sanity test sees garbage. */
     if (!do_sanity) goto skip_rest_state;
 
-    fesom_compute_vel_rhs(&mesh, &aux, &dyn, /* is_first_step = */ 1);
+    fesom_compute_vel_rhs(&mesh, &aux, &dyn, /* is_first_step = */ 1, &mpi);
     fesom_impl_vert_visc(&mesh, &aux, &forcing, &dyn);
     {
         real_t uvr_max = 0.0;
