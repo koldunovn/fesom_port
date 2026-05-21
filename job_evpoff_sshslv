@@ -1,0 +1,27 @@
+#!/bin/bash
+#SBATCH --job-name=evpoff_slv
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/evpoff_sshslv/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/evpoff_sshslv/slurm.%j.err
+# Does the OCEAN velocity 2dx (ssh_rhs) run away in EVP-off too (common root),
+# or does m_ice/thermo blow on a clean ocean (separate bug)?
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+REPO=/home/a/a270088/port2/fesom2_port
+OUT_DIR=/work/ab0995/a270088/port/evpoff_sshslv
+mkdir -p "$OUT_DIR"
+export FESOM_NO_ICE_DYN=1
+export FESOM_DIAG_SSHSLV=43378
+export FESOM_DIAG_MICE=1
+BIN="$REPO/build/fesom_port"; MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+date; srun -l "$BIN" "$MESH" "$OUT_DIR" 1800 4620 -1 "$PHC" 1958 > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+echo "Exit code: $?"; date
+echo "=== [sshslv] at 43378: does ocean ssh_rhs run away before m_ice blows? (every 1000 + 4600-4612) ==="
+grep "\[sshslv" "$OUT_DIR/run.err" | awk '{for(i=1;i<=NF;i++)if($i=="step"){s=$(i+1)}} s==1000||s==2000||s==3000||s==4000||(s>=4600&&s<=4612)'
+echo "=== mice-mon last 6 ==="; grep "\[mice-mon\]" "$OUT_DIR/run.err" | tail -6

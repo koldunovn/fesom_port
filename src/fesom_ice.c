@@ -10,6 +10,7 @@
 #include "fesom_tracers.h"
 
 #include <mpi.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -360,6 +361,95 @@ void fesom_ice_step(int                            step,
         real_t denom = a_ice[i] > 1e-3 ? a_ice[i] : 1e-3;
         ice->h_ice [i] = m_ice [i] / denom;
         ice->h_snow[i] = m_snow[i] / denom;
+    }
+
+    /* DEBUG (FESOM_DIAG_MICE): per-step global max m_ice + max ice speed with
+       their global node ids. m_ice should stay < ~10 m physically; MAXLOC
+       pinpoints the FIRST runaway node/step (trigger), and whether the ice
+       SPEED blows up first (EVP-driven) or the MASS (advection/thermo). */
+    if (getenv("FESOM_DIAG_MICE")) {
+        struct { double v; int g; } lm = {0.0, -1}, lu = {0.0, -1};
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+            if ((double)m_ice[n] > lm.v) { lm.v = m_ice[n]; lm.g = partit->myList_nod2D[n]; }
+            double sp2 = (double)ice->uice[n]*ice->uice[n] + (double)ice->vice[n]*ice->vice[n];
+            if (sp2 > lu.v) { lu.v = sp2; lu.g = partit->myList_nod2D[n]; }
+        }
+        struct { double v; int g; } gm, gu;
+        MPI_Allreduce(&lm, &gm, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+        MPI_Allreduce(&lu, &gu, 1, MPI_DOUBLE_INT, MPI_MAXLOC, MPI_COMM_WORLD);
+        if (partit->mype == 0)
+            fprintf(stderr, "[mice-mon] step %d max_mice=%.4e gid=%d  max_uice=%.4e gid=%d\n",
+                    step, gm.v, gm.g, sqrt(gu.v), gu.g);
+    }
+
+    /* DEBUG (FESOM_DIAG_GID=<global node id>): per-step EVP forcing breakdown
+       at one node + (step 1) geometry of its surrounding elements — to see
+       WHICH forcing/geometry term drives the single-node velocity runaway. */
+    if (getenv("FESOM_DIAG_GID")) {
+        int tgid = atoi(getenv("FESOM_DIAG_GID"));
+        for (int nn = 0; nn < mesh->myDim_nod2D; ++nn) {
+            if (partit->myList_nod2D[nn] != tgid) continue;
+            int beg = mesh->nod_in_elem2D_offsets[nn];
+            int end = mesh->nod_in_elem2D_offsets[nn + 1];
+            real_t istr = 0.0, amin = 1e30;
+            for (int k = beg; k < end; ++k) {
+                int el = mesh->nod_in_elem2D[k];
+                if (ice->work.ice_strength[el] > istr) istr = ice->work.ice_strength[el];
+                if (mesh->elem_area[el] < amin) amin = mesh->elem_area[el];
+            }
+            real_t sp = sqrt(ice->uice[nn]*ice->uice[nn] + ice->vice[nn]*ice->vice[nn]);
+            fprintf(stderr,
+              "[gid %d step %d r%d] |uice|=%.4e urhs=(%.3e,%.3e) iam=%.4e im=%.4e "
+              "rhs_a=%.3e rhs_m=%.3e satmice=(%.3e,%.3e) uw=(%.3e,%.3e) istr=%.4e "
+              "amin=%.4e mice=%.4e aice=%.4f\n",
+              tgid, step, partit->mype, (double)sp,
+              (double)ice->uice_rhs[nn], (double)ice->vice_rhs[nn],
+              (double)ice->work.inv_areamass[nn], (double)ice->work.inv_mass[nn],
+              (double)ice->data[FESOM_ICE_AICE].values_rhs[nn],
+              (double)ice->data[FESOM_ICE_MICE].values_rhs[nn],
+              (double)ice->stress_atmice_x[nn], (double)ice->stress_atmice_y[nn],
+              (double)ice->srfoce_u[nn], (double)ice->srfoce_v[nn],
+              (double)istr, (double)amin, (double)m_ice[nn], (double)a_ice[nn]);
+            /* SSH structure at this node: the elevation (srfoce_ssh) value, the
+               1-ring neighbour spread (a growing min/max gap = grid-scale 2dx
+               oscillation), and the max per-element elevation gradient — the
+               REAL driver of the EVP sea-surface-tilt rhs_a (recomputed here,
+               since data[AICE].values_rhs is clobbered by the FCT advection). */
+            {
+                real_t *ssh = ice->srfoce_ssh;
+                real_t smin = ssh[nn], smax = ssh[nn], gmax = 0.0;
+                for (int k = beg; k < end; ++k) {
+                    int el = mesh->nod_in_elem2D[k];
+                    real_t *gs = &mesh->gradient_sca[6*el];
+                    int v0 = mesh->elem_nodes[3*el+0];
+                    int v1 = mesh->elem_nodes[3*el+1];
+                    int v2 = mesh->elem_nodes[3*el+2];
+                    real_t edx = gs[0]*ssh[v0]+gs[1]*ssh[v1]+gs[2]*ssh[v2];
+                    real_t edy = gs[3]*ssh[v0]+gs[4]*ssh[v1]+gs[5]*ssh[v2];
+                    real_t g = sqrt(edx*edx + edy*edy);
+                    if (g > gmax) gmax = g;
+                    real_t sv[3] = { ssh[v0], ssh[v1], ssh[v2] };
+                    for (int j = 0; j < 3; ++j) {
+                        if (sv[j] < smin) smin = sv[j];
+                        if (sv[j] > smax) smax = sv[j];
+                    }
+                }
+                fprintf(stderr, "[gid %d SSH step %d r%d] ssh=%.6e ring[min=%.6e max=%.6e spread=%.4e] max_grad=%.6e\n",
+                    tgid, step, partit->mype, (double)ssh[nn],
+                    (double)smin, (double)smax, (double)(smax-smin), (double)gmax);
+            }
+            if (step == 1) {
+                for (int k = beg; k < end; ++k) {
+                    int el = mesh->nod_in_elem2D[k];
+                    real_t *gs = &mesh->gradient_sca[6*el];
+                    real_t gn = 0.0; for (int j = 0; j < 6; ++j) gn += gs[j]*gs[j];
+                    fprintf(stderr, "[gid %d GEOM r%d] el_g=%d area=%.4e metric=%.4e gradnorm=%.4e\n",
+                      tgid, partit->mype, partit->myList_elem2D[el]-1,
+                      (double)mesh->elem_area[el], (double)mesh->metric_factor[el], (double)sqrt(gn));
+                }
+            }
+            break;
+        }
     }
 }
 

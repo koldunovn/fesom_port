@@ -655,14 +655,39 @@ void fesom_visc_filt_bidiff(const struct fesom_mesh *mesh,
     const int nl   = mesh->nl;
     const int E_alloc = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
     const real_t dt  = (real_t)FESOM_PHASE1_DT;
-    const real_t g0  = (real_t)FESOM_PHASE1_VISC_GAMMA0;
-    const real_t g1  = (real_t)FESOM_PHASE1_VISC_GAMMA1;
-    const real_t g2  = (real_t)FESOM_PHASE1_VISC_GAMMA2;
+    /* DIAG ONLY (FESOM_VISC_MULT, default 1.0): scale the flow-aware viscosity
+       coefficients to probe whether the residual 2dx is viscosity-dampable.
+       Net biharmonic effect scales ~vmult (vi scales by sqrt in each stage). */
+    real_t vmult = 1.0;
+    { const char *e = getenv("FESOM_VISC_MULT"); if (e) vmult = (real_t)atof(e); }
+    const real_t g0  = (real_t)FESOM_PHASE1_VISC_GAMMA0 * vmult;
+    const real_t g1  = (real_t)FESOM_PHASE1_VISC_GAMMA1 * vmult;
+    const real_t g2  = (real_t)FESOM_PHASE1_VISC_GAMMA2 * vmult;
     const real_t g0h = (real_t)FESOM_PHASE1_VISC_GAMMA0_H;   /* 0 for CORE2 */
     const real_t g1h = (real_t)FESOM_PHASE1_VISC_GAMMA1_H;   /* 0 for CORE2 */
 
     real_t *Uc = dyn->u_b;     /* stage-1 Laplacian at elements (scratch) */
     real_t *Vc = dyn->v_b;
+
+    /* DIAG (FESOM_DIAG_VISCEDGE): one-time count of edges this loop SKIPS via
+       el<0 that are actually INTERIOR (myList_edge2D <= edge2D_in). Fortran
+       skips only TRUE boundary edges; any interior skip here is a viscous-
+       coupling gap at a rank boundary (2nd triangle beyond the local halo). */
+    if (getenv("FESOM_DIAG_VISCEDGE")) {
+        static int viscedge_done = 0;
+        if (!viscedge_done) {
+            viscedge_done = 1;
+            int n_int = 0, n_bnd = 0;
+            for (int ed = 0; ed < Eedg; ++ed) {
+                if (mesh->edge_tri[2*ed+0] >= 0 && mesh->edge_tri[2*ed+1] >= 0) continue;
+                if (partit->myList_edge2D[ed] <= mesh->edge2D_in) n_int++; else n_bnd++;
+            }
+            if (n_int > 0)
+                fprintf(stderr, "[viscedge r%d] INTERIOR edges skipped by el<0: %d "
+                        "(true-boundary skipped: %d, local edges: %d)\n",
+                        partit->mype, n_int, n_bnd, Eedg);
+        }
+    }
 
     /* Stage 1: U_c = V_c = 0 over full local extent (Fortran 621-625). */
     memset(Uc, 0, (size_t)E_alloc * (size_t)nl * sizeof(real_t));

@@ -44,9 +44,15 @@
 #define FESOM_PHASE1_A_VER     1.0e-4   /* background momentum vertical visc [m²/s] */
 #define FESOM_PHASE1_C_D       0.0025   /* bottom-drag coefficient                  */
 
-/* wsplit — use_wsplit=true in pi/CORE2 namelists (MOD_DYN.F90:135 default is
-   false, but work_pi/namelist.dyn turns it on). wsplit_maxcfl=1.0. */
-#define FESOM_PHASE1_USE_WSPLIT       1
+/* wsplit — vertical-velocity implicit/explicit CFL splitter. The CORE2 dt=1800
+   reference runs (work_core, work_linfs_d1800) set use_wsplit=.false.; only the
+   pre-industrial work_pi setup turns it on. The C must match the CORE2 target:
+   with it OFF, compute_Wvel_split always sets w_e=w, w_i=0 (MOD_DYN.F90:135
+   default). This is invisible at dt=500 (vertical CFL < maxcfl, so the splitter
+   never fires regardless) but at dt=1800 the splitter fires in the deep-
+   convecting central Arctic — turning it on diverged the C from the stable
+   Fortran path and seeded the day-92 barotropic blow-up. wsplit_maxcfl=1.0. */
+#define FESOM_PHASE1_USE_WSPLIT       0
 #define FESOM_PHASE1_WSPLIT_MAXCFL    1.0
 
 /* Horizontal viscosity coefficients (shared by all opt_visc schemes).

@@ -1,0 +1,20 @@
+#!/bin/bash
+#SBATCH --job-name=dbg_ssh47138
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/dbg_ssh47138/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/dbg_ssh47138/slurm.%j.err
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+export FESOM_DIAG_MICE=1
+export FESOM_DIAG_GID=47138
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+date
+srun -l "$BIN" "$MESH" "/work/ab0995/a270088/port/dbg_ssh47138" 1800 4400 -1 "$PHC" 1958 > "/work/ab0995/a270088/port/dbg_ssh47138/run.log" 2> "/work/ab0995/a270088/port/dbg_ssh47138/run.err"
+echo "exit $?"; date

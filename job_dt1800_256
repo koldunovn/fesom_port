@@ -1,0 +1,42 @@
+#!/bin/bash
+#SBATCH --job-name=dt1800_256
+#SBATCH -p compute
+#SBATCH --nodes=2
+#SBATCH --ntasks=256
+#SBATCH --time=01:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/dt1800_256/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/dt1800_256/slurm.%j.err
+
+# RANK-DEPENDENCE TEST: identical full-ice dt=1800 C run at 256 ranks (Fortran's
+# count) instead of 864. C@864 blows at step 4556 (ocean SSH 2dx at gid 87875).
+# Fortran@256 is stable to 5000. If C@256 is ALSO stable -> the bug is
+# rank-dependent (halo coverage at high rank counts); if it blows ~4556 too ->
+# the damping deficiency is intrinsic and rank-independent.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+OUT_DIR=/work/ab0995/a270088/port/dt1800_256
+mkdir -p "$OUT_DIR"
+export FESOM_DIAG_MICE=1
+export FESOM_DIAG_GID=87875
+
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT_DIR/SHA.txt"
+
+BIN="$REPO/build/fesom_port"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" 1800 4700 -1 "$PHC" 1958 \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+echo "Exit code: $?"
+date
+echo "=== m_ice max trajectory (every 500 + last 8) ==="
+grep "\[mice-mon\]" "$OUT_DIR/run.err" | awk 'NR==1||NR%500==0'
+grep "\[mice-mon\]" "$OUT_DIR/run.err" | tail -8
+echo "=== [gid 87875] SSH spread, steps 4540-4560 (does the 2dx grow at 256r too?) ==="
+grep "\[gid 87875 SSH step" "$OUT_DIR/run.err" | sed -n 's/.*step \([0-9]*\) .*/\1 &/p' | awk '$1>=4540 && $1<=4560 {sub(/^[0-9]+ /,""); print}'

@@ -133,6 +133,22 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod2D(dyn->ssh_rhs_old, p);   /* Fortran oce_ale.F90:2078 */
     fesom_exchange_nod2D(mesh->hbar,       p);   /* Fortran oce_ale.F90:2102 */
 
+    /* DEBUG (FESOM_DIAG_SSHSLV=<gid>): dump ssh_rhs / d_eta / hbar at one node,
+       matching the Fortran [FSSH] format, to compare the implicit free-surface
+       DAMPING STRENGTH (|d_eta|/|ssh_rhs|) C-vs-Fortran. A systematically
+       larger C d_eta = the stiffness operator under-damps the 2dx mode. */
+    if (getenv("FESOM_DIAG_SSHSLV")) {
+        int tgid = atoi(getenv("FESOM_DIAG_SSHSLV"));
+        for (int row = 0; row < mesh->myDim_nod2D; ++row) {
+            if (p->myList_nod2D[row] != tgid) continue;
+            fprintf(stderr, "[sshslv r%d] gid %d step %d ssh_rhs=%.7e d_eta=%.7e hbar=%.7e\n",
+                    p->mype, tgid, step_n, (double)dyn->ssh_rhs[row],
+                    (double)dyn->d_eta[row], (double)mesh->hbar[row]);
+            break;
+        }
+        fflush(stderr);
+    }
+
     /* 11. eta_n inline (oce_ale.F90:3771-3775).
           eta_n = α·hbar + (1-α)·hbar_old, but ONLY where ulevels_nod2D == 1.  */
     {

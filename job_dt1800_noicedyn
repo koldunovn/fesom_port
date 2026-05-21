@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name=dt1800_noicedyn
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/dt1800_noicedyn/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/dt1800_noicedyn/slurm.%j.err
+
+# ISOLATION: dt=1800 with the EVP (ice velocity solve) DISABLED
+# (FESOM_NO_ICE_DYN=1). Ice thermo + advection + ocean run normally; only the
+# EVP momentum solve is skipped (uice/vice stay 0). The full-ice run blew at
+# step 4556 via a uice eruption (gid 87875). If THIS reaches 5000 cleanly, the
+# bug is confirmed to be in the EVP; if it still blows, the cause is the ocean.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+OUT_DIR=/work/ab0995/a270088/port/dt1800_noicedyn
+mkdir -p "$OUT_DIR"
+export FESOM_NO_ICE_DYN=1
+export FESOM_DIAG_MICE=1
+
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT_DIR/SHA.txt"
+
+BIN="$REPO/build/fesom_port"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" 1800 5000 -1 "$PHC" 1958 \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+echo "Exit code: $?"
+date
+echo "=== reached step? (run.log tail) ==="; tail -2 "$OUT_DIR/run.log"
+echo "=== m_ice max trajectory (every 500 + last 8) ==="
+grep "\[mice-mon\]" "$OUT_DIR/run.err" | awk 'NR==1||NR%500==0'
+grep "\[mice-mon\]" "$OUT_DIR/run.err" | tail -8

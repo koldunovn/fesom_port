@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=dbg_dt500_mice
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:40:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/dbg_dt500_mice/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/dbg_dt500_mice/slurm.%j.err
+
+# DEBUG / ISOLATION: dt=500 with the SAME post-fix binary, run to ~day 92.6
+# (16000 steps) — past the model-time where dt=1800 blew up. If m_ice stays
+# physical here, the Ch/Ce fix is innocent and the runaway is purely a
+# dt-stability issue; if it also blows, the fix changed ice forcing.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+OUT_DIR=/work/ab0995/a270088/port/dbg_dt500_mice
+mkdir -p "$OUT_DIR"
+export FESOM_DIAG_MICE=1
+
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT_DIR/SHA.txt"
+
+BIN="$REPO/build/fesom_port"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" 500 16000 -1 "$PHC" 1958 \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+echo "Exit code: $?"
+date
+echo "=== m_ice trajectory (every 1000 steps + last 10) ==="
+grep "\[mice-mon\]" "$OUT_DIR/run.err" | awk 'NR==1||NR%1000==0'
+grep "\[mice-mon\]" "$OUT_DIR/run.err" | tail -10

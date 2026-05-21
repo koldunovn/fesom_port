@@ -1,0 +1,26 @@
+#!/bin/bash
+#SBATCH --job-name=dt1800_v3
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/dt1800_visc3/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/dt1800_visc3/slurm.%j.err
+# PROBE: full-ice dt=1800 with 3x biharmonic viscosity (FESOM_VISC_MULT=3).
+# Suppresses/delays the 87875 eruption => viscosity-dampable velocity 2dx.
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+REPO=/home/a/a270088/port2/fesom2_port
+OUT_DIR=/work/ab0995/a270088/port/dt1800_visc3
+mkdir -p "$OUT_DIR"
+export FESOM_VISC_MULT=3
+export FESOM_DIAG_MICE=1
+export FESOM_DIAG_GID=87875
+BIN="$REPO/build/fesom_port"; MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+date; srun -l "$BIN" "$MESH" "$OUT_DIR" 1800 4700 -1 "$PHC" 1958 > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+echo "Exit code: $?"; date
+echo "=== mice-mon last 6 ==="; grep "\[mice-mon\]" "$OUT_DIR/run.err" | tail -6
+echo "=== gid 87875 SSH spread 4548-4560 ==="; grep "\[gid 87875 SSH step" "$OUT_DIR/run.err" | sed -n 's/.*step \([0-9]*\) .*/\1 &/p' | awk '$1>=4548&&$1<=4560{sub(/^[0-9]+ /,"");print}'

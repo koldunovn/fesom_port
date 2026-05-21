@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=dt1800_gid
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=00:25:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/dt1800_gid87875/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/dt1800_gid87875/slurm.%j.err
+
+# INSTRUMENTATION: full-ice dt=1800, dumping every shared ice input at gid 87875
+# (where uice erupts first, step 4555) via FESOM_DIAG_GID. Goal: see WHICH input
+# (stress_atmice / srfoce_u,v / srfoce_ssh / m_ice / a_ice / ice_strength) goes
+# anomalous BEFORE uice does — that is the corrupted shared input.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port
+OUT_DIR=/work/ab0995/a270088/port/dt1800_gid87875
+mkdir -p "$OUT_DIR"
+export FESOM_DIAG_GID=87875
+export FESOM_DIAG_MICE=1
+
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT_DIR/SHA.txt"
+
+BIN="$REPO/build/fesom_port"
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+date
+srun -l "$BIN" "$MESH" "$OUT_DIR" 1800 4600 -1 "$PHC" 1958 \
+    > "$OUT_DIR/run.log" 2> "$OUT_DIR/run.err"
+echo "Exit code: $?"
+date
+echo "=== [gid 87875] inputs approaching the eruption (steps 4540-4560) ==="
+grep "\[gid 87875 step" "$OUT_DIR/run.err" | awk -F'step ' '{print $2}' | awk '$1>=4540 && $1<=4560'
