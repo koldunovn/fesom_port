@@ -302,9 +302,11 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
         }
         real_t msum = (m_ice[n0] + m_ice[n1] + m_ice[n2]) / 3.0;
         real_t asum = (a_ice[n0] + a_ice[n1] + a_ice[n2]) / 3.0;
-        /* Hunke & Dukowicz strength */
-        real_t str = ice->pstar * msum * exp(-ice->c_pressure * (1.0 - asum));
-        ice_strength[el] = 0.5 * str;
+        /* Hunke & Dukowicz strength — Fortran ice_EVP.F90:595, NO 0.5 factor.
+         * The prior spurious 0.5 halved the rheology stiffness (zeta), halving
+         * the grid-scale damping in the EVP → an under-damped ice-velocity 2dx
+         * mode that erupts at thick Arctic ice at dt=1800 (tolerable at dt=500). */
+        ice_strength[el] = ice->pstar * msum * exp(-ice->c_pressure * (1.0 - asum));
 
         /* Diagnostic: catch the "exploding ice_strength" pattern. */
         if (ice_strength[el] > 1.0e7) {
