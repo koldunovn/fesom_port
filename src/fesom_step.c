@@ -149,6 +149,61 @@ int fesom_timestep(int                          step_n,
         fflush(stderr);
     }
 
+    /* DEBUG (FESOM_DIAG_SPREAD=<gid>): per-step 1-ring spread of the fields that
+       could seed the dt=1800 central-Arctic 2dx blow-up, so we can see WHICH one
+       erupts first (SSH-solve side vs element-velocity side) and WHEN. For the
+       target node: hbar/d_eta/ssh_rhs spread over the 1-ring (node + edge
+       neighbours via surrounding elements), plus the surface |uv| min/max over
+       the surrounding ELEMENTS (a checkerboard in element velocity = the 2dx). */
+    if (getenv("FESOM_DIAG_SPREAD")) {
+        int tgid = atoi(getenv("FESOM_DIAG_SPREAD"));
+        for (int row = 0; row < mesh->myDim_nod2D; ++row) {
+            if (p->myList_nod2D[row] != tgid) continue;
+            double hmin = mesh->hbar[row],  hmax = hmin;
+            double emin = dyn->d_eta[row],  emax = emin;
+            double rmin = dyn->ssh_rhs[row], rmax = rmin;
+            double vmin = 1e30, vmax = -1e30;   /* surface |uv| over surrounding elems */
+            double pmin = 1e30, pmax = -1e30;   /* surface |PGF| over surrounding elems */
+            double qmin = 1e30, qmax = -1e30;   /* surface |uv_rhs| over surrounding elems */
+            int o0 = mesh->nod_in_elem2D_offsets[row];
+            int o1 = mesh->nod_in_elem2D_offsets[row + 1];
+            for (int k = o0; k < o1; ++k) {
+                int e = mesh->nod_in_elem2D[k];
+                double u = dyn->uv[FESOM_ELEMVEC(e, 0, nl) + 0];
+                double v = dyn->uv[FESOM_ELEMVEC(e, 0, nl) + 1];
+                double spd = sqrt(u*u + v*v);
+                if (spd < vmin) vmin = spd;
+                if (spd > vmax) vmax = spd;
+                double px = aux->pgf_x[FESOM_ELEM3D(e, 0, nl)];
+                double py = aux->pgf_y[FESOM_ELEM3D(e, 0, nl)];
+                double pmag = sqrt(px*px + py*py);
+                if (pmag < pmin) pmin = pmag;
+                if (pmag > pmax) pmax = pmag;
+                double qx = dyn->uv_rhs[FESOM_ELEMVEC(e, 0, nl) + 0];
+                double qy = dyn->uv_rhs[FESOM_ELEMVEC(e, 0, nl) + 1];
+                double qmag = sqrt(qx*qx + qy*qy);
+                if (qmag < qmin) qmin = qmag;
+                if (qmag > qmax) qmax = qmag;
+                for (int j = 0; j < 3; ++j) {
+                    int nd = mesh->elem_nodes[3*e + j];
+                    if (mesh->hbar[nd]  < hmin) hmin = mesh->hbar[nd];
+                    if (mesh->hbar[nd]  > hmax) hmax = mesh->hbar[nd];
+                    if (dyn->d_eta[nd]  < emin) emin = dyn->d_eta[nd];
+                    if (dyn->d_eta[nd]  > emax) emax = dyn->d_eta[nd];
+                    if (dyn->ssh_rhs[nd] < rmin) rmin = dyn->ssh_rhs[nd];
+                    if (dyn->ssh_rhs[nd] > rmax) rmax = dyn->ssh_rhs[nd];
+                }
+            }
+            fprintf(stderr, "[spread r%d] gid %d step %d hbar_sprd=%.4e deta_sprd=%.4e "
+                    "sshrhs_sprd=%.4e velsurf[%.3e,%.3e] velsprd=%.3e pgf_sprd=%.4e "
+                    "uvrhs_sprd=%.4e\n",
+                    p->mype, tgid, step_n, hmax - hmin, emax - emin,
+                    rmax - rmin, vmin, vmax, vmax - vmin, pmax - pmin, qmax - qmin);
+            break;
+        }
+        fflush(stderr);
+    }
+
     /* 11. eta_n inline (oce_ale.F90:3771-3775).
           eta_n = α·hbar + (1-α)·hbar_old, but ONLY where ulevels_nod2D == 1.  */
     {
