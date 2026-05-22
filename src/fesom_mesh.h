@@ -131,4 +131,10 @@ void fesom_mesh_compute_metrics(fesom_mesh *m, struct fesom_partit *partit);
    Counts must already be set (call after fesom_mesh_read). All zeros. */
 void fesom_mesh_alloc_state(fesom_mesh *m);
 
+/* Rotate a geographic (east,north) vector into the model's rotated frame at a
+   node, given its geographic and rotated lon/lat [rad]. Mirror of Fortran
+   vector_g2r; no-op if FESOM_FORCE_ROTATION is 0. Used to rotate JRA winds. */
+void fesom_vector_g2r(real_t *u, real_t *v,
+                      real_t glon, real_t glat, real_t rlon, real_t rlat);
+
 #endif /* FESOM_MESH_H */

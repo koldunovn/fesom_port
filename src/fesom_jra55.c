@@ -682,6 +682,16 @@ void fesom_jra55_step(fesom_jra55 *jra,
 
         jra->u_wind   [n] = rdate * a_xw + b_xw;
         jra->v_wind   [n] = rdate * a_yw + b_yw;
+        /* Rotate JRA wind (geographic east/north) into the model's rotated frame
+         * — mirror of Fortran gen_surface_forcing.F90:1550-1551 (vector_g2r on the
+         * wind coefficients). Rotation is linear & time-independent, so rotating
+         * the time-interpolated wind == rotating coef_a/coef_b. Without it the
+         * Arctic wind stress (on BOTH ocean and ice) is mis-directed by the large
+         * g2r angle near the geographic pole -> too-slow / misdirected drift.
+         * Magnitude-preserving, so |wind|-based thermodynamics is unaffected. */
+        fesom_vector_g2r(&jra->u_wind[n], &jra->v_wind[n],
+                         mesh->geo_coord_nod2D[2*n + 0], mesh->geo_coord_nod2D[2*n + 1],
+                         mesh->coord_nod2D[2*n + 0],     mesh->coord_nod2D[2*n + 1]);
         jra->shum     [n] = rdate * a_sh + b_sh;
         jra->shortwave[n] = rdate * a_sw + b_sw;
         jra->longwave [n] = rdate * a_lw + b_lw;

@@ -159,6 +159,37 @@ static void r2g(const real_t M[9], real_t rlon, real_t rlat,
     }
 }
 
+/* Rotate a 2D vector with geographic (east, north) components into the model's
+ * rotated frame, at a node whose geographic (glon,glat) and rotated (rlon,rlat)
+ * coordinates [radians] are known. Mirror of Fortran vector_g2r
+ * (gen_modules_rotate_grid.F90:120). M maps geo Cartesian -> rot Cartesian
+ * (== Fortran r2g_matrix). No-op when rotation is disabled. Magnitude-preserving,
+ * so wind-speed-based thermodynamics (|wind|) is unaffected; only direction. */
+void fesom_vector_g2r(real_t *u, real_t *v,
+                      real_t glon, real_t glat, real_t rlon, real_t rlat)
+{
+#if FESOM_FORCE_ROTATION
+    static real_t M[9];
+    static int built = 0;
+    if (!built) { build_rotation_matrix(M); built = 1; }
+
+    real_t tlon = *u, tlat = *v;              /* geographic east/north comps */
+    /* geographic vector -> Cartesian geographic */
+    real_t txg = -tlat*sin(glat)*cos(glon) - tlon*sin(glon);
+    real_t tyg = -tlat*sin(glat)*sin(glon) + tlon*cos(glon);
+    real_t tzg =  tlat*cos(glat);
+    /* Cartesian geographic -> Cartesian rotated */
+    real_t txr = M[0]*txg + M[1]*tyg + M[2]*tzg;
+    real_t tyr = M[3]*txg + M[4]*tyg + M[5]*tzg;
+    real_t tzr = M[6]*txg + M[7]*tyg + M[8]*tzg;
+    /* Cartesian rotated -> rotated east/north components */
+    *v = -sin(rlat)*cos(rlon)*txr - sin(rlat)*sin(rlon)*tyr + cos(rlat)*tzr;
+    *u = -sin(rlon)*txr + cos(rlon)*tyr;
+#else
+    (void)u; (void)v; (void)glon; (void)glat; (void)rlon; (void)rlat;
+#endif
+}
+
 /*--- nod2d.out --------------------------------------------------------------
  * Format:
  *   <count>
