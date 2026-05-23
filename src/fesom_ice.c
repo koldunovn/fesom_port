@@ -100,7 +100,8 @@ void fesom_ice_init(fesom_ice           *ice,
     th->albsnm  = 0.77;
     th->albi    = 0.70;
     th->albim   = 0.68;
-    th->albw    = 0.066;
+    th->albw    = 0.1;     /* CORE2 namelist.ice albw=0.1 (was 0.066=LY2004; the reference
+                              overrides it). Keep == fesom_bulk.c BULK_ALBW. */
     th->h_ml    = 2.5;
     th->snowdist = 1;
     th->open_water_albedo = 0;

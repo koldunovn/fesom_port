@@ -24,7 +24,11 @@
 #define BULK_TMELT       273.15
 #define BULK_BOLTZMANN   5.67e-8
 #define BULK_EMISS_WAT   0.97
-#define BULK_ALBW        0.066       /* default open-water albedo (LY2004) */
+#define BULK_ALBW        0.1         /* open-water albedo — CORE2 namelist.ice albw=0.1
+                                        (open_water_albedo=0, constant). NOT the LY2004
+                                        0.066: the reference run overrides it to 0.1, and
+                                        the C used 0.066 -> ~3.8% excess SW absorption ->
+                                        tropics-max SST warm bias. Keep == fesom_ice.c th->albw. */
 #define BULK_INV_RHOWAT  (1.0 / 1000.0)
 #define BULK_GRAV        9.80
 #define BULK_VONKARM     0.40
@@ -357,7 +361,7 @@ void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
 
     const int    N    = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int    nl   = mesh->nl;
-    const real_t albw = (real_t)BULK_ALBW;     /* open-water albedo (LY2004, =Fortran) */
+    const real_t albw = (real_t)BULK_ALBW;     /* open-water albedo (CORE2 namelist.ice albw=0.1) */
     const real_t vcpw = (real_t)FESOM_VCPW;
     const real_t *a_ice = ice->data[FESOM_ICE_AICE].values;
     real_t *sw_3d = forcing->sw_3d;
