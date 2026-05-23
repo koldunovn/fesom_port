@@ -1126,61 +1126,6 @@ skip_rest_state:
     fesom_solverinfo_free(&solver);
     fesom_ssh_stiff_free(&stiff);
 
-    /* Probe nodes 1001 and 1500 (Fortran 1-based) — same probes the dump shim
-       uses. C 0-based ids: 1000 and 1499. With T=10°C, S=35 PSU constant,
-       density at the surface should be ≈ 1027 kg/m³ → density_m_rho0 ≈ -3,
-       hpressure[surface] ≈ -Z[0]*rho*g (≈ -75 Pa for Z[0]=-2.5 m), and
-       bvfreq should be ~0 except for the cancel-compressibility residual. */
-    {
-        const int probes[] = { 1000, 1499 };  /* C 0-based */
-        for (size_t k = 0; k < sizeof(probes)/sizeof(probes[0]); ++k) {
-            int n = probes[k];
-            if (n >= mesh.nod2D) continue;
-            int nlev = mesh.nlevels_nod2D[n];
-            printf("[fesom_port] EOS probe node %d (Fortran %d, nlev=%d):\n",
-                   n, n + 1, nlev);
-            for (int nz = 0; nz < (nlev - 1 < 5 ? nlev - 1 : 5); ++nz) {
-                size_t i = FESOM_NODE3D(n, nz, mesh.nl);
-                printf("  nz=%d  Z=%7.2f  ρ-ρ0=%9.5f  P=%12.4e  N²=%12.4e\n",
-                       nz, (double)mesh.Z[nz],
-                       (double)aux.density_m_rho0[i],
-                       (double)aux.hpressure[i],
-                       (double)aux.bvfreq[i]);
-            }
-        }
-        /* Global bounds */
-        real_t rmin = aux.density_m_rho0[0], rmax = rmin;
-        real_t pmin = aux.hpressure[0],      pmax = pmin;
-        real_t bmin = aux.bvfreq[0],         bmax = bmin;
-        size_t total = (size_t)(mesh.myDim_nod2D + mesh.eDim_nod2D) * (size_t)mesh.nl;
-        for (size_t i = 1; i < total; ++i) {
-            if (aux.density_m_rho0[i] < rmin) rmin = aux.density_m_rho0[i];
-            if (aux.density_m_rho0[i] > rmax) rmax = aux.density_m_rho0[i];
-            if (aux.hpressure[i]      < pmin) pmin = aux.hpressure[i];
-            if (aux.hpressure[i]      > pmax) pmax = aux.hpressure[i];
-            if (aux.bvfreq[i]         < bmin) bmin = aux.bvfreq[i];
-            if (aux.bvfreq[i]         > bmax) bmax = aux.bvfreq[i];
-        }
-        printf("[fesom_port] EOS global: ρ-ρ0 ∈ [%g, %g]  P ∈ [%g, %g]  N² ∈ [%g, %g]\n",
-               (double)rmin, (double)rmax, (double)pmin, (double)pmax,
-               (double)bmin, (double)bmax);
-
-        /* G2a: MLD1_ind range — index of mixed-layer base, 0-based.
-         * Open-ocean tropics: 1-3.  Mid-latitude winter: 10-20.
-         * Polar deep-convection: 30+.  All bounded by nlevels_nod2D[n]-1. */
-        if (aux.MLD1_ind) {
-            int Nmd = mesh.myDim_nod2D + mesh.eDim_nod2D;
-            int mlmin = aux.MLD1_ind[0], mlmax = mlmin;
-            for (int i = 1; i < Nmd; ++i) {
-                int v = aux.MLD1_ind[i];
-                if (v < mlmin) mlmin = v;
-                if (v > mlmax) mlmax = v;
-            }
-            printf("[fesom_port] MLD1_ind (0-based level) min=%d max=%d\n",
-                   mlmin, mlmax);
-        }
-    }
-
     if (use_sr)  fesom_sss_runoff_free(&sr);
     if (use_jra) fesom_jra55_free(&jra);
     fesom_forcing_free(&forcing);
