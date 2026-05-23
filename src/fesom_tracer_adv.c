@@ -172,7 +172,11 @@ static void init_tracers_AB_one(int tr_idx,
 {
     const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
     const int nl = mesh->nl;
-    const real_t eps = 1.0e-9;
+    /* AB2 stabilization offset (same as momentum, fesom_momentum.c): Fortran
+       o_PARAM epsilon=0.1 (oce_modules.F90:92), used in the tracer AB2 at
+       oce_tracer_mod.F90:53 as -(0.5+ε)*old+(1.5+ε)*new. The prior 1e-9 was the
+       same mis-port corrected in the momentum RHS. */
+    const real_t eps = 0.1;
     const real_t c_old = -(0.5 + eps);
     const real_t c_new =  (1.5 + eps);
 

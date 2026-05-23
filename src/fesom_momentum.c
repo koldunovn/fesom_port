@@ -57,11 +57,15 @@ void fesom_compute_vel_rhs(const struct fesom_mesh *mesh,
     const real_t g    = (real_t)FESOM_G;
     const real_t dt   = (real_t)FESOM_PHASE1_DT;
 
-    /* Adams-Bashforth coefficients (oce_ale_vel_rhs.F90:97-100). The
-       small `epsilon` matches Fortran's `epsilon` in MOD_PARAM (=1e-9 by
-       convention; FESOM uses it to keep the scheme stable at the first
-       step). For literal byte-parity we use the same numeric value. */
-    const real_t eps = 1.0e-9;
+    /* Adams-Bashforth coefficients (oce_ale_vel_rhs.F90:97-100). `epsilon` is
+       FESOM's AB2 *stabilization offset* (o_PARAM, oce_modules.F90:92:
+       epsilon=0.1_WP "AB2 offset"; no namelist override), NOT a tiny first-step
+       epsilon. With ε=0.1 the AB2 of the Coriolis+advection is ab=(−0.6,1.6)
+       instead of pure-AB2 (−0.5,1.5); the offset damps the oscillatory (Coriolis)
+       mode, which pure AB2 leaves marginally unstable at high f·dt — the dt=1800
+       central-Arctic (highest-latitude) velocity-2Δx blow-up (negligible at
+       dt=500). Same offset is used in the tracer AB2 (fesom_tracer_adv.c). */
+    const real_t eps = 0.1;
     const real_t ab1 = -(0.5 + eps);
     const real_t ab2 =  (1.5 + eps);
 
