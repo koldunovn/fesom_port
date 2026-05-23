@@ -291,6 +291,23 @@ static void diff_ver_part_impl_ale(int                          tr_num,
         }
 
         /*___________________________________________________________________
+         * Shortwave penetration (Fortran oce_ale_tracer.F90:990): for the
+         * temperature tracer (id==1), add the sw_3d flux divergence per layer.
+         * zinv = dt for linfs (the /(zbar(nz)-zbar(nz+1)) is commented out in
+         * the ALE Fortran). sw_3d is built by fesom_cal_shortwave_rad. */
+        if (id == 1 && FESOM_PHASE1_USE_SW_PENE) {
+            const real_t *sw = forcing->sw_3d;
+            const real_t  dtl = (real_t)FESOM_PHASE1_DT;
+            for (int nz = nzmin; nz <= nzmax - 1; ++nz) {
+                const real_t top = sw[FESOM_NODE3D(n, nz,     nl)];
+                const real_t bot = sw[FESOM_NODE3D(n, nz + 1, nl)];
+                const real_t ar  = mesh->area[FESOM_NODE3D(n, nz + 1, nl)]
+                                 / mesh->areasvol[FESOM_NODE3D(n, nz, nl)];
+                tr[nz] += (top - bot * ar) * dtl;
+            }
+        }
+
+        /*___________________________________________________________________
          * Forward sweep (Fortran 1052-1061) */
         cp[nzmin] = c[nzmin] / b[nzmin];
         tp[nzmin] = tr[nzmin] / b[nzmin];

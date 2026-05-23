@@ -337,3 +337,68 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
         forcing->stress_surf[2*e + 1] = sy / 3.0;
     }
 }
+
+/*===========================================================================
+ * cal_shortwave_rad — literal port of oce_shortwave_pene.F90.
+ *
+ * Shortwave penetration into the ocean (Morel & Antoine 1994, Sweeney 2005).
+ * Builds the visible-band shortwave TEMPERATURE flux sw_3d through the column
+ * (two-band exponential with chl-dependent coefficients) and removes the
+ * visible fraction (0.54) from heat_flux. No penetration under cavity or sea
+ * ice. MUST be called AFTER ice→ocean coupling and BEFORE the temperature
+ * tracer equation consumes heat_flux + sw_3d (oce_ale_tracer.F90:990).
+ *===========================================================================*/
+void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
+                             const struct fesom_jra55 *jra,
+                             const struct fesom_ice   *ice,
+                             struct fesom_forcing     *forcing)
+{
+    if (!FESOM_PHASE1_USE_SW_PENE) return;
+
+    const int    N    = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const int    nl   = mesh->nl;
+    const real_t albw = (real_t)BULK_ALBW;     /* open-water albedo (LY2004, =Fortran) */
+    const real_t vcpw = (real_t)FESOM_VCPW;
+    const real_t *a_ice = ice->data[FESOM_ICE_AICE].values;
+    real_t *sw_3d = forcing->sw_3d;
+    real_t *chl   = forcing->chl;
+
+    /* zero sw_3d over all local nodes/levels (Fortran 39-43) */
+    memset(sw_3d, 0, (size_t)N * (size_t)nl * sizeof(real_t));
+
+    for (int n2 = 0; n2 < N; ++n2) {
+        if (mesh->ulevels_nod2D[n2] > 1) continue;   /* cavity: no penetration (F:51) */
+        if (a_ice[n2] > 0.0)             continue;   /* under ice: none      (F:52) */
+
+        /* visible shortwave into ocean [W/m²]; '+'-up: add back to heat_flux (F:56-60) */
+        real_t swsurf = (1.0 - albw) * jra->shortwave[n2];   /* = qsr */
+        swsurf *= 0.54;                                      /* visible part (300-750nm) */
+        forcing->heat_flux[n2] += swsurf;
+
+        /* Sweeney 2005 (Appendix A) two-band coefficients from chl (F:66-79) */
+        real_t cc = chl[n2];
+        if (cc < 0.02) cc = 0.02;                            /* limit from below */
+        real_t c  = log10(cc);
+        real_t c2 = c*c, c3 = c2*c, c4 = c3*c, c5 = c4*c;
+        real_t v1  = 0.008*c + 0.132*c2 + 0.038*c3 - 0.017*c4 - 0.007*c5;
+        real_t v2  = 0.679 - v1;
+        v1         = 0.321 + v1;
+        real_t sc1 = 1.54  - 0.197*c + 0.166*c2 - 0.252*c3 - 0.055*c4 + 0.042*c5;
+        real_t sc2 = 7.925 - 6.644*c + 3.662*c2 - 1.815*c3 - 0.218*c4 + 0.502*c5;
+
+        swsurf /= vcpw;                                      /* W/m² → K m/s (F:81) */
+
+        const int nzmin = mesh->ulevels_nod2D[n2] - 1;       /* 0-based top interface */
+        const int nzmax = mesh->nlevels_nod2D[n2] - 1;       /* 0-based bottom interface */
+        sw_3d[FESOM_NODE3D(n2, nzmin, nl)] = swsurf;         /* Fortran nzmin (F:85) */
+        for (int k = nzmin + 1; k <= nzmax; ++k) {           /* F:86-93 */
+            real_t z   = mesh->zbar_3d_n[FESOM_NODE3D(n2, k, nl)];
+            real_t aux = v1 * exp(z / sc1) + v2 * exp(z / sc2);
+            sw_3d[FESOM_NODE3D(n2, k, nl)] = swsurf * aux;
+            if (aux < 1.0e-5 || k == nzmax) {
+                sw_3d[FESOM_NODE3D(n2, k, nl)] = 0.0;
+                break;
+            }
+        }
+    }
+}

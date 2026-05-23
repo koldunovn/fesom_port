@@ -45,4 +45,12 @@ void fesom_bulk_compute(const struct fesom_jra55  *jra,
                         struct fesom_ice           *ice,
                         struct fesom_partit        *partit);
 
+/* Shortwave penetration (oce_shortwave_pene.F90): build forcing->sw_3d through
+ * the column and remove the visible band from forcing->heat_flux. Call after
+ * ice->ocean coupling, before the temperature tracer equation. */
+void fesom_cal_shortwave_rad(const struct fesom_mesh  *mesh,
+                             const struct fesom_jra55 *jra,
+                             const struct fesom_ice   *ice,
+                             struct fesom_forcing     *forcing);
+
 #endif /* FESOM_BULK_H */

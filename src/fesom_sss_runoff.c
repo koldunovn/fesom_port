@@ -190,8 +190,14 @@ void fesom_read_other_NetCDF(const char *file,
         free(tmp);
     }
 
-    double miss_d = 0.0;
-    NC_CHECK(nc_get_att_double(ncid, varid, "missing_value", &miss_d));
+    /* Fortran read_other_NetCDF (line 105) reads 'missing_value' but does NOT
+       check the status, so an absent attribute is tolerated (the fill loop then
+       matches only -99.0). The Sweeney chl field is pre-extrapolated and carries
+       no missing_value attribute — so the read must be NON-FATAL. Sentinel
+       -1e30 matches no real data when the attribute is absent; SSS/runoff files
+       that DO carry missing_value overwrite it. */
+    double miss_d = -1.0e30;
+    nc_get_att_double(ncid, varid, "missing_value", &miss_d);
     real_t miss = (real_t)miss_d;
 
     NC_CHECK(nc_close(ncid));

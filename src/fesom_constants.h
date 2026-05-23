@@ -80,6 +80,14 @@
 #define FESOM_PHASE1_USE_MOMIX      0
 #define FESOM_PHASE1_USE_INSTABMIX  1
 #define FESOM_PHASE1_USE_WINDMIX    0       /* matches Fortran default */
+
+/* Shortwave penetration (oce_shortwave_pene.F90). CORE2 enables it
+   (work_linfs_pp/namelist.config:108 use_sw_pene=.true.). chl source: 'Sweeney'
+   monthly climatology (default in the reference run) or constant chl_const=0.1
+   (canonical CORE2/JRA template). Runtime override via FESOM_CHL_SOURCE
+   ('Sweeney'|'None') and FESOM_CHL_FILE; default Sweeney. */
+#define FESOM_PHASE1_USE_SW_PENE    1
+#define FESOM_PHASE1_CHL_CONST      0.1     /* constant chlorophyll [mg/m³]            */
 #define FESOM_PHASE1_AB_ORDER  2        /* Adams-Bashforth order for Coriolis       */
 
 /* SSH solver implicitness — Fortran defaults from oce_modules.F90:90 are

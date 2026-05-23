@@ -963,6 +963,42 @@ skip_rest_state:
                 fesom_ice_oce_fluxes_mom(&ice, &mpi, &mesh, &forcing);
             }
 
+            /* Shortwave penetration (oce_shortwave_pene.F90 cal_shortwave_rad,
+             * called from ice_oce_coupling.F90:833): AFTER fesom_ice_step finalizes
+             * heat_flux, BEFORE fesom_timestep's tracer diffusion consumes
+             * heat_flux + sw_3d. chl: constant or Sweeney monthly climatology read
+             * via fesom_read_other_NetCDF (gen_surface_forcing.F90:1585). Needs
+             * jra->shortwave, so gated on use_jra. */
+            if (use_jra && FESOM_PHASE1_USE_SW_PENE) {
+                static int chl_sweeney = -1, chl_const_done = 0;
+                static const char *chl_file = NULL;
+                if (chl_sweeney < 0) {
+                    const char *src = getenv("FESOM_CHL_SOURCE");   /* default Sweeney */
+                    chl_sweeney = (src && strcmp(src, "None") == 0) ? 0 : 1;
+                    chl_file = getenv("FESOM_CHL_FILE");
+                    if (!chl_file)
+                        chl_file = "/pool/data/AWICM/FESOM2/FORCING/Sweeney/Sweeney_2005.nc";
+                }
+                int Nn = mesh.myDim_nod2D + mesh.eDim_nod2D;
+                if (!chl_sweeney) {
+                    if (!chl_const_done) {
+                        for (int i = 0; i < Nn; ++i)
+                            forcing.chl[i] = (real_t)FESOM_PHASE1_CHL_CONST;
+                        chl_const_done = 1;
+                    }
+                } else if (n == 1 ||
+                           fesom_calendar_crossed(&io.prev_calendar, &io.calendar,
+                                                  FESOM_PERIOD_MONTHLY)) {
+                    int mi = io.calendar.month;
+                    if (n > 1) mi = mi + 1;          /* Fortran gen_surface_forcing.F90:1591 */
+                    if (mi > 12) mi = 1;
+                    if (mpi.mype == 0)
+                        fprintf(stderr, "[chl] Updating chlorophyll climatology for month %d\n", mi);
+                    fesom_read_other_NetCDF(chl_file, "chl", mi, forcing.chl, 1, 1, &mesh);
+                }
+                fesom_cal_shortwave_rad(&mesh, &jra, &ice, &forcing);
+            }
+
             /* Per-step heartbeat on rank 0 — independent of print_every so
              * we always see SOMETHING happening even if the model is hung
              * inside a single step. */

@@ -22,11 +22,14 @@ void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh)
     f->relax_salt       = calloc(n,      sizeof(real_t));
     f->Ch_atm_oce       = calloc(n,      sizeof(real_t));
     f->Ce_atm_oce       = calloc(n,      sizeof(real_t));
+    f->chl              = calloc(n,             sizeof(real_t));
+    f->sw_3d            = calloc(n * (size_t)mesh->nl, sizeof(real_t));
     FESOM_CHECK(f->heat_flux && f->water_flux
              && f->stress_node_surf && f->stress_surf
              && f->runoff && f->Ssurf
              && f->virtual_salt && f->relax_salt
-             && f->Ch_atm_oce && f->Ce_atm_oce,
+             && f->Ch_atm_oce && f->Ce_atm_oce
+             && f->chl && f->sw_3d,
              "fesom_forcing alloc: out of memory");
 }
 
@@ -42,5 +45,7 @@ void fesom_forcing_free(fesom_forcing *f)
     free(f->relax_salt);
     free(f->Ch_atm_oce);
     free(f->Ce_atm_oce);
+    free(f->chl);
+    free(f->sw_3d);
     memset(f, 0, sizeof(*f));
 }

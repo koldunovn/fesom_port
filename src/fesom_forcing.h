@@ -36,6 +36,14 @@ typedef struct fesom_forcing {
        Ch_atm_oce_arr / Ce_atm_oce_arr in g_forcing_arrays. */
     real_t *Ch_atm_oce;      /* [nod2D]  sensible-heat transfer coeff (open water) */
     real_t *Ce_atm_oce;      /* [nod2D]  evaporation transfer coeff   (open water) */
+
+    /* Shortwave penetration (use_sw_pene). Mirrors Fortran g_forcing_arrays
+       chl / sw_3d. chl: chlorophyll [mg/m³] (const or Sweeney monthly climatology).
+       sw_3d: visible-band shortwave TEMPERATURE flux [K m/s] at level interfaces,
+       built by fesom_cal_shortwave_rad (oce_shortwave_pene.F90), consumed by the
+       temperature tracer equation (oce_ale_tracer.F90:990). */
+    real_t *chl;             /* [nod2D]        chlorophyll concentration            */
+    real_t *sw_3d;           /* [nod2D * nl]   shortwave T-flux at interfaces        */
 } fesom_forcing;
 
 void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh);
