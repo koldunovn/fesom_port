@@ -8,8 +8,10 @@
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
+#include "fesom_forcing.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_tracers.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -294,43 +296,263 @@ static void kpp_dump_riiwmix(const fesom_kpp *k, const struct fesom_aux *aux,
 }
 
 /*===========================================================================
- * KPP driver — mirror of oce_mixing_KPP (oce_ale_mixing_kpp.F90:249-425),
- * built incrementally. Through K3: zero viscA + ri_iwmix (+ dump). Downstream
- * (bldepth/blmix/enhance/combine/single-Kv) land K5..K8 — guarded so only a
- * FESOM_KPP_DUMP_DIR dump run (1 step) may proceed until the driver is complete.
+ * bldepth — oceanic boundary-layer depth hbl + kbl, bfsfc/stable/caseA.
+ * Literal port of bldepth (oce_ale_mixing_kpp.F90:674-854). HIGHEST RISK
+ * (historical OBL bug, FRESH_START:489). Loops myDim only (Fortran :697/708/813
+ * are myDim with the +eDim commented out). Uses zbar (interface depths, NOT Z),
+ * the static kpp_wscale (K2), and the driver pre-step ustar/Bo/dVsq + the
+ * EOS-filled dbsfc/bvfreq/sw_alpha + forcing sw_3d.
+ *
+ * CORE2 use_sw_pene = .true. (Key invariant #6) — the sw-penetration branches
+ * are always taken, so they are ported inline (port-what-CORE2-uses); the
+ * else-branch (bfsfc=Bo constant) is not reachable in CORE2. smooth_hbl=.false.
+ * (skip). kbl is stored 0-based (the dump emits kbl+1 to match the Fortran's
+ * 1-based real(kbl,WP)).
  *===========================================================================*/
-void fesom_kpp_mixing(fesom_kpp               *k,
-                      struct fesom_aux        *aux,
-                      const struct fesom_tracers *tracers,
-                      const struct fesom_dyn  *dyn,
-                      const struct fesom_mesh *mesh,
-                      struct fesom_partit     *partit)
+static void kpp_bldepth(fesom_kpp *k, const struct fesom_aux *aux,
+                        const struct fesom_forcing *forcing,
+                        const struct fesom_mesh *mesh)
 {
-    (void)tracers;
-    ++s_kpp_call;                            /* = ocean step (mirrors Fortran kpp_call_count) */
-    const int nl = k->nl;
+    const int nl  = k->nl;
+    const int Nmy = mesh->myDim_nod2D;
+    const real_t Vtc = k->Vtc;
 
-    /* zero viscA over myDim+eDim (driver :281-284) */
+    /* init hbl/kbl to bottomed-out values (:696-702) */
+    for (int n = 0; n < Nmy; ++n) {
+        int nzmax = mesh->nlevels_nod2D[n] - 1;          /* 0-based deepest interface */
+        k->kbl[n] = nzmax;
+        k->hbl[n] = fabs(mesh->zbar_3d_n[FESOM_NODE3D(n, nzmax, nl)]);
+    }
+
+    /* bulk-Richardson search for hbl (:708-802) */
+    for (int n = 0; n < Nmy; ++n) {
+        int nzmin = mesh->ulevels_nod2D[n] - 1;
+        int nzmax = mesh->nlevels_nod2D[n] - 1;
+        real_t Bo = k->Bo[n];
+        real_t us = k->ustar[n];
+        real_t coeff_sw = (real_t)FESOM_G * aux->sw_alpha[FESOM_NODE3D(n, nzmin, nl)]; /* :713 */
+        real_t sw_surf  = forcing->sw_3d[FESOM_NODE3D(n, nzmin, nl)];
+        real_t Rib_km1  = 0.0;
+        k->bfsfc[n] = Bo;                                /* :717 */
+
+        for (int nz = nzmin + 1; nz <= nzmax; ++nz) {    /* :719 (nz=nzmin+1..nzmax) */
+            real_t zk   = fabs(mesh->zbar_3d_n[FESOM_NODE3D(n, nz,     nl)]);
+            real_t zkm1 = fabs(mesh->zbar_3d_n[FESOM_NODE3D(n, nz - 1, nl)]);
+
+            /* bfsfc = Bo + sw contribution (:725-727) */
+            k->bfsfc[n] = Bo + coeff_sw * (sw_surf - forcing->sw_3d[FESOM_NODE3D(n, nz, nl)]);
+
+            real_t bfs    = k->bfsfc[n];
+            real_t stable = 0.5 + copysign(0.5, bfs);                  /* :729 */
+            k->stable[n]  = stable;
+            real_t sigma  = stable + (1.0 - stable) * KPP_EPSILON;     /* :730 */
+
+            real_t zehat = KPP_VONK * sigma * zk * bfs;                /* :736 */
+            real_t wm, ws;
+            kpp_wscale(k, zehat, us, &wm, &ws);                        /* :737 */
+
+            real_t bvsq = aux->bvfreq[FESOM_NODE3D(n, nz, nl)];        /* :747 */
+            real_t Vtsq = zk * ws * sqrt(fabs(bvsq)) * Vtc;            /* :750 */
+
+            real_t Ritop = zk * aux->dbsfc[FESOM_NODE3D(n, nz, nl)];   /* :757 */
+            real_t Rib_k = Ritop / (k->dVsq[FESOM_NODE3D(n, nz, nl)] + Vtsq + KPP_EPSLN); /* :758 */
+            real_t dzup  = zk - zkm1;                                  /* :759 */
+
+            if (Rib_k > KPP_RICR) {                                    /* :761 */
+                k->hbl[n] = zkm1 + dzup * (KPP_RICR - Rib_km1)
+                                       / (Rib_k - Rib_km1 + KPP_EPSLN);/* :763 */
+                k->kbl[n] = nz;                                        /* :764 */
+                break;                                                 /* :765 (EXIT) */
+            } else {
+                Rib_km1 = Rib_k;                                       /* :767 */
+            }
+
+            /* linear interp of sw_3d to hbl, refine bfsfc (:774-785) */
+            {
+                real_t sw_km1 = forcing->sw_3d[FESOM_NODE3D(n, nz - 1, nl)];
+                real_t sw_k   = forcing->sw_3d[FESOM_NODE3D(n, nz,     nl)];
+                k->bfsfc[n] = Bo + coeff_sw *
+                    ( sw_surf - ( sw_km1 + (sw_k - sw_km1) * (k->hbl[n] - zkm1) / dzup ) );
+                real_t st = 0.5 + copysign(0.5, k->bfsfc[n]);          /* :783 */
+                k->stable[n] = st;
+                k->bfsfc[n]  = k->bfsfc[n] + st * KPP_EPSLN;           /* :784 */
+            }
+        }
+
+        /* hekman / hmonob limits, gated bfsfc>0 .and. nzmin==1 (:792-801).
+         * Fortran nzmin==1 (no cavity) → C nzmin==0. */
+        if (k->bfsfc[n] > 0.0 && nzmin == 0) {
+            real_t hekman = KPP_CEKMAN * us / fmax(fabs(mesh->coriolis_node[n]), KPP_EPSLN); /* :795 */
+            real_t hmonob = KPP_CMONOB * us * us * us
+                            / KPP_VONK / (k->bfsfc[n] + KPP_EPSLN);    /* :796-797 */
+            real_t hlimit = k->stable[n] * fmin(hekman, hmonob);       /* :798 */
+            k->hbl[n] = fmin(k->hbl[n], hlimit);                       /* :799 */
+            k->hbl[n] = fmax(k->hbl[n],
+                             fabs(mesh->zbar_3d_n[FESOM_NODE3D(n, 1, nl)])); /* :800 (zbar(2)) */
+        }
+    }
+
+    /* smooth_hbl = .false. → skip (:806-809) */
+
+    /* find new kbl from final hbl, refine bfsfc, set caseA (:812-852) */
+    for (int n = 0; n < Nmy; ++n) {
+        int nzmin = mesh->ulevels_nod2D[n] - 1;
+        int nzmax = mesh->nlevels_nod2D[n] - 1;
+
+        k->kbl[n] = nzmax;                                            /* :820 */
+        for (int nz = nzmin + 1; nz <= nzmax; ++nz) {                 /* :822 */
+            if (fabs(mesh->zbar_3d_n[FESOM_NODE3D(n, nz, nl)]) > k->hbl[n]) {
+                k->kbl[n] = nz;                                       /* :824 */
+                break;                                               /* :825 (EXIT) */
+            }
+        }
+
+        /* final bfsfc: linear interp of sw_3d to hbl using kbl (:832-844) */
+        int kbl = k->kbl[n];
+        real_t coeff_sw = (real_t)FESOM_G * aux->sw_alpha[FESOM_NODE3D(n, nzmin, nl)];
+        real_t sw_surf  = forcing->sw_3d[FESOM_NODE3D(n, nzmin,  nl)];
+        real_t sw_km1   = forcing->sw_3d[FESOM_NODE3D(n, kbl - 1, nl)];
+        real_t sw_k     = forcing->sw_3d[FESOM_NODE3D(n, kbl,     nl)];
+        real_t zbar_km1 = mesh->zbar_3d_n[FESOM_NODE3D(n, kbl - 1, nl)];
+        real_t zbar_k   = mesh->zbar_3d_n[FESOM_NODE3D(n, kbl,     nl)];
+        k->bfsfc[n] = k->Bo[n] + coeff_sw *
+            ( sw_surf - ( sw_km1 + (sw_k - sw_km1)
+                                   * (k->hbl[n] + zbar_km1) / (zbar_km1 - zbar_k) ) );
+        real_t st = 0.5 + copysign(0.5, k->bfsfc[n]);                 /* :842 */
+        k->stable[n] = st;
+        k->bfsfc[n]  = k->bfsfc[n] + st * KPP_EPSLN;                  /* :843 */
+
+        /* caseA: =1 if hbl above mid-point of level kbl, else 0 (:850-851) */
+        real_t dzup = zbar_km1 - zbar_k;
+        real_t arg  = fabs(zbar_k) - 0.5 * dzup - k->hbl[n];
+        k->caseA[n] = 0.5 + copysign(0.5, arg);
+    }
+}
+
+/* K5 dump: driver pre-step inputs to bldepth — prestep(ustar,Bo) + dVsq + dbsfc
+ * columns. Mirrors the Fortran kpp_dump_prestep (oce_ale_mixing_kpp.F90:554-578). */
+static double kpp_get_prestep(int node, int comp, void *user)
+{
+    const fesom_kpp *k = *(const fesom_kpp *const *)user;
+    return comp == 0 ? (double)k->ustar[node] : (double)k->Bo[node];
+}
+static void kpp_dump_prestep(const fesom_kpp *k, const struct fesom_aux *aux,
+                             const struct fesom_mesh *mesh, struct fesom_partit *partit)
+{
+    const fesom_kpp *kp = k;
+    kpp_col_src dv = { k->dVsq,    k->nl };
+    kpp_col_src db = { aux->dbsfc, k->nl };
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "prestep", 2, kpp_get_prestep, &kp);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "dVsq",  k->nl, kpp_get_col, &dv);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "dbsfc", k->nl, kpp_get_col, &db);
+}
+
+/* K5 dump: bldepth outputs — hbl, kbl(+1 → Fortran 1-based), bfsfc, stable, caseA.
+ * Mirrors the Fortran kpp_dump_final's 'bldepth' tag (:596-604). */
+static double kpp_get_bldepth(int node, int comp, void *user)
+{
+    const fesom_kpp *k = *(const fesom_kpp *const *)user;
+    switch (comp) {
+        case 0:  return (double)k->hbl[node];
+        case 1:  return (double)(k->kbl[node] + 1);   /* 0-based → Fortran 1-based */
+        case 2:  return (double)k->bfsfc[node];
+        case 3:  return (double)k->stable[node];
+        default: return (double)k->caseA[node];
+    }
+}
+static void kpp_dump_bldepth(const fesom_kpp *k, const struct fesom_mesh *mesh,
+                             struct fesom_partit *partit)
+{
+    const fesom_kpp *kp = k;
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "bldepth", 5, kpp_get_bldepth, &kp);
+}
+
+/*===========================================================================
+ * KPP driver — mirror of oce_mixing_KPP (oce_ale_mixing_kpp.F90:249-494),
+ * built incrementally. Through K5: zero viscA + pre-step (dVsq/ustar/Bo) +
+ * ri_iwmix + bldepth (+ dumps). Downstream (blmix_kpp/enhance/combine/
+ * single-Kv) land K6..K8 — guarded so only a FESOM_KPP_DUMP_DIR dump run
+ * (1 step) may proceed until the driver is complete.
+ *===========================================================================*/
+void fesom_kpp_mixing(fesom_kpp                  *k,
+                      struct fesom_aux           *aux,
+                      const struct fesom_tracers *tracers,
+                      const struct fesom_forcing *forcing,
+                      const struct fesom_dyn     *dyn,
+                      const struct fesom_mesh    *mesh,
+                      struct fesom_partit        *partit)
+{
+    ++s_kpp_call;                            /* = ocean step (mirrors Fortran kpp_call_count) */
+    const int nl  = k->nl;
+    const int Nmy = mesh->myDim_nod2D;
+
+    /* zero viscA over myDim+eDim (driver :340-343) */
     memset(k->viscA, 0, (size_t)k->n_nod * (size_t)nl * sizeof(real_t));
 
-    /* interior mixing (ri_iwmix). dVsq/ustar/Bo pre-step + bldepth land K5. */
+    /* ---- driver pre-step (oce_ale_mixing_kpp.F90:344-411) -------------------
+     * dVsq (eqn 21: shear of UVnode re the surface), ustar (eqn 2), Bo (A2c/A2d).
+     * dbsfc is filled by the EOS (fesom_eos.c); here only its surface level is
+     * zeroed, matching the Fortran driver (:367). */
+    const real_t *S = tracers->data[FESOM_TRACER_S].values;
+    const real_t density_0_r = 1.0 / (real_t)FESOM_DENSITY_0;
+
+    for (int n = 0; n < Nmy; ++n) {
+        int nzmin = mesh->ulevels_nod2D[n] - 1;
+        int nzmax = mesh->nlevels_nod2D[n] - 1;
+        k->dVsq[FESOM_NODE3D(n, nzmin, nl)]    = 0.0;     /* :366 */
+        aux->dbsfc[FESOM_NODE3D(n, nzmin, nl)] = 0.0;     /* :367 */
+        real_t usurf = dyn->uvnode[FESOM_ELEMVEC(n, nzmin, nl) + 0];   /* :370 */
+        real_t vsurf = dyn->uvnode[FESOM_ELEMVEC(n, nzmin, nl) + 1];   /* :371 */
+        for (int nz = nzmin + 1; nz < nzmax; ++nz) {      /* :372 (nz=nzmin+1..nzmax-1) */
+            real_t u_loc = 0.5 * ( dyn->uvnode[FESOM_ELEMVEC(n, nz - 1, nl) + 0]
+                                 + dyn->uvnode[FESOM_ELEMVEC(n, nz,     nl) + 0] );
+            real_t v_loc = 0.5 * ( dyn->uvnode[FESOM_ELEMVEC(n, nz - 1, nl) + 1]
+                                 + dyn->uvnode[FESOM_ELEMVEC(n, nz,     nl) + 1] );
+            real_t du = usurf - u_loc, dv = vsurf - v_loc;
+            k->dVsq[FESOM_NODE3D(n, nz, nl)] = du * du + dv * dv;       /* :377 */
+        }
+        k->dVsq[FESOM_NODE3D(n, nzmax, nl)] =
+            k->dVsq[FESOM_NODE3D(n, nzmax - 1, nl)];                    /* :380 */
+    }
+
+    for (int n = 0; n < Nmy; ++n) {                       /* :401-411 */
+        int nzmin = mesh->ulevels_nod2D[n] - 1;
+        real_t sx = forcing->stress_node_surf[2*n + 0];
+        real_t sy = forcing->stress_node_surf[2*n + 1];
+        k->ustar[n] = sqrt( sqrt(sx*sx + sy*sy) * density_0_r );        /* eqn 2 (:404) */
+        k->Bo[n] = -(real_t)FESOM_G
+                   * ( aux->sw_alpha[FESOM_NODE3D(n, nzmin, nl)]
+                         * forcing->heat_flux[n] / (real_t)FESOM_VCPW
+                     + aux->sw_beta[FESOM_NODE3D(n, nzmin, nl)]
+                         * forcing->water_flux[n] * S[FESOM_NODE3D(n, nzmin, nl)] ); /* :409-410 */
+    }
+
+    /* interior mixing (ri_iwmix, :419) */
     kpp_ri_iwmix(k, aux, dyn, mesh);
 
-    /* K4: double diffusion gate (driver :420-422). CORE2 double_diffusion=.false.
+    /* K4: double diffusion gate (driver :423-425). CORE2 double_diffusion=.false.
      * → ddmix not called (body deferred, port-what-CORE2-uses). */
 #if KPP_DOUBLE_DIFFUSION
 #error "KPP double_diffusion=.true. unsupported: port ddmix (oce_ale_mixing_kpp.F90:1012-1085)"
     /* CALL ddmix(diffK, ...) */
 #endif
 
-    if (fesom_kpp_dump_this_step(s_kpp_call))
-        kpp_dump_riiwmix(k, aux, mesh, partit);
+    /* OBL depth (bldepth, :428) — K5 */
+    kpp_bldepth(k, aux, forcing, mesh);
 
-    /* Driver incomplete through K3: only a dump run (1 step) may proceed; the
-     * partial result is NOT valid for dynamics (aux->Kv/Av untouched). */
+    /* dual-instrumentation dumps (step 1): pre-step + ri_iwmix + bldepth */
+    if (fesom_kpp_dump_this_step(s_kpp_call)) {
+        kpp_dump_prestep(k, aux, mesh, partit);
+        kpp_dump_riiwmix(k, aux, mesh, partit);
+        kpp_dump_bldepth(k, mesh, partit);
+    }
+
+    /* Driver incomplete through K5: blmix_kpp/enhance/combine/single-Kv land
+     * K6..K8 (aux->Kv/Av untouched). Only a FESOM_KPP_DUMP_DIR dump run (1 step)
+     * may proceed; the partial result is NOT valid for dynamics. */
     if (!fesom_kpp_dump_dir())
-        FESOM_DIE("fesom_kpp_mixing: KPP driver incomplete (ported through K3 ri_iwmix; "
-                  "bldepth/blmix/enhance/combine/single-Kv pending K5..K8). Only a "
+        FESOM_DIE("fesom_kpp_mixing: KPP driver incomplete (ported through K5 bldepth; "
+                  "blmix_kpp/enhance/combine/single-Kv pending K6..K8). Only a "
                   "FESOM_KPP_DUMP_DIR dump run may proceed. Use FESOM_MIX_SCHEME=PP otherwise.");
 }
 

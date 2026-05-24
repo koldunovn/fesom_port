@@ -78,6 +78,12 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_nod3D(aux->bvfreq,         nl, p);
     fesom_exchange_nod3D(aux->sw_alpha,       nl, p);
     fesom_exchange_nod3D(aux->sw_beta,        nl, p);
+    /* horizontal N² smoothing — N2smth_h=.true., N2smth_hidx=1 (Fortran
+     * oce_ale_pressure_bv.F90:499 smooth_nod3D(bvfreq,1)). The exchange above
+     * populated the halo bvfreq the sweep reads (Fortran fills bvfreq on
+     * myDim+eDim then smooths); fesom_smooth_nod3D re-exchanges after. Must precede
+     * every bvfreq consumer (GM, PP/KPP, mo_convect). */
+    fesom_smooth_nod3D(aux->bvfreq, nl, 1, mesh, p);
 
     /*  1b. GM/Redi prerequisites + per-step coefficient builder +
      *      streamfunction solve + bolus velocity reconstruction
@@ -107,7 +113,7 @@ int fesom_timestep(int                          step_n,
     if (s_use_kpp) {
         /* KPP writes aux->Av (elements) + the single aux->Kv (T-channel,
          * oce_ale.F90:3518-3522) and does its own internal halo exchanges. */
-        fesom_kpp_mixing(ctx->kpp, aux, tracers, dyn, mesh, p);
+        fesom_kpp_mixing(ctx->kpp, aux, tracers, forcing, dyn, mesh, p);
     } else {
         fesom_pp_mixing(mesh, dyn, aux);
         fesom_exchange_nod3D (aux->Kv, nl, p);

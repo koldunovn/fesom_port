@@ -6,6 +6,7 @@
 struct fesom_mesh;
 struct fesom_aux;
 struct fesom_tracers;
+struct fesom_partit;
 
 /*
  * Jackett-McDougall (JM, EOS80) equation of state — split form. Returns the
@@ -26,21 +27,32 @@ void fesom_eos_jm_components(real_t t, real_t s,
  *   - JM-EOS at every wet level
  *   - density_m_rho0  = rho_in_situ - density_0  (use_density_ref=.false.)
  *   - hpressure       (linfs branch, full cells, no cavity)
- *   - bvfreq          (N², no smoothing yet)
+ *   - bvfreq          (N², padded; horizontal smoothing done by fesom_smooth_nod3D,
+ *                      called from fesom_step after the bvfreq halo exchange)
+ *   - dbsfc           (buoyancy re surface for KPP bldepth; stored unconditionally,
+ *                      PP never reads it — Fortran oce_ale_pressure_bv.F90:332,337,339)
  *   - MLD1_ind        (Large et al. 1997 / FESOM 1.4 — Phase G2a;
  *                      stored 0-based, used by GM init_Redi_GM)
  *
  * Deferred:
- *   - horizontal N² smoothing (smooth_nod3D)
- *   - vertical N² smoothing
+ *   - vertical N² smoothing (N2smth_v=.false. in CORE2)
  *   - MLD2/MLD3 (Levitus, Griffies)
- *   - dbsfc (KPP only)
  *   - density_dmoc (diagnostic)
  *   - cavity / partial-cell branches
  */
 void fesom_pressure_bv(const struct fesom_tracers *tracers,
                        const struct fesom_mesh    *mesh,
                        struct fesom_aux           *aux);
+
+/*
+ * Area-weighted node-patch horizontal smoother — port of smooth_nod3D
+ * (gen_support.F90:99-198). Smooths `arr` [(myDim+eDim)*nl] in place with
+ * `n_smooth` sweeps, each an element-patch area-weighted average followed by a
+ * halo exchange. The caller must supply a valid halo `arr` on entry. Used for N²
+ * (N2smth_h=.true., N2smth_hidx=1).
+ */
+void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
+                        const struct fesom_mesh *mesh, struct fesom_partit *p);
 
 /*
  * Pressure gradient force at elements (Phase 1: linfs + full cells).

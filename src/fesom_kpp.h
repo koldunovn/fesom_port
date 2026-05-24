@@ -7,6 +7,7 @@ struct fesom_mesh;
 struct fesom_partit;
 struct fesom_aux;
 struct fesom_tracers;
+struct fesom_forcing;
 struct fesom_dyn;
 
 /*
@@ -103,12 +104,13 @@ void fesom_kpp_init(fesom_kpp *k);
  * Implemented incrementally K1..K8; an abort stub until then so the dispatch
  * fails loudly if KPP is selected before the port is complete.
  */
-void fesom_kpp_mixing(fesom_kpp               *k,
-                      struct fesom_aux        *aux,
+void fesom_kpp_mixing(fesom_kpp                  *k,
+                      struct fesom_aux           *aux,
                       const struct fesom_tracers *tracers,
-                      const struct fesom_dyn  *dyn,
-                      const struct fesom_mesh *mesh,
-                      struct fesom_partit     *partit);
+                      const struct fesom_forcing *forcing,
+                      const struct fesom_dyn     *dyn,
+                      const struct fesom_mesh    *mesh,
+                      struct fesom_partit        *partit);
 
 /* ---- dump harness (FESOM_KPP_DUMP_DIR-gated dual-instrumentation) --------
  * Mirror of the EVP dump diagnostic (reference_evp_dump_diagnostic). Off by

@@ -3,8 +3,10 @@
 #include "fesom_constants.h"
 #include "fesom_mesh.h"
 #include "fesom_tracers.h"
+#include "fesom_halo.h"
 
 #include <math.h>
+#include <stdlib.h>
 
 /*--- JM-EOS components -----------------------------------------------------
  * Literal port of densityJM_components (oce_ale_pressure_bv.F90:2605-2669).
@@ -135,6 +137,12 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
             real_t r_full = r + rho_ref;
             real_t dbsfc1 = -g * (rho_surf - r_full) / r_full;
 
+            /* Store dbsfc for KPP bldepth (Fortran oce_ale_pressure_bv.F90:332,339).
+             * Written unconditionally: PP never reads aux->dbsfc, so the PP result is
+             * unaffected (Fortran's `if (mixing_kpp)` gate is a write-skip with no
+             * numerical consequence). Bottom interface filled after the loop (:337). */
+            aux->dbsfc[FESOM_NODE3D(n, nz, nl)] = dbsfc1;
+
             /* db_max accumulator (Fortran line 334). At nz==nzmin the
              * divisor is the |Z[nzmin] - Z[nzmin+1]| placeholder — a
              * non-zero divisor; at that level dbsfc1 is 0 anyway since
@@ -144,6 +152,10 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
             real_t cand = dbsfc1 / denom;
             if (cand > db_max) db_max = cand;
         }
+        /* dbsfc bottom fill: dbsfc(nzmax)=dbsfc(nzmax-1) (Fortran :337). nzmax is the
+         * deepest interface (0-based nlevels-1); the loop filled nzmin..nzmax-1. */
+        aux->dbsfc[FESOM_NODE3D(n, nzmax, nl)] =
+            aux->dbsfc[FESOM_NODE3D(n, nzmax - 1, nl)];
 
         /* hpressure — linfs branch, no cavity (nzmin == 0 in C).
            Mirror of oce_ale_pressure_bv.F90 lines 369-403. Surface boundary:
@@ -182,14 +194,86 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
                 mld1_done = 1;
             }
         }
-        /* Pad surface and bottom — Fortran lines 474-475 */
+        /* Pad surface and bottom — Fortran lines 474-475:
+         *   bvfreq(nzmin) = bvfreq(nzmin+1)        [surface]
+         *   bvfreq(nzmax) = bvfreq(nzmax-1)        [bottom interface]
+         * nzmax is the deepest interface (0-based nlevels-1); the loop filled the
+         * interior nzmin+1..nzmax-1. The horizontal N² smoothing (N2smth_h=.true.,
+         * Fortran pressure_bv:499) is applied by fesom_smooth_nod3D from fesom_step
+         * after the bvfreq halo exchange. */
         if (nzmin + 1 < nzmax) {
             aux->bvfreq[FESOM_NODE3D(n, nzmin, nl)] =
                 aux->bvfreq[FESOM_NODE3D(n, nzmin + 1, nl)];
-            aux->bvfreq[FESOM_NODE3D(n, nzmax - 1, nl)] =
-                aux->bvfreq[FESOM_NODE3D(n, nzmax - 2, nl)];
+            aux->bvfreq[FESOM_NODE3D(n, nzmax, nl)] =
+                aux->bvfreq[FESOM_NODE3D(n, nzmax - 1, nl)];
         }
     }
+}
+
+/*--- smooth_nod3D — area-weighted node-patch horizontal smoother --------------
+ * Literal port of smooth_nod3D (gen_support.F90:99-198). Each owned node's value
+ * at level nz becomes the area-weighted mean of the three vertices of every
+ * surrounding element that reaches level nz:
+ *     arr(nz,n) = Σ_el area_el·(arr(nz,V1)+arr(nz,V2)+arr(nz,V3)) / (3·Σ_el area_el)
+ * Elements that bottom out above nz drop from both sums (so the patch shrinks
+ * with depth, matching Fortran's `nle = min(nln, nlevels(el))`). One full sweep
+ * per smoothing cycle, each followed by a halo exchange. The inverse patch area
+ * `vol` is built on the first sweep and reused by later sweeps, exactly as the
+ * Fortran. The caller must have a valid halo `arr` on entry (the sweep reads halo
+ * vertices); the bvfreq use provides that via the preceding fesom_exchange_nod3D
+ * (Fortran fills bvfreq on myDim+eDim instead, then smooths). Used for N² with
+ * N2smth_h=.true., N2smth_hidx=1 (oce_modules.F90:105). */
+void fesom_smooth_nod3D(real_t *arr, int nl, int n_smooth,
+                        const struct fesom_mesh *mesh, struct fesom_partit *p)
+{
+    if (n_smooth < 1) return;
+    const int Nmy = mesh->myDim_nod2D;
+    const size_t sz = (size_t)Nmy * (size_t)nl;
+    real_t *vol  = malloc(sz * sizeof(real_t));
+    real_t *work = malloc(sz * sizeof(real_t));
+    FESOM_CHECK(vol && work, "fesom_smooth_nod3D: out of memory");
+
+    for (int sweep = 0; sweep < n_smooth; ++sweep) {
+        for (int n = 0; n < Nmy; ++n) {
+            int uln  = mesh->ulevels_nod2D[n] - 1;     /* 0-based first level   */
+            int nlnz = mesh->nlevels_nod2D[n] - 1;     /* 0-based deepest level */
+            for (int nz = uln; nz <= nlnz; ++nz) {
+                if (sweep == 0) vol[(size_t)n*nl + nz] = 0.0;
+                work[(size_t)n*nl + nz] = 0.0;
+            }
+            int o0 = mesh->nod_in_elem2D_offsets[n];
+            int o1 = mesh->nod_in_elem2D_offsets[n + 1];
+            for (int k = o0; k < o1; ++k) {
+                int el  = mesh->nod_in_elem2D[k];
+                int ule = mesh->ulevels[el] - 1;  if (ule < uln)  ule = uln;
+                int nle = mesh->nlevels[el] - 1;  if (nle > nlnz) nle = nlnz;
+                real_t a = mesh->elem_area[el];
+                int v0 = mesh->elem_nodes[3*el + 0];
+                int v1 = mesh->elem_nodes[3*el + 1];
+                int v2 = mesh->elem_nodes[3*el + 2];
+                for (int nz = ule; nz <= nle; ++nz) {
+                    if (sweep == 0) vol[(size_t)n*nl + nz] += a;
+                    work[(size_t)n*nl + nz] += a * ( arr[(size_t)v0*nl + nz]
+                                                   + arr[(size_t)v1*nl + nz]
+                                                   + arr[(size_t)v2*nl + nz] );
+                }
+            }
+            /* invert the patch area once (1/(3·Σarea)); reused on later sweeps */
+            if (sweep == 0)
+                for (int nz = uln; nz <= nlnz; ++nz)
+                    vol[(size_t)n*nl + nz] = 1.0 / (3.0 * vol[(size_t)n*nl + nz]);
+        }
+        /* combined scale + copy back to owned nodes (halo overwritten by exchange) */
+        for (int n = 0; n < Nmy; ++n) {
+            int uln  = mesh->ulevels_nod2D[n] - 1;
+            int nlnz = mesh->nlevels_nod2D[n] - 1;
+            for (int nz = uln; nz <= nlnz; ++nz)
+                arr[(size_t)n*nl + nz] = work[(size_t)n*nl + nz] * vol[(size_t)n*nl + nz];
+        }
+        fesom_exchange_nod3D(arr, nl, p);
+    }
+    free(vol);
+    free(work);
 }
 
 /*--- pressure_force_4_linfs_fullcell ---------------------------------------

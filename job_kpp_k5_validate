@@ -1,0 +1,57 @@
+#!/bin/bash
+#SBATCH --job-name=kpp_k5_val
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/kpp_k5_validate/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/kpp_k5_validate/slurm.%j.err
+
+# Phase K5 validation (bldepth + driver pre-step + dbsfc + bvfreq fix):
+#  (a) KPP partial-driver dump run (nsteps=1, dt=1800, 16r, FESOM_MIX_SCHEME=KPP):
+#      runs pre-step (dVsq/ustar/Bo) + ri_iwmix + bldepth at step 1, dumps
+#      prestep/dVsq/dbsfc/bldepth/ri_* then continues (dump run; aux Kv/Av
+#      untouched -> 1 step is safe). Compare vs the existing Fortran reference
+#      (/work/.../kpp_fdump/dump, KPP/linfs/dt=1800/16r). ri_bvfreq should now be
+#      TIGHT (the horizontal N2 smoothing + bottom-pad fix make C bvfreq match
+#      Fortran); hbl/kbl chased by region, isolating algebra from PHC IC noise.
+#  (b) PP re-baseline: KPP off, 200 steps dt=500. Confirms smooth_nod3D is stable
+#      (it now runs for PP too) and QUANTIFIES the bvfreq-induced shift vs the old
+#      pre-fix HEAD (byte-identity is intentionally broken by the faithful fix).
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+BASE=/work/ab0995/a270088/port/kpp_k5_validate
+mkdir -p "$BASE/kpp_dump" "$BASE/pp"
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+JRA55_YEAR=1958
+FREF=/work/ab0995/a270088/port/kpp_fdump/dump
+HEAD_REF=/work/ab0995/a270088/port/kpp_k0_byteident/head
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+SRC=/home/a/a270088/port2/fesom2_port
+
+date
+echo "=== (a) C KPP partial-driver dump (pre-step + ri_iwmix + bldepth; nsteps=1, dt=1800) ==="
+FESOM_MIX_SCHEME=KPP FESOM_KPP_DUMP_DIR=$BASE/kpp_dump FESOM_KPP_DUMP_STEP=1 \
+  srun -l "$BIN" "$MESH" "$BASE/kpp_dump" 1800 1 -1 "$PHC" "$JRA55_YEAR" \
+  > "$BASE/kpp_dump/run.log" 2> "$BASE/kpp_dump/run.err"
+echo "KPP dump-run exit: $?  (dump files:)"
+ls "$BASE/kpp_dump"/kpp_dump_s1_*_rank0.txt 2>/dev/null
+
+echo "=== (a) diff C vs Fortran reference (all tags) ==="
+PYTHONPATH=/home/a/a270088/PYTHON "$PY" "$SRC/scripts/kpp_dump_diff.py" "$FREF" "$BASE/kpp_dump"
+
+echo "=== (b) C PP re-baseline (nsteps=200, dt=500, KPP off) ==="
+srun -l "$BIN" "$MESH" "$BASE/pp" 500 200 200 "$PHC" "$JRA55_YEAR" \
+  > "$BASE/pp/run.log" 2> "$BASE/pp/run.err"
+echo "PP run exit: $?"
+
+echo "=== (b) bvfreq-induced shift vs old pre-fix HEAD (expected NON-zero now) ==="
+PYTHONPATH=/home/a/a270088/PYTHON "$PY" \
+  "$SRC/scripts/kpp_byteident_check.py" "$HEAD_REF" "$BASE/pp" || true
+date
