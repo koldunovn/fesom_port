@@ -729,10 +729,14 @@ static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_
     { "u",       "zonal velocity",                 "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_u       },
     { "v",       "meridional velocity",            "m/s",    FESOM_VAR_3D_ELEM_MID,   resolve_v       },
     { "w",       "vertical velocity at interfaces","m/s",    FESOM_VAR_3D_NODE_IFACE, resolve_w       },
-    { "Kv",      "vertical diffusivity",           "m^2/s",  FESOM_VAR_3D_NODE_MID,   resolve_Kv      },
+    /* Kv and bvfreq (N^2) are INTERFACE quantities (defined at the nl level
+     * interfaces, like w), so they must be written on nz (nl=48) — matching the
+     * Fortran. They were wrongly registered as NODE_MID (nz_1=47), which dropped
+     * the bottom interface and mislabelled the depths as layer mid-points. */
+    { "Kv",      "vertical diffusivity",           "m^2/s",  FESOM_VAR_3D_NODE_IFACE, resolve_Kv      },
     { "Av",      "vertical viscosity",             "m^2/s",  FESOM_VAR_3D_ELEM_MID,   resolve_Av      },
     { "density", "in-situ density minus rho0",     "kg/m^3", FESOM_VAR_3D_NODE_MID,   resolve_density },
-    { "bvfreq",  "Brunt-Vaisala frequency squared","s^-2",   FESOM_VAR_3D_NODE_MID,   resolve_bvfreq  },
+    { "bvfreq",  "Brunt-Vaisala frequency squared","s^-2",   FESOM_VAR_3D_NODE_IFACE, resolve_bvfreq  },
     /* Ice fields (skipped when state->ice == NULL — see fesom_io_init) */
     { "a_ice",   "ice area fraction",              "1",      FESOM_VAR_2D_NODE,       resolve_a_ice   },
     { "m_ice",   "ice volume per area",            "m",      FESOM_VAR_2D_NODE,       resolve_m_ice   },
