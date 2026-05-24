@@ -120,9 +120,10 @@ static void load_one_variable(int ncid, const char *varname,
     int varid;
     NC_CHECK(nc_inq_varid(ncid, varname, &varid));
 
-    /* Read indices [0, Nlon-3] in 0-based — i.e. file indices 1..Nlon-2 in
-       Fortran 1-based. This skips the file's first and last lon entries. */
-    size_t start[3] = { 0, 0, 1 };          /* depth, lat, lon */
+    /* Nlon is the PADDED count (real+2); read all `nint = Nlon-2` real columns
+       from file lon index 0 into the padded interior ncdata[1..Nlon-2]. The two
+       halo columns [0] and [Nlon-1] are filled by the wrap copies below. */
+    size_t start[3] = { 0, 0, 0 };          /* depth, lat, lon */
     size_t count[3] = { (size_t)Ndepth, (size_t)Nlat, nint };
     NC_CHECK(nc_get_vara_double(ncid, varid, start, count, tmp));
 
@@ -417,22 +418,29 @@ void fesom_phc_load_ic(const char                  *path,
     }
     printf("[fesom_phc] %s : Nlon=%d  Nlat=%d  Ndepth=%d\n", path, Nlon, Nlat, Ndepth);
 
-    double *nc_lon   = malloc((size_t)Nlon   * sizeof(double));
+    /* Cyclic halo padding (Fortran gen_ic3d.F90:167,186-189,213-215): the lon
+       axis is periodic, so allocate Nlon+2 and keep ALL `Nlon` real columns in
+       nc_lon[1..Nlon], with wrap-around halo cells at [0] (= last real − 360)
+       and [Nlon+1] (= first real + 360). ncdata is padded identically in
+       load_one_variable. (The previous code dropped the first/last real columns
+       and shifted them by ±360 in place — breaking the interpolation within ~2°
+       of lon 0/360, e.g. the western Med.) */
+    double *nc_lon   = malloc((size_t)(Nlon + 2) * sizeof(double));
     double *nc_lat   = malloc((size_t)Nlat   * sizeof(double));
     double *nc_depth = malloc((size_t)Ndepth * sizeof(double));
     FESOM_CHECK(nc_lon && nc_lat && nc_depth, "phc: oom (coord arrays)");
     {
         int varid;
         if (nc_inq_varid(ncid, "lon", &varid) != NC_NOERR) NC_CHECK(nc_inq_varid(ncid, "LON", &varid));
-        NC_CHECK(nc_get_var_double(ncid, varid, nc_lon));
+        NC_CHECK(nc_get_var_double(ncid, varid, nc_lon + 1));   /* real lons -> [1..Nlon] */
         if (nc_inq_varid(ncid, "lat", &varid) != NC_NOERR) NC_CHECK(nc_inq_varid(ncid, "LAT", &varid));
         NC_CHECK(nc_get_var_double(ncid, varid, nc_lat));
         if (nc_inq_varid(ncid, "depth", &varid) != NC_NOERR) NC_CHECK(nc_inq_varid(ncid, "DEPTH", &varid));
         NC_CHECK(nc_get_var_double(ncid, varid, nc_depth));
     }
-    /* Cyclic wrap (Fortran lines 213-216). */
-    nc_lon[0]        -= 360.0;
-    nc_lon[Nlon - 1] += 360.0;
+    nc_lon[0]        = nc_lon[Nlon] - 360.0;   /* west wrap halo */
+    nc_lon[Nlon + 1] = nc_lon[1]    + 360.0;   /* east wrap halo */
+    Nlon += 2;   /* Nlon is now the PADDED count; real cells at [1..Nlon-2] */
 
     /* nc_ic3d_ini: per-node bilin_indx (Fortran 281-299, non-cavity branch). */
     int *bilin_i = malloc((size_t)mesh->myDim_nod2D * sizeof(int));
