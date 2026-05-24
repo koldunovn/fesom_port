@@ -48,28 +48,53 @@ was ported in earlier phases and accepted at the *climate* level (RMS ~0.04), ne
 bit-identical at step 1. So this is a long-standing residual now made visible by the first
 consumer that reads the forcing-derived `ustar`/`Bo` per node at step 1.
 
-## Hypotheses (ranked) + investigation plan
+## Dig results (2026-05-25) — CONFIRMED: it is the sea-ice ocean-surface stress
 
-The two fields fail differently, suggesting two causes:
+**Geographic test (`/tmp/forcing_geo.py`, C kpp_k6_validate vs Fortran kpp_fdump, gid→lat via the
+mesh diag) settles it.** ustar diffs are concentrated in the polar/ice regions and ZERO (bit-
+identical, max|Δ|~1e-15) in ice-free latitudes:
 
-- **`stress_node_surf` differs at ~29% (region/state-dependent), bit-identical elsewhere** →
-  most likely the **sea-ice ocean-surface stress**: ice-covered nodes use ice–ocean stress (a
-  function of the ice state + ice velocity), open-water nodes use atm–ocean stress. A small step-1
-  ice-state or ice-velocity difference (EVP, a_ice/m_ice IC interp) would perturb stress exactly on
-  the ice-covered subset. **Test:** map the 37004 differing gids → lat/ice-cover (`a_ice` at step1);
-  expect them concentrated under ice. Compare `stress_surf`/`stress_node_surf` and `a_ice`/`uice`
-  C-vs-Fortran at step 1. Files: `fesom_ice*.c` (EVP, ice–ocean stress), `fesom_bulk.c` (atm–ocean τ).
-- **`heat_flux`/`water_flux` differ ~everywhere by small amounts** → a systematic difference in the
-  **bulk-flux assembly** (L&Y09): a longwave/sensible/latent component, the SST/humidity/air-temp
-  inputs, the transfer-coefficient iteration, or runoff/precip in `water_flux`. **Test:** dump
-  `heat_flux`, `water_flux` (and their components: SW/LW/sensible/latent) from BOTH codes at step 1
-  and diff component-by-component to localize. Files: `fesom_bulk.c` (`fesom_bulk_compute`,
-  `Ch_atm_oce`/`Ce_atm_oce`), `fesom_forcing.c` (JRA interp), `fesom_ice_thermodynamics`
-  (heat_flux assembly incl. the runoff fold, [[feedback_runoff_fold_when_ice]]).
+| band | frac(\|Δustar\|>1e-9) | max\|Δustar\| |
+|---|---|---|
+| Antarctic <−60 | 77% | 3.0e-3 |
+| Arctic >60 | 78% | 3.0e-3 |
+| N mid 40–60 (ice edge) | 11% | 9.9e-4 |
+| Tropics / subtropics / S-mid 40 | **~0%** | **~1e-15 (bit-identical)** |
 
-**To reproduce / extend the evidence:** the K5 dump already has C `ustar`/`Bo`; add Fortran+C dumps
-of `heat_flux`/`water_flux`/`stress_node_surf` (+ components) at step 1, 16r, and diff with
-`scripts/kpp_dump_diff.py`. Bin the ustar-differing gids by latitude / ice cover.
+Large ustar diffs (>1e-4): **100% at |lat|>50, 95% at |lat|>60**, median |lat|=74. Bo follows the
+same pattern (polar max ~2.5e-6 vs tropical ~2.5e-9). So **ice-free forcing is bit-identical; the
+whole difference is the sea-ice contribution** (over-ice stress + over-ice heat/water flux).
+
+**Mechanism + narrowing (code-verified).** `stress_node_surf` over ice (`fesom_ice_coupling.c:223-234`,
+matching Fortran `ice_oce_coupling.F90:112-120` line-for-line):
+`sns = stress_iceoce·a_ice + stress_atmoce·(1−a_ice)`, with
+`stress_iceoce = ρ·cd_oce_ice·|u_ice−u_w|·(u_ice−u_w)`. The atm-ocean term is bit-identical
+(ice-free ustar proves it). At **step 1 the ocean is at rest → `u_w` (=srfoce) = 0**, so the
+over-ice stress collapses to `ρ·cd·|u_ice|·u_ice·a_ice`. Hence the difference is the **step-1 EVP
+ice velocity `u_ice`/`v_ice`** (and/or the `a_ice` IC blend weight). The EVP is iterative + sensitive
+and the sea-ice port was validated at the *climate/advection* level ([[project_sea_ice_port_state]]),
+NOT step-1 bit-identity — exactly the kind of small step-1 transient that perturbs `u_ice`. Bo's
+polar part is the analogous over-ice heat-flux difference (ice thermodynamics, depends on ice state).
+
+## Definitive next step (ready to run)
+
+Cross-dump the step-1 ice state both codes, keyed by node gid, 16r (same partition):
+`a_ice, m_ice, u_ice, v_ice, srfoce_u, srfoce_v, stress_iceoce_x/y, stress_node_surf_x/y`.
+- **C:** add an env-gated dump in `fesom_step.c` (has `ctx->ice` + `forcing`) right at the KPP
+  point, reusing `fesom_kpp_dump_nodes`.
+- **Fortran:** add the matching dump in `ice_oce_coupling.F90` (the `stress2oce` routine has
+  `ice%`/`u_ice`/`a_ice`/`u_w` + `stress_node_surf` in scope) at step 1.
+Then diff with `scripts/kpp_dump_diff.py` + bin by lat. Expected: `srfoce≈0` and `a_ice` ~matching →
+the signal is `u_ice`/`v_ice` (EVP). If so, the root is the step-1 EVP solve; chase the EVP inputs
+(`stress_atmice`, ice strength P*, substep count, the EVP α/β) C-vs-Fortran — reuse
+[[reference_evp_dump_diagnostic]]. A quick climate-level cross-check: add `a_ice`/`uice` to
+`scripts/kpp_climate_compare.py` (K9 outputs them) to see whether the ice state stays close in the
+mean (transient) or drifts (structural).
+
+**Heat/water-flux (Bo) tiny non-polar residual (~1e-9, rel ~1e-3):** a secondary, much smaller
+bulk-flux-assembly difference (SW/LW/sensible/latent or SST/humidity). Dump `heat_flux`/`water_flux`
+components if the ice-stress fix doesn't also resolve it. Files: `fesom_bulk.c`, `fesom_forcing.c`,
+`fesom_ice_thermodynamics` ([[feedback_runoff_fold_when_ice]]).
 
 ## Pointers
 
