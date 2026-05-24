@@ -164,11 +164,11 @@ consumed by `enhance:1163-1177`), plus the wm/ws lookup tables and scalars `Vtc`
 - [x] Add `FESOM_KPP_DUMP_DIR` dumps: C `fesom_kpp_dump_nodes` + Fortran gate (`kpp_dump_load_env`/`kpp_dump_nod`/`kpp_dump_prestep`/`kpp_dump_final`, FESOM_KPP_DUMP_STEP, call counter). `scripts/kpp_dump_diff.py` written. Fortran dump run = `work_kpp_dump` (linfs, dt=1800, 16r) → `/work/.../kpp_fdump/dump` (8 tags: prestep/dVsq/dbsfc/bldepth/viscA/diffKt/diffKs/ghats; diff-script self-parse 0.000e+00).
 - [x] **Validate:** with KPP off, byte-identical to HEAD `028cc1b` (PP regression). ✅ `job_kpp_k0_byteident` (16r/200steps/dt=500): all snapshots + run.log diagnostics **bit-for-bit identical** (worst |Δ|=0.000e+00); `scripts/kpp_byteident_check.py`.
 
-### Phase K1: `oce_mixing_kpp_init` — lookup tables + constants
-**Files:** Modify `src/fesom_kpp.{c,h}`
-- [ ] Port the wm/ws 2D lookup table: `nni=890`, `nnj=480`, allocate `0:nni+1 × 0:nnj+1` (=892×482), `deltaz/deltau` steps, exact build loops (`:101-210`).
-- [ ] Set constants from the verified table: `Ricr=0.3`, `A_ver=1e-4`, `K_ver=1e-5`, `visc_sh_limit=5e-3`, `diff_sh_limit=5e-3`, `Riinfty=0.8`, `minmix=3e-3`, `cekman=0.7`, `cmonob=1.0`, `double_diffusion=.false.`, `smooth_blmc=.true.`, `smooth_hbl=.false.`, `Kv0_const=.true.`; derive `Vtc` (`:167`), `cg` (`:178`).
-- [ ] **Validate:** dump full lookup table + every constant from both codes; diff bit/≤1e-12.
+### Phase K1: `oce_mixing_kpp_init` — lookup tables + constants ✅
+**Files:** Modify `src/fesom_kpp.{c,h}`, `src/fesom_main.c`; `scripts/kpp_init_reference.py`
+- [x] Ported the wm/ws 2D lookup table: `nni=890`, `nnj=480`, `[(nni+2)·(nnj+2)]`=892×482 each, `deltaz/deltau`, exact build loops (`:194-219`). `fesom_kpp_init` wired in `main` after alloc (harmless under PP).
+- [x] Constants in `fesom_kpp.c` (KPP_*): `Ricr=0.3`, `concv=1.6`, A_ver/K_ver reuse FESOM_PHASE1_* (1e-4/1e-5), `visc/diff_sh_limit=5e-3`, `Riinfty=0.8`, `minmix=3e-3`, `cekman=0.7`, `cmonob=1.0`, `epsilon_kpp=0.1`, `vonk=0.4`, `conc1=5`, `epsln=1e-40`, zmin/zmax/umin/umax; derived `Vtc` (`:177`), `cg` (`:188`).
+- [x] **Validate:** full table + 4 constants dumped (C `fesom_kpp_dump_init` + Fortran gate) vs independent `scripts/kpp_init_reference.py`. **Vtc/cg/deltaz/deltau bit-identical C-vs-Fortran (|Δ|=0); wmt/wst C-vs-F max|Δ|=3.5e-18 (max_rel ~4e-16, libm last-ULP), well within ≤1e-12.** Both codes also match the python reference to ~4e-16. (`job_kpp_k1_validate`.)
 
 ### Phase K2: `wscale` — turbulent velocity scales
 **Files:** Modify `src/fesom_kpp.c`

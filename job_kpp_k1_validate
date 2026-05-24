@@ -1,0 +1,50 @@
+#!/bin/bash
+#SBATCH --job-name=kpp_k1_val
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/kpp_k1_validate/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/kpp_k1_validate/slurm.%j.err
+
+# Phase K1 validation:
+#  (a) byte-identity recheck — K1 binary with KPP off vs the saved HEAD run
+#      (init only fills the kpp struct; PP path unchanged → must stay identical).
+#  (b) init-dump capture — fesom_kpp_dump_init writes kpp_init_rank0.txt for the
+#      lookup-table + constants compare vs scripts/kpp_init_reference.py + Fortran.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+BASE=/work/ab0995/a270088/port/kpp_k1_validate
+OUT_K1=$BASE/k1
+HEAD_REF=/work/ab0995/a270088/port/kpp_k0_byteident/head   # existing HEAD baseline
+mkdir -p "$OUT_K1" "$BASE/initdump"
+export FESOM_KPP_DUMP_DIR=$BASE/initdump   # captures kpp_init_rank0.txt at setup
+
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+DT=500; NSTEPS=200; SNAP_EVERY=50
+export FESOM_PRINT_EVERY=50
+JRA55_YEAR=1958
+# default mixing = PP (KPP off).
+
+date
+srun -l "$BIN" "$MESH" "$OUT_K1" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_K1/run.log" 2> "$OUT_K1/run.err"
+echo "K1 exit: $?"
+date
+
+echo "=== byte-identity vs HEAD (must be PASS) ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+PYTHONPATH=/home/a/a270088/PYTHON "$PY" \
+    /home/a/a270088/port2/fesom2_port/scripts/kpp_byteident_check.py "$HEAD_REF" "$OUT_K1"
+
+echo "=== K1 init dump vs independent python reference ==="
+"$PY" /home/a/a270088/port2/fesom2_port/scripts/kpp_init_reference.py \
+    "$BASE/initdump/kpp_init_rank0.txt"
+echo "=== init dump file ==="
+ls -la "$BASE/initdump/"

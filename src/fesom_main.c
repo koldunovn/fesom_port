@@ -339,9 +339,12 @@ int main(int argc, char **argv)
     fesom_forcing forcing; fesom_forcing_alloc(&forcing, &mesh);
     fesom_gm      gm;      fesom_gm_alloc     (&gm,     &mesh);
     /* KPP mixing state (mirrors o_mixing_KPP_mod). Allocated unconditionally
-     * like gm; used only when FESOM_MIX_SCHEME=KPP. fesom_kpp_init (lookup
-     * tables + constants) is wired in Phase K1. */
+     * like gm; used only when FESOM_MIX_SCHEME=KPP. fesom_kpp_init builds the
+     * wm/ws lookup tables + Vtc/cg once (Fortran oce_mixing_kpp_init in setup);
+     * harmless under PP (touches only the kpp struct). */
     fesom_kpp     kpp;     fesom_kpp_alloc    (&kpp,    &mesh, tracers.num_tracers);
+    fesom_kpp_init(&kpp);
+    fesom_kpp_dump_init(&kpp, mpi.mype);   /* K1 validation dump (FESOM_KPP_DUMP_DIR-gated) */
 
     /* Sea-ice state (Phase A: allocator + no-op driver only).
      * fesom_ice_setup needs the ocean dt to compute Tevp_inv, so it runs

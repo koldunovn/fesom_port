@@ -6,12 +6,44 @@
  */
 #include "fesom_kpp.h"
 #include "fesom_aux.h"
+#include "fesom_constants.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/*===========================================================================
+ * KPP constants — verified against oce_ale_mixing_kpp.F90 + the CORE2
+ * reference namelists (docs/kpp_reference_namelists/). Module parameters and
+ * namelist values that the CORE2/KPP run uses. A_ver/K_ver reuse the shared
+ * FESOM_PHASE1_{A,K}_VER (== the CORE2 1e-4 / 1e-5; same constant as PP).
+ *===========================================================================*/
+/* module parameters (oce_ale_mixing_kpp.F90:50-59) */
+#define KPP_EPSLN        1.0e-40    /* epsln  (:50)  */
+#define KPP_EPSILON      0.1        /* epsilon_kpp (:52) */
+#define KPP_VONK         0.4        /* vonk   (:53)  */
+#define KPP_CONC1        5.0        /* conc1  (:54)  */
+#define KPP_ZMIN        (-4.0e-7)   /* zmin   (:56)  lookup-table zehat min */
+#define KPP_ZMAX         0.0        /* zmax   (:57)  */
+#define KPP_UMIN         0.0        /* umin   (:58)  lookup-table ustar min */
+#define KPP_UMAX         0.04       /* umax   (:59)  */
+/* namelist values (work_core; module defaults coincide except A_ver) */
+#define KPP_RICR         0.3        /* Ricr   (namelist.oce:70) */
+#define KPP_CONCV        1.6        /* concv  (namelist.oce:71) */
+#define KPP_VISC_SH_LIMIT 5.0e-3    /* visc_sh_limit (namelist.oce:66) */
+#define KPP_DIFF_SH_LIMIT 5.0e-3    /* diff_sh_limit (namelist.tra:97) */
+/* in-routine constants used in later phases (K3/K5/K7) */
+#define KPP_RIINFTY      0.8        /* ri_iwmix shear-Ri shape limit (:737) */
+#define KPP_MINMIX       3.0e-3     /* surface viscAE floor (driver :408)   */
+#define KPP_CEKMAN       0.7        /* bldepth Ekman limit (:478)           */
+#define KPP_CMONOB       1.0        /* bldepth Monin-Obukhov limit (:479)   */
+
+/* wm/ws lookup-table index: Fortran wmt(0:nni+1, 0:nnj+1), i in [0,nni+1],
+ * j in [0,nnj+1]. Row-major with i as the row (nnj+2 columns). */
+#define KPP_TBL(i, j)  ((size_t)(i) * (size_t)(FESOM_KPP_NNJ + 2) + (size_t)(j))
 
 /*===========================================================================
  * Allocation — mirrors oce_mixing_kpp_init's allocate block
@@ -66,14 +98,54 @@ void fesom_kpp_free(fesom_kpp *k)
 }
 
 /*===========================================================================
- * One-time init — Vtc, cg, deltaz/deltau, wm/ws lookup tables
- * (oce_mixing_kpp_init, :157-209). PHASE K1 — body lands next.
+ * One-time init — Vtc, cg, deltaz/deltau, wm/ws lookup tables.
+ * Literal port of oce_mixing_kpp_init (:111-220), constant block + table build.
+ * (The Fortran allocate+zero is handled by fesom_kpp_alloc's calloc.)
  *===========================================================================*/
 void fesom_kpp_init(fesom_kpp *k)
 {
-    (void)k;
-    /* Phase K1: build wmt/wst (nni=890, nnj=480) + derive Vtc (:167), cg (:178).
-     * Stub for K0 (KPP path aborts before this matters). */
+    /* table-build parameters (oce_ale_mixing_kpp.F90:115-123) */
+    const real_t cstar = 10.0,    conam = 1.257, concm = 8.380;
+    const real_t conc2 = 16.0,    zetam = -0.2;
+    const real_t conas = -28.86,  concs = 98.96, conc3 = 16.0, zetas = -1.0;
+
+    /* Vtc (eqn 23, :177): concv * sqrt(0.2/concs/epsilon_kpp) / vonk^2 / Ricr */
+    k->Vtc = KPP_CONCV * sqrt(0.2 / concs / KPP_EPSILON)
+             / (KPP_VONK * KPP_VONK) / KPP_RICR;
+
+    /* cg (eqn 20, :188): cstar * vonk * (concs * vonk * epsilon_kpp)^(1/3) */
+    k->cg = cstar * KPP_VONK * pow(concs * KPP_VONK * KPP_EPSILON, 1.0 / 3.0);
+
+    /* table steps (:194-195): real(nni+1)/real(nnj+1) divisor */
+    k->deltaz = (KPP_ZMAX - KPP_ZMIN) / (real_t)(FESOM_KPP_NNI + 1);
+    k->deltau = (KPP_UMAX - KPP_UMIN) / (real_t)(FESOM_KPP_NNJ + 1);
+
+    /* wm/ws tables (eqn 13 & B1, :197-219) */
+    for (int i = 0; i <= FESOM_KPP_NNI + 1; ++i) {
+        real_t zehat = k->deltaz * (real_t)i + KPP_ZMIN;
+        for (int j = 0; j <= FESOM_KPP_NNJ + 1; ++j) {
+            real_t usta = k->deltau * (real_t)j + KPP_UMIN;
+            real_t zeta = zehat / (usta * usta * usta + KPP_EPSLN);
+            real_t wm, ws;
+            if (zehat >= 0.0) {
+                wm = KPP_VONK * usta / (1.0 + KPP_CONC1 * zeta);
+                ws = wm;
+            } else {
+                if (zeta > zetam)
+                    wm = KPP_VONK * usta * pow(1.0 - conc2 * zeta, 1.0 / 4.0);
+                else
+                    wm = KPP_VONK * pow(conam * usta*usta*usta - concm * zehat,
+                                        1.0 / 3.0);
+                if (zeta > zetas)
+                    ws = KPP_VONK * usta * pow(1.0 - conc3 * zeta, 1.0 / 2.0);
+                else
+                    ws = KPP_VONK * pow(conas * usta*usta*usta - concs * zehat,
+                                        1.0 / 3.0);
+            }
+            k->wmt[KPP_TBL(i, j)] = wm;
+            k->wst[KPP_TBL(i, j)] = ws;
+        }
+    }
 }
 
 /*===========================================================================
@@ -120,6 +192,24 @@ int fesom_kpp_dump_this_step(int step_n)
 {
     kpp_dump_load_env();
     return s_kpp_dump_dir && (step_n == s_kpp_dump_step);
+}
+
+void fesom_kpp_dump_init(const fesom_kpp *k, int rank)
+{
+    kpp_dump_load_env();
+    if (!s_kpp_dump_dir || rank != 0) return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/kpp_init_rank0.txt", s_kpp_dump_dir);
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "kpp_dump_init: cannot open %s\n", path); return; }
+    fprintf(f, "# Vtc %.17g\n# cg %.17g\n# deltaz %.17g\n# deltau %.17g\n",
+            k->Vtc, k->cg, k->deltaz, k->deltau);
+    fprintf(f, "# i j wmt wst  (nni=%d nnj=%d)\n", FESOM_KPP_NNI, FESOM_KPP_NNJ);
+    for (int i = 0; i <= FESOM_KPP_NNI + 1; ++i)
+        for (int j = 0; j <= FESOM_KPP_NNJ + 1; ++j)
+            fprintf(f, "%d %d %.17g %.17g\n", i, j,
+                    k->wmt[KPP_TBL(i, j)], k->wst[KPP_TBL(i, j)]);
+    fclose(f);
 }
 
 void fesom_kpp_dump_nodes(const struct fesom_mesh *mesh,

@@ -119,6 +119,12 @@ void fesom_kpp_mixing(fesom_kpp               *k,
 /* Returns the dump dir (cached) or NULL if FESOM_KPP_DUMP_DIR unset. */
 const char *fesom_kpp_dump_dir(void);
 
+/* K1 init dump: rank 0 writes <dir>/kpp_init_rank0.txt — the 4 init scalars
+ * (Vtc, cg, deltaz, deltau) + the full wm/ws lookup table (`i j wmt wst`).
+ * No-op unless FESOM_KPP_DUMP_DIR is set. Compared vs the Fortran gate +
+ * scripts/kpp_init_reference.py. */
+void fesom_kpp_dump_init(const fesom_kpp *k, int rank);
+
 /* True on the step we dump (default step 1; override FESOM_KPP_DUMP_STEP). */
 int fesom_kpp_dump_this_step(int step_n);
 
