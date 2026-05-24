@@ -1,0 +1,35 @@
+#!/bin/bash
+#SBATCH --job-name=pp3yr_bvfix
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=01:40:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/pp_3yr_bvfreqfix/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/pp_3yr_bvfreqfix/slurm.%j.err
+# PP RE-BASELINE after the K5 bvfreq N2 fix (commit 5acabea: ported the missing
+# N2smth_h horizontal smoothing + fixed the bvfreq bottom-pad). PP now carries the
+# smoothing Fortran-PP always had, so this run RE-VALIDATES the d1800 PP climate
+# vs fortran_pp_2yr (first 2 yr) and confirms multi-year stability into yr 3
+# (watch the autumn transient, project_5yr_milestone). dt=1800, 3 yr (1958-1960),
+# 864r, PP (KPP off), linfs. snap_every -> only IC snapshot + monthly streams.
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/pp_3yr_bvfreqfix
+mkdir -p "$OUT"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt" 2>/dev/null
+export FESOM_DIAG_MICE=1
+export FESOM_PRINT_EVERY=1000
+# 3 yr = 1096 days * 48 steps/day = 52608; 52800 leaves a small margin into 1961.
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT" 1800 52800 100000 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+echo "--- last mice-mon ---"; grep '\[mice-mon\]' "$OUT/run.err" | tail -2
+echo "--- uv trajectory (every 4000) ---"; grep -E "^ *0: +[0-9]+ +it=" "$OUT/run.log" | awk 'NR%4==1'
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | head
+true
