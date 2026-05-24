@@ -20,6 +20,7 @@ size_t fesom_io_stream_accum_size(fesom_var_kind_t kind, int local_n, int local_
         case FESOM_VAR_3D_NODE_IFACE:  return (size_t)local_n * (size_t)nl;
         case FESOM_VAR_2D_ELEM:        return (size_t)local_e;
         case FESOM_VAR_3D_ELEM_MID:    return (size_t)local_e * (size_t)nl;
+        case FESOM_VAR_3D_ELEM_IFACE:  return (size_t)local_e * (size_t)nl;
         case FESOM_VAR_2D_ELEM_VEC:    return (size_t)local_e * 2;
     }
     FESOM_DIE("io_stream: unknown var kind %d", (int)kind);
@@ -34,6 +35,7 @@ size_t fesom_io_stream_global_size(fesom_var_kind_t kind, int nod2D, int elem2D,
         case FESOM_VAR_3D_NODE_IFACE:  return (size_t)nod2D * (size_t)nl;
         case FESOM_VAR_2D_ELEM:        return (size_t)elem2D;
         case FESOM_VAR_3D_ELEM_MID:    return (size_t)elem2D * (size_t)nl;
+        case FESOM_VAR_3D_ELEM_IFACE:  return (size_t)elem2D * (size_t)nl;
         case FESOM_VAR_2D_ELEM_VEC:    return (size_t)elem2D * 2;
     }
     FESOM_DIE("io_stream: unknown var kind %d", (int)kind);
@@ -48,6 +50,7 @@ int fesom_io_stream_n_layers_written(fesom_var_kind_t kind, int nl)
         case FESOM_VAR_3D_NODE_IFACE:  return nl;
         case FESOM_VAR_2D_ELEM:        return 0;
         case FESOM_VAR_3D_ELEM_MID:    return nl - 1;
+        case FESOM_VAR_3D_ELEM_IFACE:  return nl;
         case FESOM_VAR_2D_ELEM_VEC:    return 0;
     }
     return 0;

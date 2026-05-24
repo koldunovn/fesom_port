@@ -214,7 +214,8 @@ static void open_var_file(fesom_io_stream_t *s, int v, const fesom_calendar_t *c
         NC_CHECK(nc_def_dim(ncid, "elem", mesh->elem2D, &dim_space));
     }
     if (n_layers > 0) {
-        const char *lname = (kind == FESOM_VAR_3D_NODE_IFACE) ? "nz" : "nz_1";
+        const char *lname = (kind == FESOM_VAR_3D_NODE_IFACE
+                          || kind == FESOM_VAR_3D_ELEM_IFACE) ? "nz" : "nz_1";
         NC_CHECK(nc_def_dim(ncid, lname, n_layers, &dim_layers));
     }
     if (kind == FESOM_VAR_2D_ELEM_VEC) {
@@ -253,7 +254,8 @@ static void open_var_file(fesom_io_stream_t *s, int v, const fesom_calendar_t *c
     int var_z = -1;
     if (n_layers > 0) {
         int z_dim[1] = {dim_layers};
-        const char *zname = (kind == FESOM_VAR_3D_NODE_IFACE) ? "zbar" : "Z";
+        const char *zname = (kind == FESOM_VAR_3D_NODE_IFACE
+                          || kind == FESOM_VAR_3D_ELEM_IFACE) ? "zbar" : "Z";
         NC_CHECK(nc_def_var(ncid, zname, NC_DOUBLE, 1, z_dim, &var_z));
         NC_CHECK(nc_put_att_text(ncid, var_z, "units", 1, "m"));
         NC_CHECK(nc_put_att_text(ncid, var_z, "positive", 4, "down"));
@@ -295,7 +297,7 @@ static void open_var_file(fesom_io_stream_t *s, int v, const fesom_calendar_t *c
         NC_CHECK(nc_put_var_double(ncid, var_lat, s->cached_lat_elem));
     }
     if (n_layers > 0) {
-        if (kind == FESOM_VAR_3D_NODE_IFACE) {
+        if (kind == FESOM_VAR_3D_NODE_IFACE || kind == FESOM_VAR_3D_ELEM_IFACE) {
             NC_CHECK(nc_put_var_double(ncid, var_z, mesh->zbar));
         } else {
             NC_CHECK(nc_put_var_double(ncid, var_z, mesh->Z));
@@ -367,6 +369,7 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
             gather_elem(accum, 1, &s->gp, global, s->comm);
             break;
         case FESOM_VAR_3D_ELEM_MID:
+        case FESOM_VAR_3D_ELEM_IFACE:
             gather_elem(accum, nl, &s->gp, global, s->comm);
             break;
         case FESOM_VAR_2D_ELEM_VEC:

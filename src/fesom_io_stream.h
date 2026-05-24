@@ -45,6 +45,7 @@ typedef enum {
     FESOM_VAR_2D_ELEM       = 3,   /* [local_e]                              */
     FESOM_VAR_3D_ELEM_MID   = 4,   /* [local_e × nl]; nl-1 layers written    */
     FESOM_VAR_2D_ELEM_VEC   = 5,   /* [local_e × 2]                          */
+    FESOM_VAR_3D_ELEM_IFACE = 6,   /* [local_e × nl]; nl interfaces written  */
 } fesom_var_kind_t;
 
 typedef enum {
