@@ -909,17 +909,18 @@ void fesom_kpp_mixing(fesom_kpp                  *k,
             aux->Av[FESOM_ELEM3D(e, nzmin, nl)] = KPP_MINMIX;
     }
 
-    /* K7 dump: final module-gate fields (post-combine viscA/diffKt/diffKs/ghats + viscAE) */
+    /* K8: single Kv = diffK(:,:,1) (T-channel) over myDim+eDim, used for BOTH T
+     * and S tracer diffusion (oce_ale.F90:3518-3522). diffK ch0 (= slab 0) is
+     * halo-valid from the combine exchange; fesom_tracer_diff reads this single
+     * aux->Kv UNCHANGED (the S-channel diffK(:,:,2) is NOT routed into salinity in
+     * CORE2 — it only feeds the gated-off nonlocal flux). aux->Kv and k->diffK
+     * ch0 are both [n_nod*nl], so this is a full-slab copy. */
+    memcpy(aux->Kv, k->diffK, (size_t)k->n_nod * (size_t)nl * sizeof(real_t));
+
+    /* dump: final module-gate fields (post-combine viscA/diffKt/diffKs/ghats +
+     * viscAE); the post-copy aux->Kv == diffKt (the array the TDMA actually reads). */
     if (fesom_kpp_dump_this_step(s_kpp_call))
         kpp_dump_final(k, aux, mesh, partit);
-
-    /* Driver incomplete through K7: the single aux->Kv (=diffK ch1) copy over
-     * myDim+eDim and the step dispatch land K8. Only a FESOM_KPP_DUMP_DIR dump
-     * run (1 step) may proceed; aux->Kv is NOT yet the KPP value. */
-    if (!fesom_kpp_dump_dir())
-        FESOM_DIE("fesom_kpp_mixing: KPP driver incomplete (ported through K7 enhance+combine; "
-                  "single-Kv copy + step dispatch pending K8). Only a "
-                  "FESOM_KPP_DUMP_DIR dump run may proceed. Use FESOM_MIX_SCHEME=PP otherwise.");
 }
 
 /*===========================================================================

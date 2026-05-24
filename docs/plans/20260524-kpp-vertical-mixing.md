@@ -205,12 +205,12 @@ consumed by `enhance:1163-1177`), plus the wm/ws lookup tables and scalars `Vtc`
 - [x] Ported the combine + assembly (`:451-490`): `nz<kbl` → `viscA/diffK=fmax(interior,blmc)`, else `ghats=0`; exchanges on `diffK(1)`,`diffK(2)`,`ghats`(stride nl-1),`viscA`; node→elem `viscAE=Σ/3` into `aux->Av`; bottom fill `viscAE(nlevels)=viscAE(nlevels-1)`; surface `minmix=3e-3` floor.
 - [x] **Validate (controlled replay `job_kpp_k7_replay`):** inject Fortran bldepth/prestep/ri inputs → run the full K7 chain → final `viscA`/`diffKt`/`diffKs`/`ghats` + element `viscAE` vs Fortran = **0 signal, worst max|Δ|=3.18e-13** (smooth_nod3D + wscale libm) → K7 algebra bit-faithful. Every rank replays its own owned inputs so the smooth_blmc pre-exchange fills halos with Fortran-matching values. Added `fesom_kpp_dump_elems` (C) + `kpp_dump_elem`/viscAE in the Fortran `kpp_dump_final` (uncommitted, Intel tree).
 
-### Phase K8: wire KPP outputs into the step (single Kv; nonlocal flux stays GATED OFF)
-**Files:** Modify `src/fesom_step.c` (dispatch); `src/fesom_kpp.c` (Kv copy). **NOT** `fesom_tracer_diff.c`.
-- [ ] After the KPP combine, set the single `aux->Kv(:,node) = diffK(:,node,1)` (T-channel) over `myDim+eDim`, mirroring `oce_ale.F90:3518-3522`. **Do NOT** change `fesom_tracer_diff.c` — it keeps reading the single `aux->Kv` for all tracers (faithful: S uses the T-channel Kv in CORE2). The per-tracer `diffK` storage remains for the combine + deferred nonlocal flux only.
-- [ ] Keep `use_kpp_nonlclflx` gated **off** (CORE2): the `ghats`→tracer flux is NOT added. Leave a documented, flag-gated insertion point (full term in "Out of scope") for a future config.
-- [ ] Wire the KPP branch into `fesom_step.c` dispatch; keep `mo_convect` after KPP (both schemes).
-- [ ] **Validate:** PP byte-identical when KPP off; with KPP on, a few-step run finite; dump-compare the **post-copy single `aux->Kv`** (the array the TDMA actually reads) against the Fortran module `Kv` after `oce_ale.F90:3520` — NOT `Kv_double(:,:,2)` — plus `Av`/`viscAE`. (Routine-level K6/K7 dumps still compare both `diffK(:,:,1)` and `(:,:,2)`.)
+### Phase K8: wire KPP outputs into the step (single Kv; nonlocal flux stays GATED OFF) ✅
+**Files:** Modify `src/fesom_kpp.c` (Kv copy + guard removed). `src/fesom_step.c` dispatch already anticipated K8 (no change). **NOT** `fesom_tracer_diff.c`.
+- [x] At the end of `fesom_kpp_mixing`: `memcpy(aux->Kv, k->diffK ch0, n_nod*nl)` = single `aux->Kv = diffK(:,:,1)` (T-channel) over myDim+eDim (`oce_ale.F90:3518-3522`; diffK ch0 halo-valid from the combine exchange). `fesom_tracer_diff.c` UNCHANGED — reads the single `aux->Kv` for T AND S (S-channel diffK(:,:,2) NOT routed into salinity in CORE2). Removed the driver guard → KPP is a LIVE scheme.
+- [x] `use_kpp_nonlclflx` stays OFF: `ghats`→tracer flux NOT added (`fesom_tracer_diff.c` already skips it; ghats computed but unused, full term documented in "Out of scope").
+- [x] Dispatch in `fesom_step.c` was already written for K8 (`s_use_kpp` → `fesom_kpp_mixing`; `mo_convect` + the Kv/Av exchanges shared after) — no change needed.
+- [x] **Validate (`job_kpp_k8_validate`, 16r):** (a) KPP LIVE 100 steps dt=1800 = finite (exit 0, no NaN/uv>5, CG ~110/step vs PP ~90); (b) PP 200 steps dt=500, KPP off = **byte-identical** to the K5 PP run (snap_000000+snap_000200 worst |Δ|=0). K6/K7/K8 are KPP-only → PP unchanged.
 
 ### Phase K9: end-to-end climate validation vs fortran_2yr_dt1800
 **Files:** Create `scripts/kpp_climate_compare.py` (model on `clim_validation_2yr.py`), `job_kpp_2yr_dt1800`

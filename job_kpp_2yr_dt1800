@@ -1,0 +1,33 @@
+#!/bin/bash
+#SBATCH --job-name=kpp2yr_d1800
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=01:10:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/kpp_2yr_dt1800/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/kpp_2yr_dt1800/slurm.%j.err
+# Phase K9: end-to-end KPP climate validation. C + KPP (FESOM_MIX_SCHEME=KPP),
+# dt=1800, 2 yr (1958-1959), 864r, linfs. Compare to the Fortran KPP reference
+# /scratch/a/a270088/fortran_2yr_dt1800 (the DEFAULT CORE2 config). This is the
+# first C run that uses KPP for real (K0-K8 ported; bvfreq N2 fix in K5 already
+# made PP match Fortran-PP to ~0.004 RMS). snap_every -> IC snapshot + monthly.
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/kpp_2yr_dt1800
+mkdir -p "$OUT"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt" 2>/dev/null
+export FESOM_MIX_SCHEME=KPP
+export FESOM_DIAG_MICE=1
+export FESOM_PRINT_EVERY=1000
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT" 1800 35200 100000 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+echo "--- last mice-mon ---"; grep '\[mice-mon\]' "$OUT/run.err" | tail -2
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | head
+true
