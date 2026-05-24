@@ -8,7 +8,9 @@
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
+#include "fesom_eos.h"      /* fesom_smooth_nod3D (smooth_blmc) */
 #include "fesom_forcing.h"
+#include "fesom_halo.h"     /* fesom_exchange_nod3D (combine exchanges) */
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 #include "fesom_tracers.h"
@@ -576,6 +578,48 @@ static void kpp_blmix(fesom_kpp *k, const struct fesom_mesh *mesh)
     }
 }
 
+/*===========================================================================
+ * enhance — enhancement of the BL coeffs at the kbl-1 interface using dkm1.
+ * Literal port of enhance (oce_ale_mixing_kpp.F90:1346-1390). Blends the
+ * interior (caseA) coefficient, the BL coefficient, and dkm1 at k=kbl-1 with
+ * the fractional position delta. Channels 0/1/2 = momentum/T/S (T uses diffK
+ * ch1, S uses diffK ch2). Also scales ghats(kbl-1) by (1-caseA). Loops myDim.
+ *===========================================================================*/
+static void kpp_enhance(fesom_kpp *k, const struct fesom_mesh *mesh)
+{
+    const int nl = k->nl, N = k->n_nod, Nmy = mesh->myDim_nod2D;
+    const size_t slab = (size_t)N * (size_t)nl;
+    real_t *viscA  = k->viscA;
+    real_t *diffKt = k->diffK + 0 * slab, *diffKs = k->diffK + 1 * slab;
+    real_t *blmcM  = k->blmc  + 0 * slab, *blmcT  = k->blmc  + 1 * slab,
+           *blmcS  = k->blmc  + 2 * slab;
+
+    for (int n = 0; n < Nmy; ++n) {
+        int kk = k->kbl[n] - 1;                              /* k = kbl-1 (:1361) */
+        real_t caseA = k->caseA[n];
+        real_t zk  = mesh->zbar_3d_n[FESOM_NODE3D(n, kk,     nl)];
+        real_t zk1 = mesh->zbar_3d_n[FESOM_NODE3D(n, kk + 1, nl)];
+        real_t delta = (k->hbl[n] + zk) / (zk - zk1);        /* :1362 */
+        real_t om = 1.0 - delta, om2 = om * om, d2 = delta * delta;
+        size_t ik = FESOM_NODE3D(n, kk, nl);
+        real_t dkmp5, dstar;
+        /* momentum (:1365-1369) */
+        dkmp5 = caseA * viscA[ik] + (1.0 - caseA) * blmcM[ik];
+        dstar = om2 * k->dkm1[0 * N + n] + d2 * dkmp5;
+        blmcM[ik] = om * viscA[ik] + delta * dstar;
+        /* temperature (:1372-1376): diffK ch1 → blmc ch2 */
+        dkmp5 = caseA * diffKt[ik] + (1.0 - caseA) * blmcT[ik];
+        dstar = om2 * k->dkm1[1 * N + n] + d2 * dkmp5;
+        blmcT[ik] = om * diffKt[ik] + delta * dstar;
+        /* salinity (:1379-1383): diffK ch2 → blmc ch3 */
+        dkmp5 = caseA * diffKs[ik] + (1.0 - caseA) * blmcS[ik];
+        dstar = om2 * k->dkm1[2 * N + n] + d2 * dkmp5;
+        blmcS[ik] = om * diffKs[ik] + delta * dstar;
+        /* ghats (:1385) */
+        k->ghats[(size_t)n * (nl - 1) + kk] *= (1.0 - caseA);
+    }
+}
+
 /* K5 dump: driver pre-step inputs to bldepth — prestep(ustar,Bo) + dVsq + dbsfc
  * columns. Mirrors the Fortran kpp_dump_prestep (oce_ale_mixing_kpp.F90:554-578). */
 static double kpp_get_prestep(int node, int comp, void *user)
@@ -637,6 +681,26 @@ static void kpp_dump_blmix(const fesom_kpp *k, const struct fesom_mesh *mesh,
     fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "blmc_s",   k->nl,     kpp_get_col, &bs);
     fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "bl_ghats", k->nl - 1, kpp_get_col, &gh);
     fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "dkm1",     3,         kpp_get_dkm1, &kp);
+}
+
+/* K7 dump: final module-gate fields — post-combine node viscA/diffKt/diffKs/ghats
+ * + the element viscAE (=aux->Av). Mirrors the Fortran kpp_dump_final (node tags)
+ * plus the added viscAE element dump. kpp_get_col indexes arr[id*stride+comp] for
+ * both node and element arrays. */
+static void kpp_dump_final(const fesom_kpp *k, const struct fesom_aux *aux,
+                           const struct fesom_mesh *mesh, struct fesom_partit *partit)
+{
+    size_t slab = (size_t)k->n_nod * (size_t)k->nl;
+    kpp_col_src sv = { k->viscA,          k->nl };
+    kpp_col_src st = { k->diffK + 0*slab, k->nl };
+    kpp_col_src ss = { k->diffK + 1*slab, k->nl };
+    kpp_col_src sg = { k->ghats,          k->nl - 1 };
+    kpp_col_src sa = { aux->Av,           k->nl };
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "viscA",  k->nl,     kpp_get_col, &sv);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "diffKt", k->nl,     kpp_get_col, &st);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "diffKs", k->nl,     kpp_get_col, &ss);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "ghats",  k->nl - 1, kpp_get_col, &sg);
+    fesom_kpp_dump_elems(mesh, partit, s_kpp_call, "viscAE", k->nl,     kpp_get_col, &sa);
 }
 
 /* ---- controlled-input replay (FESOM_KPP_REPLAY_DIR) ----------------------
@@ -780,7 +844,7 @@ void fesom_kpp_mixing(fesom_kpp                  *k,
     /* boundary-layer mixing coeffs (blmix_kpp, :430) — K6 */
     kpp_blmix(k, mesh);
 
-    /* dual-instrumentation dumps (step 1): pre-step + ri_iwmix + bldepth + blmix */
+    /* K6 dumps (BEFORE enhance — blmix blmc/ghats are modified at kbl-1 by enhance) */
     if (fesom_kpp_dump_this_step(s_kpp_call)) {
         kpp_dump_prestep(k, aux, mesh, partit);
         kpp_dump_riiwmix(k, aux, mesh, partit);
@@ -788,12 +852,73 @@ void fesom_kpp_mixing(fesom_kpp                  *k,
         kpp_dump_blmix(k, mesh, partit);
     }
 
-    /* Driver incomplete through K6: enhance/combine/single-Kv land K7..K8
-     * (aux->Kv/Av untouched). Only a FESOM_KPP_DUMP_DIR dump run (1 step) may
-     * proceed; the partial result is NOT valid for dynamics. */
+    /* enhance the BL coeffs at kbl-1 (enhance, :435) — K7 */
+    kpp_enhance(k, mesh);
+
+    const size_t slab = (size_t)k->n_nod * (size_t)nl;
+
+    /* smooth_blmc (:437-447): exchange each blmc channel then 3-sweep smooth_nod3D.
+     * smooth_blmc=.true. (hardcoded module logical). Every rank replays/computes its
+     * own owned blmc, so the pre-smooth exchange fills halos with owning-rank values. */
+    for (int j = 0; j < 3; ++j) fesom_exchange_nod3D(k->blmc + (size_t)j * slab, nl, partit);
+    for (int j = 0; j < 3; ++j) fesom_smooth_nod3D(k->blmc + (size_t)j * slab, nl, 3, mesh, partit);
+
+    /* combine blmc into viscA/diffK within the BL; zero ghats outside (:451-463) */
+    {
+        real_t *diffKt = k->diffK + 0 * slab, *diffKs = k->diffK + 1 * slab;
+        real_t *blmcM  = k->blmc  + 0 * slab, *blmcT  = k->blmc  + 1 * slab,
+               *blmcS  = k->blmc  + 2 * slab;
+        for (int n = 0; n < Nmy; ++n) {
+            int nzmin = mesh->ulevels_nod2D[n] - 1;
+            int nzmax = mesh->nlevels_nod2D[n] - 1;
+            int kbl   = k->kbl[n];
+            for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
+                size_t i = FESOM_NODE3D(n, nz, nl);
+                if (nz < kbl) {                                  /* within the BL */
+                    k->viscA[i] = fmax(k->viscA[i], blmcM[i]);
+                    diffKt[i]   = fmax(diffKt[i],   blmcT[i]);
+                    diffKs[i]   = fmax(diffKs[i],   blmcS[i]);
+                } else {
+                    k->ghats[(size_t)n * (nl - 1) + nz] = 0.0;
+                }
+            }
+        }
+    }
+
+    /* exchanges before the node→elem average (:468-473) */
+    fesom_exchange_nod3D(k->diffK + 0 * slab, nl, partit);
+    fesom_exchange_nod3D(k->diffK + 1 * slab, nl, partit);
+    fesom_exchange_nod3D(k->ghats, nl - 1, partit);
+    fesom_exchange_nod3D(k->viscA, nl, partit);   /* needed before averaging on elements */
+
+    /* node→elem viscAE = Σ(viscA over 3 vertices)/3 + bottom fill + minmix floor
+     * (:475-490). viscAE is the element viscosity = aux->Av. */
+    for (int e = 0; e < mesh->myDim_elem2D; ++e) {
+        int n0 = mesh->elem_nodes[3*e + 0];
+        int n1 = mesh->elem_nodes[3*e + 1];
+        int n2 = mesh->elem_nodes[3*e + 2];
+        int nzmin = mesh->ulevels[e] - 1;
+        int nzmax = mesh->nlevels[e] - 1;
+        for (int nz = nzmin; nz < nzmax; ++nz)
+            aux->Av[FESOM_ELEM3D(e, nz, nl)] =
+                ( k->viscA[FESOM_NODE3D(n0, nz, nl)]
+                + k->viscA[FESOM_NODE3D(n1, nz, nl)]
+                + k->viscA[FESOM_NODE3D(n2, nz, nl)] ) / 3.0;
+        aux->Av[FESOM_ELEM3D(e, nzmax, nl)] = aux->Av[FESOM_ELEM3D(e, nzmax - 1, nl)];
+        if (aux->Av[FESOM_ELEM3D(e, nzmin, nl)] < KPP_MINMIX)
+            aux->Av[FESOM_ELEM3D(e, nzmin, nl)] = KPP_MINMIX;
+    }
+
+    /* K7 dump: final module-gate fields (post-combine viscA/diffKt/diffKs/ghats + viscAE) */
+    if (fesom_kpp_dump_this_step(s_kpp_call))
+        kpp_dump_final(k, aux, mesh, partit);
+
+    /* Driver incomplete through K7: the single aux->Kv (=diffK ch1) copy over
+     * myDim+eDim and the step dispatch land K8. Only a FESOM_KPP_DUMP_DIR dump
+     * run (1 step) may proceed; aux->Kv is NOT yet the KPP value. */
     if (!fesom_kpp_dump_dir())
-        FESOM_DIE("fesom_kpp_mixing: KPP driver incomplete (ported through K6 blmix_kpp; "
-                  "enhance/combine/single-Kv pending K7..K8). Only a "
+        FESOM_DIE("fesom_kpp_mixing: KPP driver incomplete (ported through K7 enhance+combine; "
+                  "single-Kv copy + step dispatch pending K8). Only a "
                   "FESOM_KPP_DUMP_DIR dump run may proceed. Use FESOM_MIX_SCHEME=PP otherwise.");
 }
 
@@ -891,6 +1016,29 @@ void fesom_kpp_dump_nodes(const struct fesom_mesh *mesh,
     for (int n = 0; n < mesh->myDim_nod2D; ++n) {
         fprintf(f, "%d", partit->myList_nod2D[n]);   /* 1-based gid */
         for (int c = 0; c < ncomp; ++c) fprintf(f, " %.17g", get(n, c, user));
+        fputc('\n', f);
+    }
+    fclose(f);
+}
+
+void fesom_kpp_dump_elems(const struct fesom_mesh *mesh,
+                          struct fesom_partit     *partit,
+                          int step_n, const char *tag, int ncomp,
+                          double (*get)(int elem, int comp, void *user),
+                          void *user)
+{
+    kpp_dump_load_env();
+    if (!s_kpp_dump_dir) return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/kpp_dump_s%d_%s_rank%d.txt",
+             s_kpp_dump_dir, step_n, tag, partit->mype);
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "kpp_dump: cannot open %s\n", path); return; }
+    fprintf(f, "# step=%d tag=%s rank=%d N=%d ncomp=%d\n",
+            step_n, tag, partit->mype, mesh->myDim_elem2D, ncomp);
+    for (int e = 0; e < mesh->myDim_elem2D; ++e) {
+        fprintf(f, "%d", partit->myList_elem2D[e]);   /* 1-based element gid */
+        for (int c = 0; c < ncomp; ++c) fprintf(f, " %.17g", get(e, c, user));
         fputc('\n', f);
     }
     fclose(f);

@@ -1,0 +1,44 @@
+#!/bin/bash
+#SBATCH --job-name=kpp_k7_rpl
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/kpp_k7_replay/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/kpp_k7_replay/slurm.%j.err
+
+# Phase K7 CONTROLLED validation (enhance + smooth_blmc + combine + node->elem
+# viscAE): inject the FORTRAN-dumped bldepth/prestep/ri inputs into the C
+# (FESOM_KPP_REPLAY_DIR) before blmix, run the full K7 chain, and compare the
+# FINAL module-gate fields to Fortran. Every rank replays its own owned inputs,
+# so owned blmc matches Fortran and the smooth_blmc pre-exchange fills halos with
+# Fortran-matching values -> the post-combine viscA/diffKt/diffKs/ghats + element
+# viscAE should match Fortran to ~1e-13 (smooth_nod3D + wscale libm). Live-run
+# diffs would be swamped by the step-1 forcing diff (project_forcing_step1_diff).
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+BASE=/work/ab0995/a270088/port/kpp_k7_replay
+mkdir -p "$BASE/kpp_dump"
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+FREF=/work/ab0995/a270088/port/kpp_fdump/dump
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+SRC=/home/a/a270088/port2/fesom2_port
+
+date
+echo "=== C KPP dump, full driver through node->elem, FORTRAN inputs injected (replay) ==="
+FESOM_MIX_SCHEME=KPP FESOM_KPP_DUMP_DIR=$BASE/kpp_dump FESOM_KPP_DUMP_STEP=1 \
+  FESOM_KPP_REPLAY_DIR=$FREF \
+  srun -l "$BIN" "$MESH" "$BASE/kpp_dump" 1800 1 -1 "$PHC" 1958 \
+  > "$BASE/kpp_dump/run.log" 2> "$BASE/kpp_dump/run.err"
+echo "replay dump-run exit: $?"
+grep -m1 "kpp_replay" "$BASE/kpp_dump/run.err" 2>/dev/null
+
+echo "=== diff C(replay) vs Fortran — focus viscA/diffKt/diffKs/ghats/viscAE (final gate) ==="
+PYTHONPATH=/home/a/a270088/PYTHON "$PY" "$SRC/scripts/kpp_dump_diff.py" "$FREF" "$BASE/kpp_dump"
+date

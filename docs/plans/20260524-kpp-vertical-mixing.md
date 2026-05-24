@@ -198,12 +198,12 @@ consumed by `enhance:1163-1177`), plus the wm/ws lookup tables and scalars `Vtc`
 - [x] Ported `blmix_kpp` (`:1155-1327`) as static `kpp_blmix`: dthick/diff_col per-column scratch, caseA-selected matching level `kn=kbl-caseA` (capped), one-sided derivatives + interior match at `hbl` (eqn 18), shape functions G(σ) (eqn 11), `blmc[3]` (eqn 10), `ghats` (eqn 20), `dkm1[3]` at `kbl-1` (σ from zbar, not Z). Channels 0/1/2 = momentum(wm,Gm)/T(ws,Gt)/S(ws,Gs); note difsp/Gs↔diff_col ch3(=slab2,S), diftp/Gt↔ch2(=slab1,T). Wired after bldepth in the driver.
 - [x] **Validate (CONTROLLED REPLAY — the key technique for K6+):** the step-1 forcing diff ([[project_forcing_step1_diff]]) perturbs bfsfc/ustar at ~every node, and blmix amplifies it (f1∝bfsfc/ustar⁴, wscale, stable-flips) → the live-run dump (`job_kpp_k6_validate`) diffs at ~52% of nodes, uninterpretable alone. So added `FESOM_KPP_REPLAY_DIR` (`kpp_replay_inputs`): inject the Fortran-dumped bldepth/prestep/ri inputs into the C before blmix (same 16r partition → dump line i = local node i). `job_kpp_k6_replay`: blmc_m/t/s, dkm1, bl_ghats vs Fortran = **worst max|Δ|=3.18e-13, 0 signal** (wscale libm last-ULP) → blmix algebra bit-faithful. (Fortran dumps blmc/dkm1/ghats via `kpp_dump_blmix` BEFORE enhance, since enhance modifies them at kbl-1; `scripts/kpp_blmix_xcheck.py` for the live-run input attribution.)
 
-### Phase K7: `enhance` + assembly + exchanges
-**Files:** Modify `src/fesom_kpp.c`
-- [ ] Port `enhance` (`:1140-1184`) using `dkm1` (enhancement at `kbl-1`).
-- [ ] Port the `smooth_blmc` block (ON): 3× `exchange_nod(blmc(:,:,j))` + `smooth_nod(blmc,3)` (`:370-379`).
-- [ ] Port the combine (`:382-396`): for `nz<kbl` `viscA/diffK=MAX(interior,blmc)`, else `ghats=0`; then `exchange_nod` on `diffK(1)`,`diffK(2)`,`ghats`,`viscA`; node→elem `viscAE=Σ/3`; bottom fill `viscAE(nlevels)=viscAE(nlevels-1)`; surface floor `minmix=3e-3`.
-- [ ] **Validate:** diff final `viscAE`(elements), `diffK(T)`, `diffK(S)`, `ghats` full fields — the module-level gate.
+### Phase K7: `enhance` + assembly + exchanges ✅
+**Files:** Modify `src/fesom_kpp.{c,h}`; Fortran `oce_ale_mixing_kpp.F90` (kpp_dump_elem + viscAE, uncommitted)
+- [x] Ported `enhance` (`:1346-1390`) as static `kpp_enhance`: blends interior(caseA)/BL/dkm1 at kbl-1 with `delta=(hbl+zbar(k))/(zbar(k)-zbar(k+1))`, `dstar=(1-δ)²·dkm1+δ²·dkmp5`, `blmc(k)=(1-δ)·X+δ·dstar`; `ghats(k)*=(1-caseA)`. Channels m/T/S (T=diffK ch1, S=diffK ch2).
+- [x] Ported the `smooth_blmc` block (`:437-447`, smooth_blmc=.true.): per channel `fesom_exchange_nod3D(blmc_j)` then `fesom_smooth_nod3D(blmc_j, 3)` (3 sweeps; the already-validated bvfreq smoother reused with N_smooth=3).
+- [x] Ported the combine + assembly (`:451-490`): `nz<kbl` → `viscA/diffK=fmax(interior,blmc)`, else `ghats=0`; exchanges on `diffK(1)`,`diffK(2)`,`ghats`(stride nl-1),`viscA`; node→elem `viscAE=Σ/3` into `aux->Av`; bottom fill `viscAE(nlevels)=viscAE(nlevels-1)`; surface `minmix=3e-3` floor.
+- [x] **Validate (controlled replay `job_kpp_k7_replay`):** inject Fortran bldepth/prestep/ri inputs → run the full K7 chain → final `viscA`/`diffKt`/`diffKs`/`ghats` + element `viscAE` vs Fortran = **0 signal, worst max|Δ|=3.18e-13** (smooth_nod3D + wscale libm) → K7 algebra bit-faithful. Every rank replays its own owned inputs so the smooth_blmc pre-exchange fills halos with Fortran-matching values. Added `fesom_kpp_dump_elems` (C) + `kpp_dump_elem`/viscAE in the Fortran `kpp_dump_final` (uncommitted, Intel tree).
 
 ### Phase K8: wire KPP outputs into the step (single Kv; nonlocal flux stays GATED OFF)
 **Files:** Modify `src/fesom_step.c` (dispatch); `src/fesom_kpp.c` (Kv copy). **NOT** `fesom_tracer_diff.c`.

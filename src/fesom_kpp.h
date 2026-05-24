@@ -148,4 +148,12 @@ void fesom_kpp_dump_nodes(const struct fesom_mesh *mesh,
                           double (*get)(int node, int comp, void *user),
                           void *user);
 
+/* As fesom_kpp_dump_nodes but per owned ELEMENT (keyed by 1-based element gid,
+ * mesh->myList_elem2D); used for the K7 viscAE (=aux->Av) element field. */
+void fesom_kpp_dump_elems(const struct fesom_mesh *mesh,
+                          struct fesom_partit     *partit,
+                          int step_n, const char *tag, int ncomp,
+                          double (*get)(int elem, int comp, void *user),
+                          void *user);
+
 #endif /* FESOM_KPP_H */
