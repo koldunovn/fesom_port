@@ -7,6 +7,7 @@
 #include "fesom_kpp.h"
 #include "fesom_aux.h"
 #include "fesom_constants.h"
+#include "fesom_dyn.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 
@@ -44,6 +45,10 @@
 /* wm/ws lookup-table index: Fortran wmt(0:nni+1, 0:nnj+1), i in [0,nni+1],
  * j in [0,nnj+1]. Row-major with i as the row (nnj+2 columns). */
 #define KPP_TBL(i, j)  ((size_t)(i) * (size_t)(FESOM_KPP_NNJ + 2) + (size_t)(j))
+
+/* fesom_kpp_mixing call index (= ocean step); mirrors the Fortran module's
+ * kpp_call_count. Used for dump-step gating. */
+static int s_kpp_call = 0;
 
 /*===========================================================================
  * Allocation — mirrors oce_mixing_kpp_init's allocate block
@@ -193,9 +198,101 @@ static void kpp_wscale(const fesom_kpp *k, real_t zehat, real_t us,
 }
 
 /*===========================================================================
- * KPP driver — abort stub until the routine bodies (K1..K8) are in place.
- * Selected only when FESOM_MIX_SCHEME=KPP (fesom_step.c); the default PP path
- * never reaches here, so K0 stays byte-identical to HEAD.
+ * ri_iwmix — interior viscosity/diffusivity: shear instability (local Ri) +
+ * constant background (A_ver/K_ver) + static instability. Literal port of
+ * ri_iwmix (oce_ale_mixing_kpp.F90:890-999). Loops myDim only (the driver
+ * exchanges viscA/diffK afterward). Ri is stored in diffK ch0 as scratch.
+ * smooth_Ri_ver / smooth_Ri_hor are .false. (CORE2) → omitted (no-op gates).
+ *===========================================================================*/
+static void kpp_ri_iwmix(fesom_kpp *k, const struct fesom_aux *aux,
+                         const struct fesom_dyn *dyn, const struct fesom_mesh *mesh)
+{
+    const int nl   = k->nl;
+    const int Nmy  = mesh->myDim_nod2D;
+    const size_t slab = (size_t)k->n_nod * (size_t)nl;
+    real_t *viscA  = k->viscA;
+    real_t *diffKt = k->diffK + 0 * slab;   /* channel 0 = T (diffK(:,:,1)) */
+    real_t *diffKs = k->diffK + 1 * slab;   /* channel 1 = S (diffK(:,:,2)) */
+    const real_t A_bg = (real_t)FESOM_PHASE1_A_VER;
+    const real_t K_bg = (real_t)FESOM_PHASE1_K_VER;
+
+    /* Loop 1: Richardson number Ri = MAX(N²,0)/(shear²+epsln), stored in
+     * diffKt as scratch (Fortran :917-946). shear at Z (mid-layer). */
+    for (int n = 0; n < Nmy; ++n) {
+        int nzmin = mesh->ulevels_nod2D[n] - 1;
+        int nzmax = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+            real_t dz_inv = 1.0 / (mesh->Z[nz - 1] - mesh->Z[nz]);   /* > 0 */
+            real_t du = dyn->uvnode[FESOM_ELEMVEC(n, nz - 1, nl) + 0]
+                      - dyn->uvnode[FESOM_ELEMVEC(n, nz,     nl) + 0];
+            real_t dv = dyn->uvnode[FESOM_ELEMVEC(n, nz - 1, nl) + 1]
+                      - dyn->uvnode[FESOM_ELEMVEC(n, nz,     nl) + 1];
+            real_t shear = (du * du + dv * dv) * dz_inv * dz_inv;
+            real_t Nsq = aux->bvfreq[FESOM_NODE3D(n, nz, nl)];
+            real_t Nsq_pos = Nsq > 0.0 ? Nsq : 0.0;
+            diffKt[FESOM_NODE3D(n, nz, nl)] = Nsq_pos / (shear + KPP_EPSLN);
+        }
+        /* edge copies of the Ri scratch (:932-933) */
+        diffKt[FESOM_NODE3D(n, nzmin, nl)] = diffKt[FESOM_NODE3D(n, nzmin + 1, nl)];
+        diffKt[FESOM_NODE3D(n, nzmax, nl)] = diffKt[FESOM_NODE3D(n, nzmax - 1, nl)];
+    }
+
+    /* Loop 2: viscA / diffK from the shear-Ri shape function (:954-997). */
+    for (int n = 0; n < Nmy; ++n) {
+        int nzmin = mesh->ulevels_nod2D[n] - 1;
+        int nzmax = mesh->nlevels_nod2D[n] - 1;
+        for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+            size_t i = FESOM_NODE3D(n, nz, nl);
+            real_t Rigg = diffKt[i] > 0.0 ? diffKt[i] : 0.0;        /* AMAX1(Ri,0) */
+            real_t ratio = Rigg / KPP_RIINFTY;
+            if (ratio > 1.0) ratio = 1.0;                          /* AMIN1(.,1) */
+            real_t frit = 1.0 - ratio * ratio;
+            frit = frit * frit * frit;
+            viscA[i]  = KPP_VISC_SH_LIMIT * frit + A_bg;
+            real_t dK = KPP_DIFF_SH_LIMIT * frit + K_bg;           /* Kv0_const branch */
+            diffKt[i] = dK;
+            diffKs[i] = dK;                                        /* diffK(2)=diffK(1) */
+        }
+        /* edge copies (:989-995) */
+        size_t a0 = FESOM_NODE3D(n, nzmin, nl),     a1 = FESOM_NODE3D(n, nzmin + 1, nl);
+        size_t b0 = FESOM_NODE3D(n, nzmax, nl),     b1 = FESOM_NODE3D(n, nzmax - 1, nl);
+        viscA[a0]  = viscA[a1];  diffKt[a0] = diffKt[a1]; diffKs[a0] = diffKs[a1];
+        viscA[b0]  = viscA[b1];  diffKt[b0] = diffKt[b1]; diffKs[b0] = diffKs[b1];
+    }
+}
+
+/* generic per-node column getter for fesom_kpp_dump_nodes: arr is [N*nl]
+ * node-major; comp == layer interface nz. */
+typedef struct { const real_t *arr; int nl; } kpp_col_src;
+static double kpp_get_col(int node, int comp, void *user)
+{
+    const kpp_col_src *s = (const kpp_col_src *)user;
+    return (double)s->arr[(size_t)node * (size_t)s->nl + (size_t)comp];
+}
+
+/* K3 dump: raw ri_iwmix node outputs (viscA, diffK T/S) as full columns, plus
+ * bvfreq (the input whose sign drives the step-1 background/static-instability
+ * branch) so the validation can confirm any C-vs-Fortran viscA disagreement is
+ * exactly a bvfreq sign flip (cross-code IC noise), not an algebra bug. */
+static void kpp_dump_riiwmix(const fesom_kpp *k, const struct fesom_aux *aux,
+                             const struct fesom_mesh *mesh, struct fesom_partit *partit)
+{
+    size_t slab = (size_t)k->n_nod * (size_t)k->nl;
+    kpp_col_src sv = { k->viscA,           k->nl };
+    kpp_col_src st = { k->diffK + 0 * slab, k->nl };
+    kpp_col_src ss = { k->diffK + 1 * slab, k->nl };
+    kpp_col_src sb = { aux->bvfreq,         k->nl };
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "ri_viscA",  k->nl, kpp_get_col, &sv);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "ri_diffKt", k->nl, kpp_get_col, &st);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "ri_diffKs", k->nl, kpp_get_col, &ss);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "ri_bvfreq", k->nl, kpp_get_col, &sb);
+}
+
+/*===========================================================================
+ * KPP driver — mirror of oce_mixing_KPP (oce_ale_mixing_kpp.F90:249-425),
+ * built incrementally. Through K3: zero viscA + ri_iwmix (+ dump). Downstream
+ * (bldepth/blmix/enhance/combine/single-Kv) land K5..K8 — guarded so only a
+ * FESOM_KPP_DUMP_DIR dump run (1 step) may proceed until the driver is complete.
  *===========================================================================*/
 void fesom_kpp_mixing(fesom_kpp               *k,
                       struct fesom_aux        *aux,
@@ -204,9 +301,25 @@ void fesom_kpp_mixing(fesom_kpp               *k,
                       const struct fesom_mesh *mesh,
                       struct fesom_partit     *partit)
 {
-    (void)k; (void)aux; (void)tracers; (void)dyn; (void)mesh; (void)partit;
-    FESOM_DIE("fesom_kpp_mixing: KPP not yet implemented (Phase K0 scaffolding). "
-              "Use FESOM_MIX_SCHEME=PP. KPP routines land in phases K1..K8.");
+    (void)tracers;
+    ++s_kpp_call;                            /* = ocean step (mirrors Fortran kpp_call_count) */
+    const int nl = k->nl;
+
+    /* zero viscA over myDim+eDim (driver :281-284) */
+    memset(k->viscA, 0, (size_t)k->n_nod * (size_t)nl * sizeof(real_t));
+
+    /* interior mixing (ri_iwmix). dVsq/ustar/Bo pre-step + bldepth land K5. */
+    kpp_ri_iwmix(k, aux, dyn, mesh);
+
+    if (fesom_kpp_dump_this_step(s_kpp_call))
+        kpp_dump_riiwmix(k, aux, mesh, partit);
+
+    /* Driver incomplete through K3: only a dump run (1 step) may proceed; the
+     * partial result is NOT valid for dynamics (aux->Kv/Av untouched). */
+    if (!fesom_kpp_dump_dir())
+        FESOM_DIE("fesom_kpp_mixing: KPP driver incomplete (ported through K3 ri_iwmix; "
+                  "bldepth/blmix/enhance/combine/single-Kv pending K5..K8). Only a "
+                  "FESOM_KPP_DUMP_DIR dump run may proceed. Use FESOM_MIX_SCHEME=PP otherwise.");
 }
 
 /*===========================================================================

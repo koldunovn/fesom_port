@@ -1,0 +1,47 @@
+#!/bin/bash
+#SBATCH --job-name=kpp_k3_val
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/kpp_k3_validate/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/kpp_k3_validate/slurm.%j.err
+
+# Phase K3 validation:
+#  (a) ri_iwmix dump — KPP partial-driver run (nsteps=1, FESOM_MIX_SCHEME=KPP):
+#      runs ri_iwmix at step 1, dumps ri_viscA/ri_diffKt/ri_diffKs, returns
+#      (dump run; aux Kv/Av untouched → 1 step is safe). Compare vs Fortran.
+#  (b) byte-identity — PP run (KPP off) vs the saved HEAD baseline. K3 only
+#      touches the KPP driver (entered only under KPP), so PP is unchanged.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+BASE=/work/ab0995/a270088/port/kpp_k3_validate
+mkdir -p "$BASE/kpp_dump" "$BASE/pp"
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+JRA55_YEAR=1958
+HEAD_REF=/work/ab0995/a270088/port/kpp_k0_byteident/head
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+date
+echo "=== (a) C KPP partial-driver ri_iwmix dump (nsteps=1, dt=1800) ==="
+FESOM_MIX_SCHEME=KPP FESOM_KPP_DUMP_DIR=$BASE/kpp_dump FESOM_KPP_DUMP_STEP=1 \
+  srun -l "$BIN" "$MESH" "$BASE/kpp_dump" 1800 1 -1 "$PHC" "$JRA55_YEAR" \
+  > "$BASE/kpp_dump/run.log" 2> "$BASE/kpp_dump/run.err"
+echo "KPP dump-run exit: $?  (dump files:)"
+ls "$BASE/kpp_dump"/kpp_dump_s1_ri_*_rank0.txt 2>/dev/null
+
+echo "=== (b) C PP byte-identity (nsteps=50, KPP off) ==="
+srun -l "$BIN" "$MESH" "$BASE/pp" 500 50 50 "$PHC" "$JRA55_YEAR" \
+  > "$BASE/pp/run.log" 2> "$BASE/pp/run.err"
+echo "PP run exit: $?"
+date
+
+echo "=== byte-identity (snap_000050 vs HEAD) ==="
+PYTHONPATH=/home/a/a270088/PYTHON "$PY" \
+  /home/a/a270088/port2/fesom2_port/scripts/kpp_byteident_check.py "$HEAD_REF" "$BASE/pp"

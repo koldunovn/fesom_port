@@ -175,10 +175,10 @@ consumed by `enhance:1163-1177`), plus the wm/ws lookup tables and scalars `Vtc`
 - [x] Ported `wscale` (`:828-877`) as static `kpp_wscale`: index `INT(zdiff/deltaz)`, `MIN(iz,nni)`/`MAX(iz,0)`, `INT(MIN(udiff/deltau,nnj))`/`MAX(ju,0)` clamps, bilinear interpolation, stable formula (`zehat>zmax`).
 - [x] **Validate:** `(zehat,ustar)` sweep 201×101 spanning unstable-table / stable-branch / clamp regions (`fesom_kpp_dump_wscale_sweep` + Fortran gate, identical grid). **C-vs-Fortran wscale max|Δ|=2.8e-15 (max_rel ~3e-13)**, grid bit-identical; both match independent `scripts/kpp_wscale_reference.py` to ~3e-13. Well within ≤1e-10. (`job_kpp_k2_validate`.)
 
-### Phase K3: `ri_iwmix` — interior mixing
-**Files:** Modify `src/fesom_kpp.c`
-- [ ] Port `ri_iwmix` (`:730-839`): Ri stored in `diffK(:,:,1)` scratch (`:766`); `frit=(1−min(Rig/Riinfty,1)²)³`, `Riinfty=0.8`; viscA `= visc_sh_limit·frit + A_ver`, diffK `= diff_sh_limit·frit + K_ver` (Kv0_const branch); static-instability (Ri<0) branch; `smooth_Ri_ver/hor` gates (no-op, .false.); edge copies `diffK(nzmin)=diffK(nzmin+1)`, `diffK(nzmax)=diffK(nzmax-1)`.
-- [ ] **Validate:** diff interior `viscA`/`diffK(T,S)` node-by-node at identical state.
+### Phase K3: `ri_iwmix` — interior mixing ✅ (background+static-instability; shear curve → K9)
+**Files:** Modify `src/fesom_kpp.c` (incremental driver); Fortran ri dump point
+- [x] Ported `ri_iwmix` (`:890-999`) as static `kpp_ri_iwmix`: loop-1 Ri=MAX(N²,0)/(shear²+epsln) stored in diffK ch0 scratch; loop-2 `frit=(1−min(Rigg/0.8,1)²)³`, viscA=`visc_sh_limit·frit+A_ver`, diffK(1)=`diff_sh_limit·frit+K_ver` (Kv0_const), diffK(2)=diffK(1); edge copies both loops. `smooth_Ri_ver/hor` (.false.) omitted. Incremental driver `fesom_kpp_mixing`: zero viscA (myDim+eDim) + ri_iwmix + dump; guarded so only a FESOM_KPP_DUMP_DIR run (1 step) proceeds (bldepth+ pending).
+- [x] **Validate:** ri dump (viscA/diffKt/diffKs + bvfreq) vs Fortran at step 1. At rest (uv=0→shear=0) ri_iwmix is a deterministic binary of sign(bvfreq): both `frit` endpoints give the **exact** Fortran values (background 1e-4/1e-5, static-instability 5.1e-3/5.01e-3 — diff value exactly 5e-3). `scripts/kpp_ri_bvfreq_check.py`: self-consistency 0 violations both codes; every C-vs-Fortran viscA disagreement is exactly a bvfreq sign flip (~0.5–1.3%/level, weak-stratification IC noise per [[feedback_phc_rank_dependent]]), 0 unexplained. The **shear-instability curve** (0<frit<1) is untested at rest → validated end-to-end at K9 + direct line-by-line port. PP byte-identical (KPP only entered under FESOM_MIX_SCHEME=KPP).
 
 ### Phase K4: `ddmix` — double diffusion (GATE ONLY for CORE2)
 **Files:** Modify `src/fesom_kpp.c`
