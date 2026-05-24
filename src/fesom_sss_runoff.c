@@ -295,10 +295,16 @@ void fesom_sss_runoff_init(fesom_sss_runoff       *sr,
     memset(sr, 0, sizeof(*sr));
     sr->sss_month_loaded = -1;
 
-    /* Defaults from oce_modules.F90:30-37 */
-    sr->surf_relax_S  = 10.0 / (60.0 * 3600.0 * 24.0);
-    sr->ref_sss       = 34.7;
-    sr->ref_sss_local = 0;
+    /* Values from the CORE2 reference run's namelist.tra (NOT the oce_modules.F90
+     * code defaults, which are ref_sss_local=.false./ref_sss=34.7). The reference
+     * namelist sets ref_sss_local=.true. → the virtual-salt-flux reference salinity
+     * rsss is the LOCAL surface salinity per node (ice_oce_coupling.F90:440), not a
+     * global constant. Using the constant 34.7 over-strengthened the virtual salt
+     * flux where local SSS is low (Arctic ~30) → systematic Arctic freshwater bias.
+     * ref_sss (34.) is then unused, but set to the namelist value for fidelity. */
+    sr->surf_relax_S  = 10.0 / (60.0 * 3600.0 * 24.0);   /* surf_relax_S = 1.929e-6 */
+    sr->ref_sss       = 34.0;
+    sr->ref_sss_local = 1;
     /* use_virt_salt set by which_ALE in Fortran oce_setup_step.F90:115-125;
      * for linfs (our case) this is .true. */
     sr->use_virt_salt = 1;
