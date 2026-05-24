@@ -1,172 +1,100 @@
-# Next session: Phase D5 (oce_fluxes_mom) → Phase E (FCT advection)
+# Next-session prompt — KPP port, continue at Phase K5 (`bldepth`)
 
-## TL;DR
+Copy the block below as the next session's opening prompt.
 
-Phase D EVP is **done and validated** at 1, 8, 16 ranks (200 steps clean,
-T.min=−2.06°C, bit-identical step-1 stats). The previous "16-rank crash at
-step 2" was a JRA forcing OOB read fixed in commit `55f6b6c` (now on `main`
-via `918b0d4`). Two phases remain to finish sea-ice port:
+---
 
-- **Phase D5**: port `oce_fluxes_mom` so ice mediates atmospheric stress on
-  the ocean (today the ocean still sees raw bulk wind stress under ice cover).
-- **Phase E**: port FCT advection of `a_ice`, `m_ice`, `m_snow`.
+> Continue the FESOM2→C port (CORE2, dt=1800, linfs): the **KPP vertical-mixing port**,
+> strictly faithfully. **GUIDING PRINCIPLE: THIS IS A PORT. The Fortran
+> (`/home/a/a270088/port2/fesom2/src/oce_ale_mixing_kpp.F90`) has worked for decades — do
+> NOT simplify, optimize, or invent. Reproduce every formula/constant/loop-bound/branch/
+> halo-exchange/ordering exactly; port the CORE2 reference namelist values, not code defaults.**
+>
+> **State: Phases K0–K4 are DONE, validated, and committed** on `fesom2_port/main`
+> (HEAD `c63474a`; commits K0 `13bfe95`, K1 `88812a0`, K2 `8114a8b`, K3 `9c80362`,
+> K4 `c63474a`). Scaffolding + `oce_mixing_kpp_init` + `wscale` + `ri_iwmix` + the `ddmix`
+> gate are in; PP stays byte-identical with KPP off. Build is current.
+>
+> 1. Read **`docs/plans/20260524-kpp-vertical-mixing.md`** (authoritative spec; K0–K4 boxes
+>    are `[x]`, K5 is next). Then the auto-memory — especially **`project_kpp_port_state`**
+>    (has the K5 setup + the validation methodology learned in K3), `feedback_port_used_terms`,
+>    `feedback_namelist_over_codedefault`, `feedback_phc_rank_dependent` (the IC-noise floor),
+>    `feedback_write_loops_halo`, `feedback_tracer_stride_nl`, `feedback_node_vs_cell_geometry`,
+>    `reference_evp_dump_diagnostic`.
+> 2. Build. C: `source /sw/etc/profile.levante && source env.sh && make -C build fesom_port`.
+>    Fortran (port2/fesom2, **Intel** build): `source /sw/etc/profile.levante && source
+>    env/levante.dkrz.de/shell && make -C build fesom.x -j8 && make -C build install`
+>    — the **install step is mandatory**: `bin/fesom.x` loads `lib64/libfesom.so` (RPATH
+>    `$ORIGIN/../lib64`), NOT the fresh `build/lib/`, so without `install` you run stale KPP.
+> 3. **Implement Phase K5** (`oce_ale_mixing_kpp.F90`; highest risk — OBL depth, historically
+>    buggy per `FRESH_START.md:489`). Three pieces, extend the incremental driver
+>    `fesom_kpp_mixing` (currently zero-viscA → ri_iwmix → dump → guard):
+>    - **(a) store `dbsfc`** in `src/fesom_eos.c` (`fesom_pressure_bv`): the local `dbsfc1`
+>      is already computed at `:136` for db_max — write it into `aux->dbsfc[FESOM_NODE3D(n,nz,nl)]`
+>      and add the bottom fill `dbsfc(nzmax)=dbsfc(nzmax-1)` (Fortran oce_ale_pressure_bv.F90:337).
+>      **Store it UNCONDITIONALLY** — PP never reads `aux->dbsfc`, so the PP path stays
+>      byte-identical without a gate (re-confirm with the byte-identity job).
+>    - **(b) driver pre-step** (`:307-352`, before ri_iwmix in the Fortran order): `dVsq`
+>      (eqn 21, shear of UVnode re the surface, `dVsq(nzmax)=dVsq(nzmax-1)`), `ustar`
+>      (`sqrt(sqrt(stress_node_surf_x²+y²)·density_0_r)`, eqn 2), `Bo`
+>      (`-g·(sw_alpha(nzmin)·heat_flux/vcpw + sw_beta(nzmin)·water_flux·S(nzmin))`, eqns A2c/d).
+>      Inputs all present: `forcing->{heat_flux,water_flux,stress_node_surf}`, `aux->{sw_alpha,
+>      sw_beta}`, `tracers` S, `density_0_r = 1/FESOM_DENSITY_0`, `FESOM_VCPW`.
+>    - **(c) `bldepth`** (`:628-808`): bulk-Ri search (`Ritop=zk·dbsfc`, `Vtsq=zk·ws·√|bvsq|·Vtc`,
+>      `Rib=Ritop/(dVsq+Vtsq+epsln)`, `Ricr=0.3` linear interp of `hbl`), the `use_sw_pene`
+>      `bfsfc` branch (sw_3d interpolated to hbl), Ekman/Monin-Obukhov limits gated
+>      `bfsfc>0 .and. nzmin==1` (`cekman=0.7`/`cmonob=1.0`, `KPP_CEKMAN`/`KPP_CMONOB` already
+>      defined), `smooth_hbl` (.false., skip), final `kbl` search, `caseA`. Uses `wscale`
+>      (K2, static `kpp_wscale`), `aux->{dbsfc,bvfreq,sw_alpha}`, `forcing->sw_3d`, `kpp->
+>      {ustar,Bo,dVsq}`, `mesh->{zbar (|zbar_3d_n|, interface depths), coriolis_node}`.
+>      Note bldepth loops `myDim` and uses `zbar` (interfaces), not `Z` (mid-layer).
+> 4. **Validate K5** by dual-instrumentation at step 1 vs the EXISTING Fortran reference dumps
+>    in `/work/ab0995/a270088/port/kpp_fdump/dump/` (already current: `kpp_dump_s1_prestep`
+>    [ustar,Bo], `_dVsq`, `_dbsfc`, `_bldepth` [hbl,kbl,bfsfc,stable,caseA]). Add matching C
+>    dumps in `fesom_kpp_mixing` (mirror `kpp_dump_riiwmix`); run the C KPP dump-run
+>    (`FESOM_MIX_SCHEME=KPP FESOM_KPP_DUMP_DIR=... nsteps=1`, model on `job_kpp_k3_validate`),
+>    diff with `scripts/kpp_dump_diff.py`. **Caveat (from K3):** at step 1 from rest `uv=0 →
+>    shear=0 → dVsq=0` (trivial); `ustar/Bo/dbsfc/hbl/kbl/bfsfc/caseA` are meaningful. Inputs
+>    differ at the PHC-rank IC-noise floor → threshold fields (`kbl`, `hbl` near weak
+>    stratification) show O(1) marginal-node diffs that are INPUT noise, not bugs. **Bin
+>    `hbl`/`kbl` diffs by region**; to isolate the algebra, dump the driving inputs (dbsfc,
+>    bvfreq) too and confirm disagreements track input differences (mirror
+>    `scripts/kpp_ri_bvfreq_check.py`, **interior-only — exclude edge-copy levels**). The
+>    velocity-driven part of bldepth (dVsq term) is untested at rest → covered by K9.
+>    **Re-run the byte-identity job** (`job_kpp_k3_validate` PP part, or a 200-step PP run vs
+>    `/work/ab0995/a270088/port/kpp_k0_byteident/head`) — K5 touches `fesom_eos.c` (shared).
+> 5. Commit K5. Then **K6** (`blmix_kpp` :1109-1281 — BL coeffs `blmc[3]`, `dkm1[3]`, shape
+>    G(σ), `ghats`), **K7** (`enhance` :1300-1344 + the `smooth_blmc` 3×exchange+smooth_nod +
+>    the combine MAX-in-BL + the 4 exchanges + node→elem `viscAE`=Σ/3 + bottom fill + `minmix`
+>    floor), **K8** (wire: `aux->Kv(:,node)=diffK(:,node,1)` over myDim+eDim, oce_ale.F90:3518-22;
+>    `fesom_tracer_diff.c` UNCHANGED — single Kv for T and S; nonlocal flux stays gated off),
+>    **K9** (C+KPP dt=1800 2yr 864r vs `/scratch/a/a270088/fortran_2yr_dt1800`). One routine
+>    per phase, dual-instrument before the next, commit per phase.
+>
+> Reminders: gate-only (don't implement) `ddmix` (done, K4) and the `ghats`→tracer nonlocal
+> flux (`use_kpp_nonlclflx=.false.`); vertical diffusion uses a SINGLE `Kv=diffK(:,:,1)` for T
+> and S — do NOT route `diffK(:,:,2)` into salinity. The incremental driver guards itself so
+> only a `FESOM_KPP_DUMP_DIR` run (1 step) proceeds until K8 completes it.
 
-Both are scoped in `docs/plans/20260425-sea-ice-port.md` (Tasks D5 → D6 → E1…E8).
+---
 
-## Read these memory files first (in order)
+## Quick reference (paths + commands)
 
-```
-~/.claude/projects/-home-a-a270088-port2/memory/MEMORY.md
-~/.claude/projects/-home-a-a270088-port2/memory/project_sea_ice_port_state.md
-~/.claude/projects/-home-a-a270088-port2/memory/feedback_array_size_vs_reader_loop.md
-~/.claude/projects/-home-a-a270088-port2/memory/feedback_write_loops_halo.md
-~/.claude/projects/-home-a-a270088-port2/memory/feedback_phc_rank_dependent.md
-~/.claude/projects/-home-a-a270088-port2/memory/reference_evp_dump_diagnostic.md
-~/.claude/projects/-home-a-a270088-port2/memory/feedback_unique_outdir_per_job.md
-~/.claude/projects/-home-a-a270088-port2/memory/feedback_levante_build.md
-```
-
-`feedback_array_size_vs_reader_loop.md` and `feedback_write_loops_halo.md`
-are critical for Phase E — FCT is exactly where this bug class hides.
-
-## Repo state (start of next session)
-
-```
-main          918b0d4  Merge debug-evp: Phase D EVP + JRA halo fix (HEAD)
-              55f6b6c  Fix multi-rank sea-ice EVP crash: JRA forcing halo coverage
-              edc9e65  Phases A–C
-              3da152b  Phase 4 wrap-up (ocean only, pre-sea-ice)
-debug-evp     == main  (merged; safe to delete or reuse for next phase)
-```
-
-Always:
-```
-bash -l configure.sh --clean
-```
-
-Always use unique OUT_DIR per SLURM job (`feedback_unique_outdir_per_job.md`).
-
-## What's already in tree
-
-- Sea-ice Phases A–D fully wired in `fesom_ice.{c,h}`,
-  `fesom_ice_thermo.{c,h}`, `fesom_ice_coupling.{c,h}`, `fesom_ice_evp.{c,h}`.
-- EVP debug instrumentation env-gated by `FESOM_EVP_DUMP_DIR` plus an
-  always-on `if (ice_strength[el] > 1e7) fprintf(stderr, ...)` in EVP Step 3.
-  See `reference_evp_dump_diagnostic.md`. Use this for any multi-rank
-  divergence hunt — it earned its keep finding the JRA bug.
-- Diff scripts under `scripts/`: `evp_dump_diff.py`, `evp_dump_qcheck.py`,
-  `phc_dump_diff.py`. Job templates `job_core2_{1,8,16}r_evp_dump`,
-  `job_core2_8r_evp`.
-
-## Phase D5 — port `oce_fluxes_mom`
-
-**Source**: `~/port2/fesom2/src/ice_oce_coupling.F90:53` (subroutine `oce_fluxes_mom`).
-
-**Goal**: blend bulk wind stress with ice-ocean drag from `cd_oce_ice` and
-ice velocity, write into `dyn->stress_surf` (per-element). Currently
-`dyn->stress_surf` is the unmodified bulk stress from
-`fesom_bulk_compute` — under ice cover this is wrong.
-
-**Design**:
-- Add `fesom_ice_oce_fluxes_mom` to `fesom_ice_coupling.{c,h}`.
-- Call from `fesom_step.c` BEFORE `compute_vel_rhs` (which consumes
-  `stress_surf`). Place AFTER `fesom_ice_step` so `ice->uice/vice` are
-  populated by the EVP just run.
-- Per Fortran: element-based loop (`do el=1, myDim_elem2D`), reads
-  `u_ice/v_ice` at the 3 vertices (halo OK from end-of-EVP exchange), reads
-  `a_ice` per element (from vertex average), writes 2 components of
-  `stress_surf[el]`.
-- **Loop bound for stress_surf write**: check Fortran. If
-  `do el = 1, myDim_elem2D + eDim_elem2D` then C must too. Apply the audit
-  rule from `feedback_write_loops_halo.md` — this is the cheapest safety net.
-
-**Validation** (Task D6 in plan):
-1. Clean build.
-2. Run `job_core2_16_fix` 200 steps; under ice cover the polar `|stress_surf|`
-   should be visibly smaller than pre-D5 (because ice is now mediating).
-3. Multi-rank cross-check: `|Δuice|_∞ < 1e-6` between 8/16/32 ranks at step 200.
-4. Watch the always-on HUGE-ice_strength stderr — should never fire.
-
-**Watchouts for D5**:
-- The EVP halo exchange of u_ice/v_ice already happens at end of subcycle.
-  After `fesom_ice_step`, halo of u_ice IS valid for stress_mom to read.
-- Scattered prior attempt at `/tmp/sea_ice_modified.patch` may be stale —
-  re-derive from Fortran.
-- `oce_fluxes_mom` does NOT touch `stress_node_surf` (that's still bulk-direct
-  for the ocean RHS at nodes). Read Fortran carefully.
-
-## Phase E — FCT advection (highest-risk)
-
-**Source**: `~/port2/fesom2/src/ice_fct.F90` (1624 LoC). Plan Tasks E1–E8.
-
-**Why high-risk**: ocean FCT had two halo-write bugs (`init_tracers_AB` and
-`fct_ttf_max/min`) that took days to find. The same bug class will recur.
-**Apply the proactive audit**: grep every C `for.*<.*myDim_(nod|elem)2D;`
-write-loop in `fesom_ice_fct.c` against the matching Fortran loop bound,
-BEFORE running anything. The plan calls this Task E7 — do it as you write,
-not after.
-
-**Tasks (from plan)**:
-- E1: `ice_mass_matrix_fill` (one-time setup)
-- E2: `ice_TG_rhs` + `ice_TG_rhs_div`
-- E3: `ice_solve_low_order` + `ice_solve_high_order`
-- E4: `ice_fem_fct` (Zalesak limiter)
-- E5: `ice_fct_solve` (driver)
-- E6: wire into `fesom_ice_step`
-- E7: proactive halo-write audit
-- E8: validation
-
-After E6: between EVP and thermo in `fesom_ice_step`, call
-`fesom_ice_tg_rhs → fesom_ice_fct_solve → fesom_ice_cut_off` (mirroring
-`ice_setup_step.F90:258-295`).
-
-**Validation** (Task E8): full month at multi-rank; ice-cover area in
-correct order of magnitude (~10% of ocean area); a_ice physically bounded
-(0…1); compare T.min trajectory to Fortran reference if available.
-
-## Workflow rules earned the hard way
-
-1. **Always clean build** (`bash -l configure.sh --clean`).
-2. **Unique OUT_DIR per SLURM job** (and unique `FESOM_EVP_DUMP_DIR` if
-   using diagnostics) — `feedback_unique_outdir_per_job.md`.
-3. **2× repeat tests** before declaring "validated". One PASS isn't enough.
-4. **Commit at every working state** with a clear message.
-5. **Follow Fortran literally** — no "simplifying" loop bounds, no
-   "saving memory" by sizing arrays smaller. The forced halo coverage
-   isn't accidental.
-6. **PHC IC differs across rank counts** — accept it. Don't burn cycles
-   diffing PHC at 1-rank vs N-rank. See `feedback_phc_rank_dependent.md`.
-7. **Use the dump diagnostic** — set `FESOM_EVP_DUMP_DIR` and run
-   `scripts/evp_dump_diff.py` whenever multi-rank diverges from 1-rank.
-   The HUGE diagnostic is always on; check stderr first.
-
-## Quick commands
-
-```bash
-# Dev cycle
-cd ~/port2/fesom2_port
-bash -l configure.sh --clean
-
-# 16-rank smoke test (200 steps)
-sbatch job_core2_16_fix
-
-# 16-rank with full dumps (NSTEPS=2 for diagnostic)
-sbatch job_core2_16r_evp_dump
-
-# Diff against 1-rank reference
-python3 scripts/evp_dump_diff.py <1r_dir> <16r_dir>
-```
-
-## Bug class to watch for in Phase E
-
-The exact pattern that bit us in Phase D was: array sized myDim,
-read at halo by a compute-over-halo kernel → garbage halo values →
-downstream physics explodes. In Phase E, the analogues are arrays like
-`fct_tmax`, `fct_tmin`, `fct_plus`, `fct_minus`, `fct_fluxes`,
-`values_rhs`, `values_div_rhs`, `dvalues`, `valuesl`. Each:
-1. allocated to size N (check what N is — `myDim` or `myDim+eDim`?)
-2. written by which function with which loop bound?
-3. read by which function with which loop bound?
-
-If READER bound > WRITER bound (or > allocation size): bug. The Fortran
-sizes them all `myDim+eDim` — match it in C.
+- **KPP plan (spec):** `docs/plans/20260524-kpp-vertical-mixing.md` (K5 section has every detail).
+- **C source:** `src/fesom_kpp.{c,h}` (driver `fesom_kpp_mixing`, static `kpp_wscale`/`kpp_ri_iwmix`,
+  dump helpers `fesom_kpp_dump_*`, `kpp_dump_riiwmix`, constants `KPP_*`). `src/fesom_eos.c:136`
+  (`dbsfc1` to store). `src/fesom_step.c` (dispatch, `mo_convect` shared after either scheme).
+- **Fortran ref:** `/home/a/a270088/port2/fesom2/src/oce_ale_mixing_kpp.F90` — instrumented with
+  `kpp_dump_*` gates (UNCOMMITTED in that tree, like the `[FSSH]` debug; Intel build).
+  Add a `bldepth`/prestep dump point in the driver if you want fresh Fortran dumps; the current
+  ones in `/work/.../kpp_fdump/dump/` already cover prestep+bldepth+dbsfc at step 1.
+- **Fortran KPP dump run:** `cd /home/a/a270088/port2/fesom2/work_kpp_dump && sbatch job_kpp_dump`
+  (KPP/linfs/dt=1800/16r, dumps at step 1 to `/work/ab0995/a270088/port/kpp_fdump/dump/`).
+- **C validation jobs (models):** `job_kpp_k3_validate` (KPP dump-run nsteps=1 + PP byte-identity),
+  `job_kpp_k2_validate`, `job_kpp_k1_validate`. HEAD byte-identity baseline:
+  `/work/ab0995/a270088/port/kpp_k0_byteident/head`.
+- **Diff/reference scripts:** `scripts/kpp_dump_diff.py` (gid-keyed, auto-discovers tags),
+  `scripts/kpp_ri_bvfreq_check.py` (threshold/input-noise isolation, **interior-only**),
+  `scripts/kpp_byteident_check.py`, `scripts/kpp_{init,wscale}_reference.py`.
+- **Mesh/PHC/forcing:** see `docs/NEXT_SESSION_HANDOFF.md` §7.
+- **Python:** `/work/ab0995/a270088/mambaforge/envs/nereus/bin/python` (PYTHONPATH=/home/a/a270088/PYTHON).
