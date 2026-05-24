@@ -16,13 +16,22 @@ struct fesom_mesh;
  *   sw_alpha        [nod2D * nl]   thermal expansion coeff (1/K)
  *   sw_beta         [nod2D * nl]   haline contraction coeff (1/(g/kg))
  *   Kv              [nod2D * nl]   vertical tracer diffusivity (m²/s)
+ *   dbsfc           [nod2D * nl]   buoyancy difference surface→level (m/s²),
+ *                                  = g·(ρ_surf(z) − ρ(z))/ρ(z). Written by the
+ *                                  EOS (fesom_eos.c, gated on KPP) and read by
+ *                                  KPP bldepth. Fortran's dbsfc is the
+ *                                  o_mixing_KPP_mod member filled from
+ *                                  oce_ale_pressure_bv.F90. Zero/unused under PP.
  *
  * Per-element 3D fields:
  *   Av              [elem2D * nl]  vertical momentum viscosity (m²/s)
  *   pgf_x           [elem2D * nl]  pressure-gradient force, x-component (m/s²)
  *   pgf_y           [elem2D * nl]  pressure-gradient force, y-component (m/s²)
  *
- * KPP additions (Kv per tracer, blmc, ghats, OBL depth) are deferred to Phase 4.
+ * KPP module state (per-tracer diffK, viscA, blmc, ghats, dkm1, hbl, kbl,
+ * Bo, bfsfc, stable, caseA, dVsq, ustar, lookup tables) lives in struct
+ * fesom_kpp (fesom_kpp.h), mirroring the o_mixing_KPP_mod module. Only dbsfc
+ * lives here — it is written by the EOS, which carries aux but not kpp.
  *
  * GM/Redi additions (Phase G2a):
  *   MLD1_ind        [nod2D]        mixed-layer-depth index per node, computed
@@ -38,6 +47,7 @@ typedef struct fesom_aux {
     real_t *sw_alpha;
     real_t *sw_beta;
     real_t *Kv;
+    real_t *dbsfc;          /* [nod2D * nl] — KPP buoyancy re surface (EOS-written) */
 
     real_t *Av;
     real_t *pgf_x;

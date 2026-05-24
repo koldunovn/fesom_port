@@ -13,6 +13,7 @@
 #include "fesom_gm.h"
 #include "fesom_halo.h"
 #include "fesom_ice.h"
+#include "fesom_kpp.h"
 #include "fesom_mesh.h"
 #include "fesom_momentum.h"
 #include "fesom_partit.h"
@@ -52,6 +53,20 @@ int fesom_timestep(int                          step_n,
     /* Local alias so the original ctx->gm isn't mutated. */
     struct fesom_gm *gm = s_no_gmredi ? NULL : ctx->gm;
 
+    /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3515 mix_scheme_nmb).
+     *   FESOM_MIX_SCHEME=PP  (default) → fesom_pp_mixing (Pacanowski-Philander)
+     *   FESOM_MIX_SCHEME=KPP           → fesom_kpp_mixing (K-Profile)
+     * Production will later read this from namelist mix_scheme; for now an env
+     * knob mirroring the FESOM_NO_GMREDI pattern. mo_convect runs after either
+     * scheme (Fortran calls it in both branches, :3524 / :3531). */
+    static int s_mix_env_loaded = 0;
+    static int s_use_kpp        = 0;
+    if (!s_mix_env_loaded) {
+        const char *e = getenv("FESOM_MIX_SCHEME");
+        s_use_kpp = (e && (e[0] == 'K' || e[0] == 'k'));
+        s_mix_env_loaded = 1;
+    }
+
     /*  1. EOS + hydrostatic pressure + N²  */
     fesom_pressure_bv(tracers, mesh, aux);
     /* sw_alpha / sw_beta — McDougall (1987). Needed by GM/Redi (and KPP).
@@ -83,13 +98,21 @@ int fesom_timestep(int                          step_n,
     fesom_exchange_elem3D(aux->pgf_x, nl, p);
     fesom_exchange_elem3D(aux->pgf_y, nl, p);
 
-    /*  3. mixing: UVnode → PP → convective adjustment  */
+    /*  3. mixing: UVnode → (PP or KPP) → convective adjustment.
+     *     Dispatch mirrors oce_ale.F90:3515-3531 (mix_scheme_nmb 1=KPP / 2=PP);
+     *     mo_convect is shared (called after either scheme).  */
     fesom_compute_vel_nodes(mesh, dyn);
     fesom_halo_exchange(dyn->uvnode, FESOM_HALO_NOD3D, nl, 2, p);
 
-    fesom_pp_mixing(mesh, dyn, aux);
-    fesom_exchange_nod3D (aux->Kv, nl, p);
-    fesom_exchange_elem3D(aux->Av, nl, p);
+    if (s_use_kpp) {
+        /* KPP writes aux->Av (elements) + the single aux->Kv (T-channel,
+         * oce_ale.F90:3518-3522) and does its own internal halo exchanges. */
+        fesom_kpp_mixing(ctx->kpp, aux, tracers, dyn, mesh, p);
+    } else {
+        fesom_pp_mixing(mesh, dyn, aux);
+        fesom_exchange_nod3D (aux->Kv, nl, p);
+        fesom_exchange_elem3D(aux->Av, nl, p);
+    }
 
     fesom_mo_convect(mesh, aux);
     fesom_exchange_nod3D (aux->Kv, nl, p);

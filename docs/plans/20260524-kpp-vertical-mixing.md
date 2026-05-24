@@ -157,12 +157,12 @@ consumed by `enhance:1163-1177`), plus the wm/ws lookup tables and scalars `Vtc`
 ## Implementation Steps
 
 ### Phase K0: Scaffolding — dispatch, aux arrays, dump harness, reference provenance (NO behavior change)
-**Files:** Create `src/fesom_kpp.{c,h}`, `scripts/kpp_dump_diff.py`; Modify `src/fesom_aux.{c,h}`, `src/fesom_step.c`, `src/fesom_constants.h`, `oce_ale_mixing_kpp.F90` (dump gate)
-- [ ] Archive the exact namelists that produced `fortran_2yr_dt1800`; re-confirm every value in the "CORE2 reference KPP configuration" table.
-- [ ] Add KPP aux state (indexed `Kv[tr]`/`diffK`, node `viscA`, `hbl`,`kbl`(int),`ghats`,`blmc[3]`,`dkm1[3]`,`Bo`,`bfsfc`,`stable`,`caseA`,`dVsq`,`ustar`,`dbsfc`), stride `nl`, sized `myDim+eDim`.
-- [ ] Add runtime selector `FESOM_MIX_SCHEME=PP|KPP` (default PP; production should later read namelist `mix_scheme`); dispatch in `fesom_step.c` mirroring `oce_ale.F90:3515`, **keeping `mo_convect` after either scheme**. KPP branch = abort stub for now.
-- [ ] Add `FESOM_KPP_DUMP_DIR` dumps (C) + matching Fortran gate; write `scripts/kpp_dump_diff.py`; build a short Fortran KPP dump run (`work_kpp_dump`).
-- [ ] **Validate:** with KPP off, byte-identical to HEAD `0d4645a` (PP regression).
+**Files:** Create `src/fesom_kpp.{c,h}`, `scripts/kpp_dump_diff.py`; Modify `src/fesom_aux.{c,h}`, `src/fesom_step.{c,h}`, `src/fesom_main.c`, `CMakeLists.txt`, `oce_ale_mixing_kpp.F90` (dump gate)
+- [x] Archive the exact namelists that produced `fortran_2yr_dt1800`; re-confirm every value in the "CORE2 reference KPP configuration" table. → `docs/kpp_reference_namelists/` (+ PROVENANCE.md). `work_core`/`work_linfs_d1800` namelist.oce/.tra **byte-identical**; all values confirmed (mix_scheme=KPP, Ricr=0.3, A_ver=1e-4, visc/diff_sh_limit=5e-3, K_ver=1e-5, Kv0_const=.true., double_diffusion=.false., use_kpp_nonlclflx absent→.false., dt=1800).
+- [x] Add KPP module state — in **struct `fesom_kpp`** (`fesom_kpp.{c,h}`, mirroring o_mixing_KPP_mod + the fesom_gm precedent), NOT aux: per-tracer `diffK[ntr·N·nl]`, node `viscA`, `blmc[3·N·nl]`, `ghats[N·(nl-1)]`, `dVsq`, `dkm1[3·N]`, `hbl`,`bfsfc`,`caseA`,`stable`,`ustar`,`Bo`,`kbl`(int), `wmt`/`wst` tables, `Vtc`/`cg`. ➕ **Only `dbsfc` lives in aux** (EOS writes it; EOS carries aux not kpp). Layouts match Fortran column-major so per-component slabs are contiguous & directly exchangeable. KEEP single `aux->Kv` as TDMA consumer.
+- [x] Add runtime selector `FESOM_MIX_SCHEME=PP|KPP` (default PP); dispatch in `fesom_step.c` mirroring `oce_ale.F90:3515`, **`mo_convect` after either scheme** (shared). KPP branch = `fesom_kpp_mixing` abort stub. Threaded `kpp` through `fesom_step_ctx` + `fesom_main.c` (alloc/ctx/free) like `gm`.
+- [x] Add `FESOM_KPP_DUMP_DIR` dumps: C `fesom_kpp_dump_nodes` + Fortran gate (`kpp_dump_load_env`/`kpp_dump_nod`/`kpp_dump_prestep`/`kpp_dump_final`, FESOM_KPP_DUMP_STEP, call counter). `scripts/kpp_dump_diff.py` written. Fortran dump run = `work_kpp_dump` (linfs, dt=1800, 16r) → `/work/.../kpp_fdump/dump` (8 tags: prestep/dVsq/dbsfc/bldepth/viscA/diffKt/diffKs/ghats; diff-script self-parse 0.000e+00).
+- [x] **Validate:** with KPP off, byte-identical to HEAD `028cc1b` (PP regression). ✅ `job_kpp_k0_byteident` (16r/200steps/dt=500): all snapshots + run.log diagnostics **bit-for-bit identical** (worst |Δ|=0.000e+00); `scripts/kpp_byteident_check.py`.
 
 ### Phase K1: `oce_mixing_kpp_init` — lookup tables + constants
 **Files:** Modify `src/fesom_kpp.{c,h}`

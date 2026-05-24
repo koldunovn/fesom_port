@@ -1,0 +1,57 @@
+#!/bin/bash
+#SBATCH --job-name=kpp_k0_byteident
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:40:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/kpp_k0_byteident/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/kpp_k0_byteident/slurm.%j.err
+
+# Phase K0 validation: prove the KPP scaffolding leaves the default PP path
+# byte-identical to HEAD 028cc1b. Runs the saved HEAD binary and the K0 binary
+# with identical config and default env (no FESOM_MIX_SCHEME -> PP), then
+# compares every snapshot data variable (must be max|Δ|==0).
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+BASE=/work/ab0995/a270088/port/kpp_k0_byteident
+OUT_HEAD=$BASE/head
+OUT_K0=$BASE/k0
+mkdir -p "$OUT_HEAD" "$OUT_K0"
+
+BIN_HEAD=/home/a/a270088/port2/fesom2_port/build/fesom_port.HEAD028cc1b
+BIN_K0=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+DT=500
+NSTEPS=200
+SNAP_EVERY=50
+export FESOM_PRINT_EVERY=50
+JRA55_YEAR=1958
+# default mixing = PP (no FESOM_MIX_SCHEME) — exactly the HEAD path.
+
+date
+echo "=== HEAD baseline (028cc1b) ==="
+srun -l "$BIN_HEAD" "$MESH" "$OUT_HEAD" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_HEAD/run.log" 2> "$OUT_HEAD/run.err"
+echo "HEAD exit: $?"
+
+echo "=== K0 scaffolding binary (default PP) ==="
+srun -l "$BIN_K0" "$MESH" "$OUT_K0" "$DT" "$NSTEPS" "$SNAP_EVERY" "$PHC" "$JRA55_YEAR" \
+    > "$OUT_K0/run.log" 2> "$OUT_K0/run.err"
+echo "K0 exit: $?"
+date
+
+echo "=== per-step diagnostic diff (coarse %.2e sanity) ==="
+diff <(grep -E "it=" "$OUT_HEAD/run.log") <(grep -E "it=" "$OUT_K0/run.log") \
+    && echo "run.log diagnostics IDENTICAL" || echo "run.log diagnostics DIFFER"
+
+echo "=== snapshot byte-identity check ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+PYTHONPATH=/home/a/a270088/PYTHON "$PY" \
+    /home/a/a270088/port2/fesom2_port/scripts/kpp_byteident_check.py "$OUT_HEAD" "$OUT_K0"
+echo "byteident exit: $?"
