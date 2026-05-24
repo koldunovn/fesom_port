@@ -1,0 +1,43 @@
+#!/bin/bash
+#SBATCH --job-name=kpp_k6_val
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/kpp_k6_validate/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/kpp_k6_validate/slurm.%j.err
+
+# Phase K6 validation (blmix_kpp: blmc[3] + dkm1[3] + ghats). C KPP partial-driver
+# dump run (nsteps=1, dt=1800, 16r, FESOM_MIX_SCHEME=KPP): pre-step + ri_iwmix +
+# bldepth + blmix at step 1, dumps blmc_m/t/s, bl_ghats, dkm1 (+ all K5 tags) then
+# continues (dump run; aux Kv/Av untouched -> 1 step safe). Compare vs the Fortran
+# reference (/work/.../kpp_fdump/dump, regenerated with the kpp_dump_blmix point).
+# blmix inputs: interior viscA/diffK (bit-identical, K5) + bldepth outputs
+# (hbl/bfsfc/stable/caseA/kbl, forcing-driven per project_forcing_step1_diff) +
+# ustar -> blmc/dkm1 diffs track the bldepth/forcing diffs, NOT a blmix algebra bug.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+
+BASE=/work/ab0995/a270088/port/kpp_k6_validate
+mkdir -p "$BASE/kpp_dump"
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+FREF=/work/ab0995/a270088/port/kpp_fdump/dump
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+SRC=/home/a/a270088/port2/fesom2_port
+
+date
+echo "=== C KPP partial-driver dump (through blmix; nsteps=1, dt=1800) ==="
+FESOM_MIX_SCHEME=KPP FESOM_KPP_DUMP_DIR=$BASE/kpp_dump FESOM_KPP_DUMP_STEP=1 \
+  srun -l "$BIN" "$MESH" "$BASE/kpp_dump" 1800 1 -1 "$PHC" 1958 \
+  > "$BASE/kpp_dump/run.log" 2> "$BASE/kpp_dump/run.err"
+echo "KPP dump-run exit: $?  (blmix dump files:)"
+ls "$BASE/kpp_dump"/kpp_dump_s1_{blmc_m,blmc_t,blmc_s,dkm1,bl_ghats}_rank0.txt 2>/dev/null
+
+echo "=== diff C vs Fortran reference (all tags; focus blmc/dkm1/bl_ghats) ==="
+PYTHONPATH=/home/a/a270088/PYTHON "$PY" "$SRC/scripts/kpp_dump_diff.py" "$FREF" "$BASE/kpp_dump"
+date

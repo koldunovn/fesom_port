@@ -53,6 +53,9 @@
  * j in [0,nnj+1]. Row-major with i as the row (nnj+2 columns). */
 #define KPP_TBL(i, j)  ((size_t)(i) * (size_t)(FESOM_KPP_NNJ + 2) + (size_t)(j))
 
+/* per-column stack-scratch cap (matches NL_MAX in fesom_gm/eos/momentum). */
+enum { KPP_NL_MAX = 64 };
+
 /* fesom_kpp_mixing call index (= ocean step); mirrors the Fortran module's
  * kpp_call_count. Used for dump-step gating. */
 static int s_kpp_call = 0;
@@ -429,6 +432,150 @@ static void kpp_bldepth(fesom_kpp *k, const struct fesom_aux *aux,
     }
 }
 
+/*===========================================================================
+ * blmix_kpp — boundary-layer mixing coeffs blmc[3] + dkm1[3] + ghats.
+ * Literal port of blmix_kpp (oce_ale_mixing_kpp.F90:1155-1327). Matches the
+ * interior diffusivities to the surface-layer scaling at hbl (eqns 10/11/18)
+ * via the caseA-selected level kn, the shape function G(σ), and wscale.
+ * Channels (Fortran 1/2/3 = momentum/T/S): blmc/diff_col/dkm1 C-slabs are
+ * 0=momentum(viscA), 1=T(diffK ch1), 2=S(diffK ch2). NOTE the cross-wiring:
+ * difsp/difsh/Gs (salinity) read diff_col ch3 (=C slab 2); diftp/difth/Gt
+ * (temperature) read diff_col ch2 (=C slab 1). `ghats` is computed even though
+ * CORE2 (use_kpp_nonlclflx=.false.) never consumes it. Loops myDim. Uses Z
+ * (mid-layer) for the interface σ but zbar (interface) for the kbl-1 dkm1 σ.
+ *===========================================================================*/
+static void kpp_blmix(fesom_kpp *k, const struct fesom_mesh *mesh)
+{
+    const int nl  = k->nl;
+    const int N   = k->n_nod;
+    const int Nmy = mesh->myDim_nod2D;
+    const size_t slab = (size_t)N * (size_t)nl;
+    FESOM_CHECK(nl <= KPP_NL_MAX, "kpp_blmix: nl %d > KPP_NL_MAX", nl);
+
+    real_t *viscA  = k->viscA;
+    real_t *diffKt = k->diffK + 0 * slab;   /* T (diffK(:,:,1)) */
+    real_t *diffKs = k->diffK + 1 * slab;   /* S (diffK(:,:,2)) */
+    real_t *blmcM  = k->blmc  + 0 * slab;   /* blmc(:,:,1) momentum */
+    real_t *blmcT  = k->blmc  + 1 * slab;   /* blmc(:,:,2) temperature */
+    real_t *blmcS  = k->blmc  + 2 * slab;   /* blmc(:,:,3) salinity */
+
+    /* zero blmc over myDim+eDim (:1177-1179) */
+    memset(k->blmc, 0, (size_t)3 * slab * sizeof(real_t));
+
+    for (int n = 0; n < Nmy; ++n) {
+        int nzmin = mesh->ulevels_nod2D[n] - 1;
+        int nzmax = mesh->nlevels_nod2D[n] - 1;          /* 0-based deepest interface */
+        /* temporary-solution skips (:1191-1192), in terms of the 1-based counts */
+        if (mesh->nlevels_nod2D[n] < 3) continue;
+        if (mesh->nlevels_nod2D[n] - mesh->ulevels_nod2D[n] < 2) continue;
+
+        real_t hbl    = k->hbl[n];
+        real_t bfsfc  = k->bfsfc[n];
+        real_t stable = k->stable[n];
+        real_t us     = k->ustar[n];
+        int    kbl    = k->kbl[n];
+
+        /* dthick (interface thicknesses, :1194-1196) + diff_col (:1198-1200) */
+        real_t dthick[KPP_NL_MAX];
+        real_t dcol[KPP_NL_MAX][3];
+        for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz)
+            dthick[nz] = 0.5 * ( mesh->hnode[FESOM_NODE3D(n, nz - 1, nl)]
+                               + mesh->hnode[FESOM_NODE3D(n, nz,     nl)] );
+        dthick[nzmin] = mesh->hnode[FESOM_NODE3D(n, nzmin,     nl)] * 0.5;
+        dthick[nzmax] = mesh->hnode[FESOM_NODE3D(n, nzmax - 1, nl)] * 0.5;
+        for (int nz = nzmin; nz <= nzmax - 1; ++nz) {
+            size_t i = FESOM_NODE3D(n, nz, nl);
+            dcol[nz][0] = viscA [i];
+            dcol[nz][1] = diffKt[i];
+            dcol[nz][2] = diffKs[i];
+        }
+        dcol[nzmax][0] = dcol[nzmax - 1][0];
+        dcol[nzmax][1] = dcol[nzmax - 1][1];
+        dcol[nzmax][2] = dcol[nzmax - 1][2];
+
+        /* velocity scales at hbl (:1206-1208) */
+        real_t sigma = stable * 1.0 + (1.0 - stable) * KPP_EPSILON;
+        real_t zehat = KPP_VONK * sigma * hbl * bfsfc;
+        real_t wm, ws;
+        kpp_wscale(k, zehat, us, &wm, &ws);
+
+        /* caseA-selected matching level kn (:1210-1214). caseA∈{0,1}:
+         * INT(caseA+epsln) → kn = kbl-caseA, capped to the interior. */
+        int ca   = (int)(k->caseA[n] + KPP_EPSLN);
+        int kn   = ca * (kbl - 1) + (1 - ca) * kbl;
+        if (kn   > nzmax - 1) kn   = nzmax - 1;          /* MIN(kn, nl1-1) */
+        int knm1 = kn - 1; if (knm1 < nzmin) knm1 = nzmin;   /* MAX(kn-1, nu1) */
+        int knp1 = kn + 1; if (knp1 > nzmax) knp1 = nzmax;   /* MIN(kn+1, nl1) */
+
+        /* interior viscosities + one-sided derivatives at hbl (eqn 18, :1220-1242) */
+        real_t delhat = fabs(mesh->Z[kn]) - hbl;
+        real_t R      = 1.0 - delhat / dthick[kn];
+        real_t dvdzup, dvdzdn;
+        dvdzup = (dcol[knm1][0] - dcol[kn][0]) / dthick[kn];
+        dvdzdn = (dcol[kn][0] - dcol[knp1][0]) / dthick[knp1];
+        real_t viscp = 0.5 * ( (1.0 - R) * (dvdzup + fabs(dvdzup))
+                             + R         * (dvdzdn + fabs(dvdzdn)) );
+        dvdzup = (dcol[knm1][2] - dcol[kn][2]) / dthick[kn];
+        dvdzdn = (dcol[kn][2] - dcol[knp1][2]) / dthick[knp1];
+        real_t difsp = 0.5 * ( (1.0 - R) * (dvdzup + fabs(dvdzup))
+                             + R         * (dvdzdn + fabs(dvdzdn)) );
+        dvdzup = (dcol[knm1][1] - dcol[kn][1]) / dthick[kn];
+        dvdzdn = (dcol[kn][1] - dcol[knp1][1]) / dthick[knp1];
+        real_t diftp = 0.5 * ( (1.0 - R) * (dvdzup + fabs(dvdzup))
+                             + R         * (dvdzdn + fabs(dvdzdn)) );
+
+        real_t visch = dcol[kn][0] + viscp * delhat;
+        real_t difsh = dcol[kn][2] + difsp * delhat;
+        real_t difth = dcol[kn][1] + diftp * delhat;
+
+        real_t f1 = stable * KPP_CONC1 * bfsfc / (us*us*us*us + KPP_EPSLN);
+
+        real_t gat1m = visch / (hbl + KPP_EPSLN) / (wm + KPP_EPSLN);
+        real_t dat1m = -viscp / (wm + KPP_EPSLN) + f1 * visch;
+        if (dat1m > 0.0) dat1m = 0.0;
+        real_t gat1s = difsh / (hbl + KPP_EPSLN) / (ws + KPP_EPSLN);
+        real_t dat1s = -difsp / (ws + KPP_EPSLN) + f1 * difsh;
+        if (dat1s > 0.0) dat1s = 0.0;
+        real_t gat1t = difth / (hbl + KPP_EPSLN) / (ws + KPP_EPSLN);
+        real_t dat1t = -diftp / (ws + KPP_EPSLN) + f1 * difth;
+        if (dat1t > 0.0) dat1t = 0.0;
+
+        /* shape functions + BL coeffs at interfaces (eqns 10/11, :1259-1300) */
+        real_t sig, a1, a2, a3, Gm, Gs, Gt;
+        for (int nz = nzmin + 1; nz <= nzmax - 1; ++nz) {
+            if (nz >= kbl) break;
+            sig   = fabs(mesh->Z[nz]) / (hbl + KPP_EPSLN);
+            sigma = stable * sig + (1.0 - stable) * fmin(sig, KPP_EPSILON);
+            zehat = KPP_VONK * sigma * hbl * bfsfc;
+            kpp_wscale(k, zehat, us, &wm, &ws);
+            a1 = sig - 2.0; a2 = 3.0 - 2.0 * sig; a3 = sig - 1.0;
+            Gm = a1 + a2 * gat1m + a3 * dat1m;
+            Gs = a1 + a2 * gat1s + a3 * dat1s;
+            Gt = a1 + a2 * gat1t + a3 * dat1t;
+            size_t i = FESOM_NODE3D(n, nz, nl);
+            blmcM[i] = hbl * wm * sig * (1.0 + sig * Gm);
+            blmcT[i] = hbl * ws * sig * (1.0 + sig * Gt);
+            blmcS[i] = hbl * ws * sig * (1.0 + sig * Gs);
+            k->ghats[(size_t)n * (nl - 1) + nz] =
+                (1.0 - stable) * k->cg / (ws * hbl + KPP_EPSLN);
+        }
+
+        /* diffusivities at the kbl-1 grid level → dkm1 (:1307-1323).
+         * NOTE: σ here uses zbar (interface depth), not Z. */
+        sig   = fabs(mesh->zbar_3d_n[FESOM_NODE3D(n, kbl - 1, nl)]) / (hbl + KPP_EPSLN);
+        sigma = stable * sig + (1.0 - stable) * fmin(sig, KPP_EPSILON);
+        zehat = KPP_VONK * sigma * hbl * bfsfc;
+        kpp_wscale(k, zehat, us, &wm, &ws);
+        a1 = sig - 2.0; a2 = 3.0 - 2.0 * sig; a3 = sig - 1.0;
+        Gm = a1 + a2 * gat1m + a3 * dat1m;
+        Gs = a1 + a2 * gat1s + a3 * dat1s;
+        Gt = a1 + a2 * gat1t + a3 * dat1t;
+        k->dkm1[0 * N + n] = hbl * wm * sig * (1.0 + sig * Gm);
+        k->dkm1[1 * N + n] = hbl * ws * sig * (1.0 + sig * Gt);
+        k->dkm1[2 * N + n] = hbl * ws * sig * (1.0 + sig * Gs);
+    }
+}
+
 /* K5 dump: driver pre-step inputs to bldepth — prestep(ustar,Bo) + dVsq + dbsfc
  * columns. Mirrors the Fortran kpp_dump_prestep (oce_ale_mixing_kpp.F90:554-578). */
 static double kpp_get_prestep(int node, int comp, void *user)
@@ -465,6 +612,88 @@ static void kpp_dump_bldepth(const fesom_kpp *k, const struct fesom_mesh *mesh,
 {
     const fesom_kpp *kp = k;
     fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "bldepth", 5, kpp_get_bldepth, &kp);
+}
+
+/* K6 dump: blmix outputs — blmc[3] (full columns), ghats (nl-1 cols), dkm1[3]
+ * (per node). Dumped right after blmix, BEFORE enhance/combine, to match the
+ * incremental C driver and the Fortran kpp_dump_blmix point (after CALL blmix_kpp,
+ * before enhance — enhance modifies blmc/ghats at kbl-1). */
+static double kpp_get_dkm1(int node, int comp, void *user)
+{
+    const fesom_kpp *k = *(const fesom_kpp *const *)user;
+    return (double)k->dkm1[(size_t)comp * (size_t)k->n_nod + node];   /* j-major [3*N] */
+}
+static void kpp_dump_blmix(const fesom_kpp *k, const struct fesom_mesh *mesh,
+                           struct fesom_partit *partit)
+{
+    size_t slab = (size_t)k->n_nod * (size_t)k->nl;
+    const fesom_kpp *kp = k;
+    kpp_col_src bm = { k->blmc + 0 * slab, k->nl };
+    kpp_col_src bt = { k->blmc + 1 * slab, k->nl };
+    kpp_col_src bs = { k->blmc + 2 * slab, k->nl };
+    kpp_col_src gh = { k->ghats,           k->nl - 1 };   /* ghats stride is nl-1 */
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "blmc_m",   k->nl,     kpp_get_col, &bm);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "blmc_t",   k->nl,     kpp_get_col, &bt);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "blmc_s",   k->nl,     kpp_get_col, &bs);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "bl_ghats", k->nl - 1, kpp_get_col, &gh);
+    fesom_kpp_dump_nodes(mesh, partit, s_kpp_call, "dkm1",     3,         kpp_get_dkm1, &kp);
+}
+
+/* ---- controlled-input replay (FESOM_KPP_REPLAY_DIR) ----------------------
+ * Validation aid for K6+: overwrite the C's bldepth/prestep/ri_iwmix outputs
+ * with the FORTRAN-dumped values, so the subsequent blmix (/enhance/combine)
+ * diff is PURE algebra — isolated from the step-1 forcing difference
+ * (project_forcing_step1_diff) that perturbs bfsfc/ustar at ~every node and
+ * (via f1∝bfsfc/ustar⁴, wscale) swamps a live-run blmc comparison. The Fortran
+ * rank-R dump lists rank R's owned nodes in myList order (same 16r partition as
+ * the C), so file line i == local node i (asserted against the gid). */
+static void kpp_replay_file(const char *dir, const char *tag, struct fesom_partit *partit,
+                            int Nmy, int ncomp, double *out)
+{
+    char path[1024], line[16384];
+    snprintf(path, sizeof(path), "%s/kpp_dump_s1_%s_rank%d.txt", dir, tag, partit->mype);
+    FILE *f = fopen(path, "r");
+    FESOM_CHECK(f, "kpp_replay: cannot open %s", path);
+    if (!fgets(line, sizeof(line), f)) FESOM_DIE("kpp_replay: empty %s", path);   /* header */
+    for (int i = 0; i < Nmy; ++i) {
+        if (!fgets(line, sizeof(line), f)) FESOM_DIE("kpp_replay: short %s at %d", path, i);
+        char *p = line, *e;
+        long gid = strtol(p, &e, 10); p = e;
+        FESOM_CHECK(gid == partit->myList_nod2D[i],
+                    "kpp_replay %s: gid/order mismatch at line %d (%ld vs %d)",
+                    tag, i, gid, partit->myList_nod2D[i]);
+        for (int c = 0; c < ncomp; ++c) { out[(size_t)i * ncomp + c] = strtod(p, &e); p = e; }
+    }
+    fclose(f);
+}
+static void kpp_replay_inputs(fesom_kpp *k, const struct fesom_mesh *mesh,
+                              struct fesom_partit *partit, const char *dir)
+{
+    const int nl = k->nl, Nmy = mesh->myDim_nod2D;
+    const size_t slab = (size_t)k->n_nod * (size_t)nl;
+    double *buf = malloc((size_t)Nmy * (size_t)nl * sizeof(double));
+    double *p5  = malloc((size_t)Nmy * 5 * sizeof(double));
+    FESOM_CHECK(buf && p5, "kpp_replay: out of memory");
+    /* bldepth (5): hbl, kbl(dump is +1 → back to 0-based), bfsfc, stable, caseA */
+    kpp_replay_file(dir, "bldepth", partit, Nmy, 5, p5);
+    for (int i = 0; i < Nmy; ++i) {
+        k->hbl[i]    = p5[i*5+0];  k->kbl[i]   = (int)lround(p5[i*5+1]) - 1;
+        k->bfsfc[i]  = p5[i*5+2];  k->stable[i]= p5[i*5+3];  k->caseA[i] = p5[i*5+4];
+    }
+    kpp_replay_file(dir, "prestep", partit, Nmy, 2, p5);      /* ustar, Bo */
+    for (int i = 0; i < Nmy; ++i) { k->ustar[i] = p5[i*2+0]; k->Bo[i] = p5[i*2+1]; }
+    kpp_replay_file(dir, "ri_viscA", partit, Nmy, nl, buf);
+    for (int i = 0; i < Nmy; ++i) for (int nz = 0; nz < nl; ++nz)
+        k->viscA[(size_t)i*nl + nz] = buf[(size_t)i*nl + nz];
+    kpp_replay_file(dir, "ri_diffKt", partit, Nmy, nl, buf);
+    for (int i = 0; i < Nmy; ++i) for (int nz = 0; nz < nl; ++nz)
+        k->diffK[0*slab + (size_t)i*nl + nz] = buf[(size_t)i*nl + nz];
+    kpp_replay_file(dir, "ri_diffKs", partit, Nmy, nl, buf);
+    for (int i = 0; i < Nmy; ++i) for (int nz = 0; nz < nl; ++nz)
+        k->diffK[1*slab + (size_t)i*nl + nz] = buf[(size_t)i*nl + nz];
+    free(buf); free(p5);
+    if (partit->mype == 0)
+        fprintf(stderr, "[kpp_replay] injected Fortran inputs from %s (blmix diff = pure algebra)\n", dir);
 }
 
 /*===========================================================================
@@ -540,19 +769,31 @@ void fesom_kpp_mixing(fesom_kpp                  *k,
     /* OBL depth (bldepth, :428) — K5 */
     kpp_bldepth(k, aux, forcing, mesh);
 
-    /* dual-instrumentation dumps (step 1): pre-step + ri_iwmix + bldepth */
+    /* validation: optionally replace bldepth/prestep/ri inputs with the Fortran
+     * dump so the blmix diff is pure algebra (FESOM_KPP_REPLAY_DIR, K6+ only). */
+    {
+        const char *replay = getenv("FESOM_KPP_REPLAY_DIR");
+        if (replay && fesom_kpp_dump_this_step(s_kpp_call))
+            kpp_replay_inputs(k, mesh, partit, replay);
+    }
+
+    /* boundary-layer mixing coeffs (blmix_kpp, :430) — K6 */
+    kpp_blmix(k, mesh);
+
+    /* dual-instrumentation dumps (step 1): pre-step + ri_iwmix + bldepth + blmix */
     if (fesom_kpp_dump_this_step(s_kpp_call)) {
         kpp_dump_prestep(k, aux, mesh, partit);
         kpp_dump_riiwmix(k, aux, mesh, partit);
         kpp_dump_bldepth(k, mesh, partit);
+        kpp_dump_blmix(k, mesh, partit);
     }
 
-    /* Driver incomplete through K5: blmix_kpp/enhance/combine/single-Kv land
-     * K6..K8 (aux->Kv/Av untouched). Only a FESOM_KPP_DUMP_DIR dump run (1 step)
-     * may proceed; the partial result is NOT valid for dynamics. */
+    /* Driver incomplete through K6: enhance/combine/single-Kv land K7..K8
+     * (aux->Kv/Av untouched). Only a FESOM_KPP_DUMP_DIR dump run (1 step) may
+     * proceed; the partial result is NOT valid for dynamics. */
     if (!fesom_kpp_dump_dir())
-        FESOM_DIE("fesom_kpp_mixing: KPP driver incomplete (ported through K5 bldepth; "
-                  "blmix_kpp/enhance/combine/single-Kv pending K6..K8). Only a "
+        FESOM_DIE("fesom_kpp_mixing: KPP driver incomplete (ported through K6 blmix_kpp; "
+                  "enhance/combine/single-Kv pending K7..K8). Only a "
                   "FESOM_KPP_DUMP_DIR dump run may proceed. Use FESOM_MIX_SCHEME=PP otherwise.");
 }
 
