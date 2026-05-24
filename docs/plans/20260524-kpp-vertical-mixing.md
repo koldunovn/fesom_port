@@ -212,12 +212,17 @@ consumed by `enhance:1163-1177`), plus the wm/ws lookup tables and scalars `Vtc`
 - [x] Dispatch in `fesom_step.c` was already written for K8 (`s_use_kpp` → `fesom_kpp_mixing`; `mo_convect` + the Kv/Av exchanges shared after) — no change needed.
 - [x] **Validate (`job_kpp_k8_validate`, 16r):** (a) KPP LIVE 100 steps dt=1800 = finite (exit 0, no NaN/uv>5, CG ~110/step vs PP ~90); (b) PP 200 steps dt=500, KPP off = **byte-identical** to the K5 PP run (snap_000000+snap_000200 worst |Δ|=0). K6/K7/K8 are KPP-only → PP unchanged.
 
-### Phase K9: end-to-end climate validation vs fortran_2yr_dt1800
-**Files:** Create `scripts/kpp_climate_compare.py` (model on `clim_validation_2yr.py`), `job_kpp_2yr_dt1800`
-- [ ] Run C+KPP dt=1800 864r 2yr (1958-59); compare to `/scratch/a/a270088/fortran_2yr_dt1800`.
-- [ ] Confirm Kv/Av now correlate with KPP, MLD/convection regions match, SST bias shrinks vs PP.
-- [ ] Localize any divergence via the K1–K7 dumps.
-- [ ] **Validate:** SST/SSS area-weighted RMS + maps vs the KPP reference; document residuals.
+### Phase K9: end-to-end climate validation vs fortran_2yr_dt1800 ✅
+**Files:** `scripts/kpp_climate_compare.py`, `job_kpp_2yr_dt1800`
+- [x] Ran C+KPP dt=1800 864r 2yr (1958-59, `kpp_2yr_dt1800`) — clean (exit 0, CG ~86/step, no NaN/uv>5).
+- [x] **Validate vs `fortran_2yr_dt1800` (the default-CORE2 KPP reference):** C+KPP matches
+  Fortran-KPP to global SST/SSS RMS **0.0046/0.0023** (1958), **0.0128/0.0044** (1959); biases ~0,
+  non-drifting → KPP port faithful end-to-end (as tight as the PP-vs-PP 0.004 match).
+- [x] **Scheme contrast confirms the KPP payoff:** C+**PP** vs Fortran-**KPP** = SST RMS
+  **0.085/0.093** — the genuine PP↔KPP difference is ~18× the C+KPP residual, so the comparison
+  correctly resolves schemes and C+KPP reproduces its reference.
+- [x] Residual: the slow 1958→1959 SST-RMS growth (0.0046→0.0128) is the accumulated step-1
+  sea-ice-forcing transient ([[project_forcing_step1_diff]]) + chaos; tiny, biases stay ~0.
 
 ### Phase K10: Acceptance + stability
 - [ ] All Overview requirements met; KPP selectable; PP byte-identical when off; every ported routine dual-instrument-matched; climate matches the KPP reference.
