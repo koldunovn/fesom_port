@@ -344,7 +344,8 @@ int main(int argc, char **argv)
      * harmless under PP (touches only the kpp struct). */
     fesom_kpp     kpp;     fesom_kpp_alloc    (&kpp,    &mesh, tracers.num_tracers);
     fesom_kpp_init(&kpp);
-    fesom_kpp_dump_init(&kpp, mpi.mype);   /* K1 validation dump (FESOM_KPP_DUMP_DIR-gated) */
+    fesom_kpp_dump_init(&kpp, mpi.mype);          /* K1 validation dump (gated) */
+    fesom_kpp_dump_wscale_sweep(&kpp, mpi.mype);  /* K2 validation dump (gated) */
 
     /* Sea-ice state (Phase A: allocator + no-op driver only).
      * fesom_ice_setup needs the ocean dt to compute Tevp_inv, so it runs

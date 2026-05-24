@@ -125,6 +125,10 @@ const char *fesom_kpp_dump_dir(void);
  * scripts/kpp_init_reference.py. */
 void fesom_kpp_dump_init(const fesom_kpp *k, int rank);
 
+/* K2 wscale sweep dump: rank 0 writes <dir>/kpp_wscale_rank0.txt — wm/ws over a
+ * fixed (zehat, ustar) grid. No-op unless FESOM_KPP_DUMP_DIR is set. */
+void fesom_kpp_dump_wscale_sweep(const fesom_kpp *k, int rank);
+
 /* True on the step we dump (default step 1; override FESOM_KPP_DUMP_STEP). */
 int fesom_kpp_dump_this_step(int step_n);
 

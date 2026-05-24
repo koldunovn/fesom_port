@@ -149,6 +149,50 @@ void fesom_kpp_init(fesom_kpp *k)
 }
 
 /*===========================================================================
+ * wscale — turbulent velocity scales wm, ws from the 2D lookup table.
+ * Literal port of wscale (oce_ale_mixing_kpp.F90:828-877). Lookup for
+ * zehat <= zmax (unstable); stable formula otherwise. Private (static).
+ *===========================================================================*/
+static void kpp_wscale(const fesom_kpp *k, real_t zehat, real_t us,
+                       real_t *wm, real_t *ws)
+{
+    if (zehat <= KPP_ZMAX) {
+        real_t zdiff = zehat - KPP_ZMIN;
+        int iz = (int)(zdiff / k->deltaz);          /* INT (trunc) */
+        if (iz > FESOM_KPP_NNI) iz = FESOM_KPP_NNI;
+        if (iz < 0)             iz = 0;
+        int izp1 = iz + 1;
+
+        real_t udiff = us - KPP_UMIN;
+        real_t uq = udiff / k->deltau;               /* MIN(.,nnj) then INT */
+        if (uq > (real_t)FESOM_KPP_NNJ) uq = (real_t)FESOM_KPP_NNJ;
+        int ju = (int)uq;
+        if (ju < 0) ju = 0;
+        int jup1 = ju + 1;
+
+        real_t zfrac = zdiff / k->deltaz - (real_t)iz;
+        real_t ufrac = udiff / k->deltau - (real_t)ju;
+        real_t fzfrac = 1.0 - zfrac;
+
+        real_t wam = fzfrac * k->wmt[KPP_TBL(iz, jup1)]
+                   + zfrac  * k->wmt[KPP_TBL(izp1, jup1)];
+        real_t wbm = fzfrac * k->wmt[KPP_TBL(iz, ju)]
+                   + zfrac  * k->wmt[KPP_TBL(izp1, ju)];
+        *wm = (1.0 - ufrac) * wbm + ufrac * wam;
+
+        real_t was = fzfrac * k->wst[KPP_TBL(iz, jup1)]
+                   + zfrac  * k->wst[KPP_TBL(izp1, jup1)];
+        real_t wbs = fzfrac * k->wst[KPP_TBL(iz, ju)]
+                   + zfrac  * k->wst[KPP_TBL(izp1, ju)];
+        *ws = (1.0 - ufrac) * wbs + ufrac * was;
+    } else {
+        real_t u3 = us * us * us;
+        *wm = KPP_VONK * us * u3 / (u3 + KPP_CONC1 * zehat + KPP_EPSLN);
+        *ws = *wm;
+    }
+}
+
+/*===========================================================================
  * KPP driver — abort stub until the routine bodies (K1..K8) are in place.
  * Selected only when FESOM_MIX_SCHEME=KPP (fesom_step.c); the default PP path
  * never reaches here, so K0 stays byte-identical to HEAD.
@@ -209,6 +253,35 @@ void fesom_kpp_dump_init(const fesom_kpp *k, int rank)
         for (int j = 0; j <= FESOM_KPP_NNJ + 1; ++j)
             fprintf(f, "%d %d %.17g %.17g\n", i, j,
                     k->wmt[KPP_TBL(i, j)], k->wst[KPP_TBL(i, j)]);
+    fclose(f);
+}
+
+/* K2 wscale sweep dump: rank 0 evaluates wscale over a fixed (zehat, ustar)
+ * grid spanning unstable-table / stable-branch / clamp regions; writes
+ * <dir>/kpp_wscale_rank0.txt (`i j zehat ustar wm ws`). The Fortran gate uses
+ * the identical grid; both compared vs scripts/kpp_wscale_reference.py. */
+#define KPP_SWEEP_NZ 201
+#define KPP_SWEEP_NU 101
+void fesom_kpp_dump_wscale_sweep(const fesom_kpp *k, int rank)
+{
+    kpp_dump_load_env();
+    if (!s_kpp_dump_dir || rank != 0) return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/kpp_wscale_rank0.txt", s_kpp_dump_dir);
+    FILE *f = fopen(path, "w");
+    if (!f) { fprintf(stderr, "kpp_dump_wscale: cannot open %s\n", path); return; }
+    fprintf(f, "# i j zehat ustar wm ws  (sweep %dx%d)\n",
+            KPP_SWEEP_NZ, KPP_SWEEP_NU);
+    for (int i = 0; i < KPP_SWEEP_NZ; ++i) {
+        real_t zehat = -1.0e-6 + (real_t)i * (2.0e-6 / (real_t)(KPP_SWEEP_NZ - 1));
+        for (int j = 0; j < KPP_SWEEP_NU; ++j) {
+            real_t ustar = (real_t)j * (0.05 / (real_t)(KPP_SWEEP_NU - 1));
+            real_t wm, ws;
+            kpp_wscale(k, zehat, ustar, &wm, &ws);
+            fprintf(f, "%d %d %.17g %.17g %.17g %.17g\n", i, j,
+                    zehat, ustar, wm, ws);
+        }
+    }
     fclose(f);
 }
 

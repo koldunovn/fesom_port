@@ -170,10 +170,10 @@ consumed by `enhance:1163-1177`), plus the wm/ws lookup tables and scalars `Vtc`
 - [x] Constants in `fesom_kpp.c` (KPP_*): `Ricr=0.3`, `concv=1.6`, A_ver/K_ver reuse FESOM_PHASE1_* (1e-4/1e-5), `visc/diff_sh_limit=5e-3`, `Riinfty=0.8`, `minmix=3e-3`, `cekman=0.7`, `cmonob=1.0`, `epsilon_kpp=0.1`, `vonk=0.4`, `conc1=5`, `epsln=1e-40`, zmin/zmax/umin/umax; derived `Vtc` (`:177`), `cg` (`:188`).
 - [x] **Validate:** full table + 4 constants dumped (C `fesom_kpp_dump_init` + Fortran gate) vs independent `scripts/kpp_init_reference.py`. **Vtc/cg/deltaz/deltau bit-identical C-vs-Fortran (|Δ|=0); wmt/wst C-vs-F max|Δ|=3.5e-18 (max_rel ~4e-16, libm last-ULP), well within ≤1e-12.** Both codes also match the python reference to ~4e-16. (`job_kpp_k1_validate`.)
 
-### Phase K2: `wscale` — turbulent velocity scales
-**Files:** Modify `src/fesom_kpp.c`
-- [ ] Port `wscale` (`:668-717`): index computation + the exact `MIN(iz,nni)`/`MIN(ju,nnj)` clamps + bilinear interpolation.
-- [ ] **Validate:** wm/ws over a (zehat,ustar) sweep covering stable/unstable; diff ≤1e-10.
+### Phase K2: `wscale` — turbulent velocity scales ✅
+**Files:** Modify `src/fesom_kpp.{c,h}`, `src/fesom_main.c`; `scripts/kpp_wscale_reference.py`
+- [x] Ported `wscale` (`:828-877`) as static `kpp_wscale`: index `INT(zdiff/deltaz)`, `MIN(iz,nni)`/`MAX(iz,0)`, `INT(MIN(udiff/deltau,nnj))`/`MAX(ju,0)` clamps, bilinear interpolation, stable formula (`zehat>zmax`).
+- [x] **Validate:** `(zehat,ustar)` sweep 201×101 spanning unstable-table / stable-branch / clamp regions (`fesom_kpp_dump_wscale_sweep` + Fortran gate, identical grid). **C-vs-Fortran wscale max|Δ|=2.8e-15 (max_rel ~3e-13)**, grid bit-identical; both match independent `scripts/kpp_wscale_reference.py` to ~3e-13. Well within ≤1e-10. (`job_kpp_k2_validate`.)
 
 ### Phase K3: `ri_iwmix` — interior mixing
 **Files:** Modify `src/fesom_kpp.c`
