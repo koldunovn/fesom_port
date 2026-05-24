@@ -989,9 +989,12 @@ skip_rest_state:
                 } else if (n == 1 ||
                            fesom_calendar_crossed(&io.prev_calendar, &io.calendar,
                                                   FESOM_PERIOD_MONTHLY)) {
+                    /* month_now is already advanced (calendar_crossed fires on the
+                     * first step of the new month), so NO +1 — unlike the Fortran
+                     * which fires at end-of-month and adds +1. Adding +1 here skips a
+                     * month (was loading 1,3,4,..,12, never February). See the SSS
+                     * read in fesom_sss_runoff.c for the full explanation. */
                     int mi = io.calendar.month;
-                    if (n > 1) mi = mi + 1;          /* Fortran gen_surface_forcing.F90:1591 */
-                    if (mi > 12) mi = 1;
                     if (mpi.mype == 0)
                         fprintf(stderr, "[chl] Updating chlorophyll climatology for month %d\n", mi);
                     fesom_read_other_NetCDF(chl_file, "chl", mi, forcing.chl, 1, 1, &mesh);

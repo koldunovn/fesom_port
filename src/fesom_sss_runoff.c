@@ -348,13 +348,17 @@ void fesom_sss_runoff_step(fesom_sss_runoff           *sr,
 {
     (void)yearnew;
 
-    /* sbc_do SSS section (Fortran 1571-1582) — read fresh slice each new month. */
+    /* sbc_do SSS section (Fortran 1571-1582) — read fresh slice each new month.
+     * The Fortran fires update_monthly_flag on the LAST timestep of the month
+     * (month still = ending month M) and then does `if (mstep>1) i=i+1` to load
+     * the upcoming month M+1. OUR update_monthly_flag fires on the FIRST step of
+     * the new month (fesom_calendar_crossed), where month_now is ALREADY M+1, so
+     * we must NOT add the +1 — doing so double-advances and skips a month (the
+     * old code loaded 1,3,4,..,12 and never read February → marginal seas absent
+     * from PHC, e.g. Red Sea/Baltic, restored to the wrong month's extrapolated
+     * target → systematic salty bias + missing seasonal cycle). Use month_now. */
     if (sr->sss_path[0] && update_monthly_flag) {
         int i = month_now;
-        if (sr->sss_month_loaded > 0) {
-            i = i + 1;       /* Fortran "if (mstep > 1) i=i+1" */
-            if (i > 12) i = 1;
-        }
         fesom_read_other_NetCDF(sr->sss_path, "SALT", i, forcing->Ssurf,
                                 /*check_dummy=*/1, /*do_onvert=*/1, mesh);
         sr->sss_month_loaded = i;
