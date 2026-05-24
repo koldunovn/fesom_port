@@ -36,6 +36,11 @@
 #define KPP_CONCV        1.6        /* concv  (namelist.oce:71) */
 #define KPP_VISC_SH_LIMIT 5.0e-3    /* visc_sh_limit (namelist.oce:66) */
 #define KPP_DIFF_SH_LIMIT 5.0e-3    /* diff_sh_limit (namelist.tra:97) */
+/* double diffusion (ddmix) — CORE2 has double_diffusion=.false. (namelist.tra:105),
+ * so the IF(double_diffusion) CALL ddmix gate (driver :420-422) is never taken.
+ * Port-what-CORE2-uses: the ddmix body (:1012-1085) is DEFERRED. If a config ever
+ * sets this true, port ddmix first — the #error below makes that explicit. */
+#define KPP_DOUBLE_DIFFUSION 0
 /* in-routine constants used in later phases (K3/K5/K7) */
 #define KPP_RIINFTY      0.8        /* ri_iwmix shear-Ri shape limit (:737) */
 #define KPP_MINMIX       3.0e-3     /* surface viscAE floor (driver :408)   */
@@ -310,6 +315,13 @@ void fesom_kpp_mixing(fesom_kpp               *k,
 
     /* interior mixing (ri_iwmix). dVsq/ustar/Bo pre-step + bldepth land K5. */
     kpp_ri_iwmix(k, aux, dyn, mesh);
+
+    /* K4: double diffusion gate (driver :420-422). CORE2 double_diffusion=.false.
+     * → ddmix not called (body deferred, port-what-CORE2-uses). */
+#if KPP_DOUBLE_DIFFUSION
+#error "KPP double_diffusion=.true. unsupported: port ddmix (oce_ale_mixing_kpp.F90:1012-1085)"
+    /* CALL ddmix(diffK, ...) */
+#endif
 
     if (fesom_kpp_dump_this_step(s_kpp_call))
         kpp_dump_riiwmix(k, aux, mesh, partit);

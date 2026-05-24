@@ -180,10 +180,10 @@ consumed by `enhance:1163-1177`), plus the wm/ws lookup tables and scalars `Vtc`
 - [x] Ported `ri_iwmix` (`:890-999`) as static `kpp_ri_iwmix`: loop-1 Ri=MAX(N²,0)/(shear²+epsln) stored in diffK ch0 scratch; loop-2 `frit=(1−min(Rigg/0.8,1)²)³`, viscA=`visc_sh_limit·frit+A_ver`, diffK(1)=`diff_sh_limit·frit+K_ver` (Kv0_const), diffK(2)=diffK(1); edge copies both loops. `smooth_Ri_ver/hor` (.false.) omitted. Incremental driver `fesom_kpp_mixing`: zero viscA (myDim+eDim) + ri_iwmix + dump; guarded so only a FESOM_KPP_DUMP_DIR run (1 step) proceeds (bldepth+ pending).
 - [x] **Validate:** ri dump (viscA/diffKt/diffKs + bvfreq) vs Fortran at step 1. At rest (uv=0→shear=0) ri_iwmix is a deterministic binary of sign(bvfreq): both `frit` endpoints give the **exact** Fortran values (background 1e-4/1e-5, static-instability 5.1e-3/5.01e-3 — diff value exactly 5e-3). `scripts/kpp_ri_bvfreq_check.py`: self-consistency 0 violations both codes; every C-vs-Fortran viscA disagreement is exactly a bvfreq sign flip (~0.5–1.3%/level, weak-stratification IC noise per [[feedback_phc_rank_dependent]]), 0 unexplained. The **shear-instability curve** (0<frit<1) is untested at rest → validated end-to-end at K9 + direct line-by-line port. PP byte-identical (KPP only entered under FESOM_MIX_SCHEME=KPP).
 
-### Phase K4: `ddmix` — double diffusion (GATE ONLY for CORE2)
+### Phase K4: `ddmix` — double diffusion (GATE ONLY for CORE2) ✅
 **Files:** Modify `src/fesom_kpp.c`
-- [ ] Port the `IF (double_diffusion) CALL ddmix` gate (`:359`). Since CORE2 has it `.false.`, the body is **deferred (unused)** — add a clear stub/abort if the flag is ever set, mirroring the kept-but-unused pattern. (Port the body later only if a config needs it.)
-- [ ] **Validate:** confirm no-op (byte-identical with `double_diffusion=.false.`).
+- [x] Ported the `IF (double_diffusion) CALL ddmix` gate (`:420-422`) as a compile-time `#if KPP_DOUBLE_DIFFUSION` (=0 for CORE2) with `#error` + the ddmix call site commented — body deferred (port-what-CORE2-uses). If ever enabled, the build fails loudly pointing at the body (`:1012-1085`) to port.
+- [x] **Validate:** no-op — the gate is compile-time-excluded, so the driver is numerically identical to K3 (which is PP byte-identical with KPP off and ri-validated with KPP on). No ddmix call in the binary.
 
 ### Phase K5: driver pre-step + `dbsfc` + `bldepth` — OBL depth (HIGHEST RISK)
 **Files:** Modify `src/fesom_kpp.c`, `src/fesom_eos.c`
