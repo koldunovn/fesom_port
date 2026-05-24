@@ -66,10 +66,14 @@ void fesom_tracer_adv_init(fesom_tracer_adv_scratch *sc,
     sc->fct_minus        = calloc(n_full,         sizeof(real_t));
     sc->fct_aux          = calloc((size_t)E * (size_t)mesh->nl * 2,
                                   sizeof(real_t));
+    sc->tr_xy            = calloc((size_t)E * (size_t)mesh->nl * 2, sizeof(real_t));
+    sc->edge_up_dn_grad  = calloc((size_t)mesh->myDim_edge2D * (size_t)mesh->nl * 4,
+                                  sizeof(real_t));
     FESOM_CHECK(sc->adv_flux_hor && sc->adv_flux_ver
              && sc->del_ttf_advhoriz && sc->del_ttf_advvert
              && sc->fct_LO && sc->fct_ttf_min && sc->fct_ttf_max
-             && sc->fct_plus && sc->fct_minus && sc->fct_aux,
+             && sc->fct_plus && sc->fct_minus && sc->fct_aux
+             && sc->tr_xy && sc->edge_up_dn_grad,
              "tracer adv scratch: out of memory");
 }
 
@@ -85,6 +89,8 @@ void fesom_tracer_adv_free(fesom_tracer_adv_scratch *sc)
     free(sc->fct_plus);
     free(sc->fct_minus);
     free(sc->fct_aux);
+    free(sc->tr_xy);
+    free(sc->edge_up_dn_grad);
     memset(sc, 0, sizeof(*sc));
 }
 
@@ -319,6 +325,10 @@ static void adv_tra_hor_upw1(const struct fesom_mesh *mesh,
  * use, callers run upwind with init_zero=true first, then central with
  * init_zero=false to obtain the antidiffusive horizontal flux.
  */
+/* Retained on purpose (currently unused): the 2nd-order central HO flux is kept
+ * available as an alternate FCT high-order scheme now that MFCT is the default.
+ * Do NOT remove. __attribute__((unused)) silences the no-caller warning. */
+__attribute__((unused))
 static void adv_tra_hor_central(const struct fesom_mesh *mesh,
                                 const struct fesom_dyn  *dyn,
                                 const real_t            *ttf,
@@ -420,6 +430,175 @@ static void adv_tra_hor_central(const struct fesom_mesh *mesh,
                 real_t hi = -vflux * 0.5 * (T1 + T2);
                 flux[FESOM_NODE3D(e, nz, nl)] = hi - flux[FESOM_NODE3D(e, nz, nl)];
             }
+        }
+    }
+}
+
+/*===========================================================================
+ * MFCT 3rd-order horizontal tracer advection (replaces adv_tra_hor_central).
+ *   tracer_gradient_elements (oce_tracer_mod.F90:175-185)
+ *   fill_up_dn_grad          (oce_muscl_adv.F90:356-525)
+ *   adv_tra_hor_mfct         (oce_adv_tra_hor.F90:546-834)
+ *===========================================================================*/
+
+/* tr_xy = gradient_sca·ttf per element per layer; on myDim then wide-exchanged. */
+static void tracer_gradient_elements(const struct fesom_mesh *mesh,
+                                     const real_t *ttf, real_t *tr_xy,
+                                     struct fesom_partit *partit)
+{
+    const int nl = mesh->nl;
+    const int E  = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+    memset(tr_xy, 0, (size_t)E * (size_t)nl * 2 * sizeof(real_t));
+    for (int el = 0; el < mesh->myDim_elem2D; ++el) {
+        int n0 = mesh->elem_nodes[3*el + 0];
+        int n1 = mesh->elem_nodes[3*el + 1];
+        int n2 = mesh->elem_nodes[3*el + 2];
+        const real_t *gs = &mesh->gradient_sca[6*el];
+        int nu = mesh->ulevels[el] - 1, nle = mesh->nlevels[el] - 1;
+        for (int nz = nu; nz < nle; ++nz) {
+            real_t t0 = ttf[FESOM_NODE3D(n0, nz, nl)];
+            real_t t1 = ttf[FESOM_NODE3D(n1, nz, nl)];
+            real_t t2 = ttf[FESOM_NODE3D(n2, nz, nl)];
+            tr_xy[FESOM_ELEMVEC(el, nz, nl) + 0] = gs[0]*t0 + gs[1]*t1 + gs[2]*t2;
+            tr_xy[FESOM_ELEMVEC(el, nz, nl) + 1] = gs[3]*t0 + gs[4]*t1 + gs[5]*t2;
+        }
+    }
+    if (partit && partit->npes > 1)
+        fesom_halo_exchange(tr_xy, FESOM_HALO_ELEM2D_FULL, nl, 2, partit);
+}
+
+/* area-weighted mean of tr_xy over node's surrounding elements that own layer nz,
+ * written into g[nz*4+cx], g[nz*4+cy], for nz in [nz0, nz1). (F:448-457 etc.) */
+static void node_avg_grad(const struct fesom_mesh *mesh, const real_t *tr_xy,
+                          int node, int nz0, int nz1, real_t *g, int cx, int cy)
+{
+    const int nl = mesh->nl;
+    int b0 = mesh->nod_in_elem2D_offsets[node];
+    int b1 = mesh->nod_in_elem2D_offsets[node + 1];
+    for (int nz = nz0; nz < nz1; ++nz) {
+        real_t tvol = 0.0, tx = 0.0, ty = 0.0;
+        for (int k = b0; k < b1; ++k) {
+            int el = mesh->nod_in_elem2D[k];
+            if (nz >= mesh->nlevels[el] - 1 || nz < mesh->ulevels[el] - 1) continue;
+            real_t a = mesh->elem_area[el];
+            tvol += a;
+            tx   += tr_xy[FESOM_ELEMVEC(el, nz, nl) + 0] * a;
+            ty   += tr_xy[FESOM_ELEMVEC(el, nz, nl) + 1] * a;
+        }
+        if (tvol > 0.0) { g[nz*4 + cx] = tx / tvol; g[nz*4 + cy] = ty / tvol; }
+    }
+}
+
+/* edge_up_dn_grad[4 per (edge,level)]: shared levels use the up/down-triangle
+ * gradient; non-shared (cavity/bathy) + boundary edges use node-averaged. */
+static void fill_up_dn_grad(const struct fesom_mesh *mesh, const real_t *tr_xy,
+                            real_t *eud)
+{
+    const int nl  = mesh->nl;
+    const int Eme = mesh->myDim_edge2D;
+    memset(eud, 0, (size_t)Eme * (size_t)nl * 4 * sizeof(real_t));
+    for (int ed = 0; ed < Eme; ++ed) {
+        int n1 = mesh->edges[2*ed + 0];
+        int n2 = mesh->edges[2*ed + 1];
+        int up = mesh->edge_up_dn_tri[2*ed + 0];
+        int dn = mesh->edge_up_dn_tri[2*ed + 1];
+        real_t *g = &eud[(size_t)ed * nl * 4];
+        if (up >= 0 && dn >= 0) {
+            int a1 = mesh->ulevels_nod2D_max[n1], a2 = mesh->ulevels_nod2D_max[n2];
+            int nzmin = ((a1 > a2) ? a1 : a2) - 1;                   /* 0-based */
+            int b1 = mesh->nlevels_nod2D_min[n1], b2 = mesh->nlevels_nod2D_min[n2];
+            int nzmax = ((b1 < b2) ? b1 : b2) - 1;
+            node_avg_grad(mesh, tr_xy, n1, mesh->ulevels_nod2D[n1]-1, nzmin, g, 0, 2);
+            node_avg_grad(mesh, tr_xy, n2, mesh->ulevels_nod2D[n2]-1, nzmin, g, 1, 3);
+            for (int nz = nzmin; nz < nzmax; ++nz) {
+                g[nz*4 + 0] = tr_xy[FESOM_ELEMVEC(up, nz, nl) + 0];
+                g[nz*4 + 1] = tr_xy[FESOM_ELEMVEC(dn, nz, nl) + 0];
+                g[nz*4 + 2] = tr_xy[FESOM_ELEMVEC(up, nz, nl) + 1];
+                g[nz*4 + 3] = tr_xy[FESOM_ELEMVEC(dn, nz, nl) + 1];
+            }
+            node_avg_grad(mesh, tr_xy, n1, nzmax, mesh->nlevels_nod2D[n1]-1, g, 0, 2);
+            node_avg_grad(mesh, tr_xy, n2, nzmax, mesh->nlevels_nod2D[n2]-1, g, 1, 3);
+        } else {
+            node_avg_grad(mesh, tr_xy, n1, mesh->ulevels_nod2D[n1]-1,
+                          mesh->nlevels_nod2D[n1]-1, g, 0, 2);
+            node_avg_grad(mesh, tr_xy, n2, mesh->ulevels_nod2D[n2]-1,
+                          mesh->nlevels_nod2D[n2]-1, g, 1, 3);
+        }
+    }
+}
+
+/* 3rd-order reconstructed antidiffusive flux at one (edge, level). */
+static inline void mfct_edge_flux(const real_t *ttf, real_t *flux, const real_t *eud,
+                                  int n1, int n2, int e, int nz, int nl, real_t vflux,
+                                  real_t a, real_t edx, real_t edy, real_t RE, real_t num_ord)
+{
+    real_t T1   = ttf[FESOM_NODE3D(n1, nz, nl)];
+    real_t T2   = ttf[FESOM_NODE3D(n2, nz, nl)];
+    real_t diff = T2 - T1;
+    const real_t *g = &eud[((size_t)e * nl + nz) * 4];
+    real_t Tmean1 = T1 + (2.0*diff + edx*a*g[0] + edy*RE*g[2]) / 6.0;
+    real_t Tmean2 = T2 - (2.0*diff + edx*a*g[1] + edy*RE*g[3]) / 6.0;
+    real_t av  = fabs(vflux);
+    real_t cHO = (vflux + av)*Tmean1 + (vflux - av)*Tmean2;
+    real_t hi  = -0.5*(1.0 - num_ord)*cHO - vflux*num_ord*0.5*(Tmean1 + Tmean2);
+    flux[FESOM_NODE3D(e, nz, nl)] = hi - flux[FESOM_NODE3D(e, nz, nl)];
+}
+
+static void adv_tra_hor_mfct(const struct fesom_mesh *mesh, const struct fesom_dyn *dyn,
+                             const real_t *ttf, const real_t *eud, real_t num_ord,
+                             int init_zero, real_t *flux)
+{
+    const int E  = mesh->myDim_edge2D;
+    const int nl = mesh->nl;
+    const real_t RE = (real_t)FESOM_R_EARTH;
+    if (init_zero) memset(flux, 0, (size_t)E * (size_t)nl * sizeof(real_t));
+
+    for (int e = 0; e < E; ++e) {
+        int n1  = mesh->edges[2*e + 0];
+        int n2  = mesh->edges[2*e + 1];
+        int el1 = mesh->edge_tri[2*e + 0];
+        int el2 = mesh->edge_tri[2*e + 1];
+        int nu1 = (el1 >= 0) ? mesh->ulevels[el1] - 1 : 0;
+        int nl1 = (el1 >= 0) ? mesh->nlevels[el1] - 1 : 0;
+        int nu2 = (el2 >= 0) ? mesh->ulevels[el2] - 1 : 0;
+        int nl2 = (el2 >= 0) ? mesh->nlevels[el2] - 1 : 0;
+        real_t dx1 = (el1 >= 0) ? mesh->edge_cross_dxdy[4*e + 0] : 0.0;
+        real_t dy1 = (el1 >= 0) ? mesh->edge_cross_dxdy[4*e + 1] : 0.0;
+        real_t dx2 = (el2 >= 0) ? mesh->edge_cross_dxdy[4*e + 2] : 0.0;
+        real_t dy2 = (el2 >= 0) ? mesh->edge_cross_dxdy[4*e + 3] : 0.0;
+        int nl12 = (el2 >= 0) ? ((nl1 < nl2) ? nl1 : nl2) : 0;
+        int nu12 = (nu1 > nu2) ? nu1 : nu2;
+        real_t edx = mesh->edge_dxdy[2*e + 0];
+        real_t edy = mesh->edge_dxdy[2*e + 1];
+        real_t a = (el1 >= 0) ? RE * mesh->elem_cos[el1] : 0.0;
+        if (el2 >= 0) a = 0.5 * (a + RE * mesh->elem_cos[el2]);
+
+        for (int nz = nu1; nz < nu12; ++nz) {                /* (A) el1-only above */
+            real_t u = dyn->uv[FESOM_ELEMVEC(el1,nz,nl)+0], v = dyn->uv[FESOM_ELEMVEC(el1,nz,nl)+1];
+            real_t vflux = (-v*dx1 + u*dy1) * mesh->helem[FESOM_ELEM3D(el1,nz,nl)];
+            mfct_edge_flux(ttf, flux, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, num_ord);
+        }
+        if (el2 >= 0) for (int nz = nu2; nz < nu12; ++nz) {  /* (B) el2-only above */
+            real_t u = dyn->uv[FESOM_ELEMVEC(el2,nz,nl)+0], v = dyn->uv[FESOM_ELEMVEC(el2,nz,nl)+1];
+            real_t vflux = (v*dx2 - u*dy2) * mesh->helem[FESOM_ELEM3D(el2,nz,nl)];
+            mfct_edge_flux(ttf, flux, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, num_ord);
+        }
+        for (int nz = nu12; nz < nl12; ++nz) {               /* (C) both */
+            real_t u1 = dyn->uv[FESOM_ELEMVEC(el1,nz,nl)+0], v1 = dyn->uv[FESOM_ELEMVEC(el1,nz,nl)+1];
+            real_t u2 = dyn->uv[FESOM_ELEMVEC(el2,nz,nl)+0], v2 = dyn->uv[FESOM_ELEMVEC(el2,nz,nl)+1];
+            real_t vflux = (-v1*dx1 + u1*dy1) * mesh->helem[FESOM_ELEM3D(el1,nz,nl)]
+                         + ( v2*dx2 - u2*dy2) * mesh->helem[FESOM_ELEM3D(el2,nz,nl)];
+            mfct_edge_flux(ttf, flux, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, num_ord);
+        }
+        for (int nz = nl12; nz < nl1; ++nz) {                /* (D) el1-only below */
+            real_t u = dyn->uv[FESOM_ELEMVEC(el1,nz,nl)+0], v = dyn->uv[FESOM_ELEMVEC(el1,nz,nl)+1];
+            real_t vflux = (-v*dx1 + u*dy1) * mesh->helem[FESOM_ELEM3D(el1,nz,nl)];
+            mfct_edge_flux(ttf, flux, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, num_ord);
+        }
+        if (el2 >= 0) for (int nz = nl12; nz < nl2; ++nz) {  /* (E) el2-only below */
+            real_t u = dyn->uv[FESOM_ELEMVEC(el2,nz,nl)+0], v = dyn->uv[FESOM_ELEMVEC(el2,nz,nl)+1];
+            real_t vflux = (v*dx2 - u*dy2) * mesh->helem[FESOM_ELEM3D(el2,nz,nl)];
+            mfct_edge_flux(ttf, flux, eud, n1, n2, e, nz, nl, vflux, a, edx, edy, RE, num_ord);
         }
     }
 }
@@ -1050,8 +1229,18 @@ void fesom_tracer_advect_one_fct(fesom_tracer_adv_scratch *sc,
     }
 
     /* 4. High-order flux on top of LO (init_zero=false → adv_flux := HO − LO).
-       Use valuesAB for the high-order computation per Fortran:309/331. */
-    adv_tra_hor_central(mesh, dyn, ttfAB, /*init_zero=*/0, sc->adv_flux_hor);
+       Horizontal: MFCT 3rd-order (num_ord=0, CORE2 namelist.tra).
+       FIDELITY: the MFCT flux mixes two fields exactly as the Fortran does —
+         * node values + central diff  → valuesAB (ttfAB), passed to adv_tra_hor_mfct
+           (oce_adv_tra_driver.F90:307 calls it with ttfAB).
+         * up/down gradient correction → edge_up_dn_grad, built ONCE in
+           init_tracers_AB from `values` (current step), NOT valuesAB — the
+           valuesAB variant at oce_tracer_mod.F90:126 is commented out, :127 uses
+           values. So tr_xy/edge_up_dn_grad must be built from vals, not ttfAB. */
+    tracer_gradient_elements(mesh, vals, sc->tr_xy, sc->partit);
+    fill_up_dn_grad         (mesh, sc->tr_xy, sc->edge_up_dn_grad);
+    adv_tra_hor_mfct(mesh, dyn, ttfAB, sc->edge_up_dn_grad, /*num_ord=*/0.0,
+                     /*init_zero=*/0, sc->adv_flux_hor);
     adv_tra_ver_qr4c   (mesh, dyn, ttfAB, /*num_ord=*/1.0, /*init_zero=*/0, sc->adv_flux_ver);
 
     /* 5. Zalesak limit the antidiffusive fluxes. */

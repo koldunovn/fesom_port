@@ -87,6 +87,11 @@ typedef struct fesom_mesh {
 
     /* Edge geometry */
     real_t *edge_dxdy;        /* [edge2D * 2]  node2 − node1 in rotated radians */
+    /* MFCT up/down-wind triangle per edge (oce_muscl_adv.F90:185-333). For each
+       owned edge: [2*edge+0] = upwind triangle (around node1, contains −x),
+       [2*edge+1] = downwind triangle (around node2, contains +x); -1 = absent
+       (boundary / unresolved → fill_up_dn_grad falls back). 0-based elem ids. */
+    int    *edge_up_dn_tri;   /* [myDim_edge2D * 2] */
     real_t *edge_cross_dxdy;  /* [edge2D * 4]  (cell1_center − edge_mid, cell2_center − edge_mid)
                                                 in physical METERS, lon scaled by elem_cos.
                                                 Components 2,3 are zero on boundary edges. */
@@ -126,6 +131,11 @@ void fesom_mesh_read(fesom_mesh *m, const char *mesh_dir,
                      struct fesom_partit *partit);
 
 void fesom_mesh_compute_metrics(fesom_mesh *m, struct fesom_partit *partit);
+
+/* MFCT: build edge_up_dn_tri (per-edge up/down-wind triangle). Called at the end
+ * of fesom_mesh_compute_metrics (needs edges, nod_in_elem2D, coord_nod2D + the
+ * wide element halo). oce_muscl_adv.F90:185-333. */
+void fesom_mesh_build_edge_up_dn_tri(fesom_mesh *m, struct fesom_partit *partit);
 
 /* Allocate time-evolving mesh state (hnode, hnode_new, helem, hbar, hbar_old).
    Counts must already be set (call after fesom_mesh_read). All zeros. */

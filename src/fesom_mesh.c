@@ -45,6 +45,7 @@ void fesom_mesh_free(fesom_mesh *m)
     free(m->mesh_resolution);
     free(m->nod_in_elem2D_offsets);
     free(m->nod_in_elem2D);
+    free(m->edge_up_dn_tri);
     free(m->elem_area);
     free(m->area);
     free(m->areasvol);
@@ -1251,4 +1252,103 @@ void fesom_mesh_compute_metrics(fesom_mesh *m, fesom_partit *partit)
         MPI_CHECK(MPI_Allreduce(&local, &m->ocean_area, 1, MPI_DOUBLE,
                                 MPI_SUM, partit->MPI_COMM_FESOM));
     }
+
+    /* MFCT: per-edge up/down-wind triangle (oce_muscl_adv.F90:185-333). */
+    fesom_mesh_build_edge_up_dn_tri(m, partit);
+}
+
+/*===========================================================================
+ * edge_up_dn_tri — port of oce_muscl_adv.F90:185-333. For each owned edge,
+ * find the upwind triangle (around node1, containing −x) and the downwind
+ * triangle (around node2, containing +x), where x = coord(n2)−coord(n1).
+ * "Containing" = the edge vector lies between the triangle's two edge vectors
+ * (b,c) emanating from the shared node (atan2 angle test). Uses coord_elem +
+ * e_nodes built on the WIDE element halo so 2-ring triangles are covered.
+ *===========================================================================*/
+
+/* Is the edge vector (xx,xy) between the triangle edge vectors b=(bx,by),
+ * c=(cx,cy)? Decompose along c and 90°-CCW, compare atan2 angles (F:268-288). */
+static int edge_x_between_bc(real_t bx, real_t by, real_t cx, real_t cy,
+                             real_t xx, real_t xy)
+{
+    real_t cr = cx*cx + cy*cy;
+    if (cr == 0.0) return 0;
+    real_t bxp = ( bx*cx + by*cy)/cr;
+    real_t byp = (-bx*cy + by*cx)/cr;
+    real_t xxp = ( xx*cx + xy*cy)/cr;
+    real_t xyp = (-xx*cy + xy*cx)/cr;
+    real_t ab = atan2(byp, bxp);
+    real_t ax = atan2(xyp, xxp);
+    if (ab > 0.0 && ax > 0.0 && ax < ab) return 1;
+    if (ab < 0.0 && ax < 0.0 && ax > ab) return 1;
+    if (ab == ax || ax == 0.0) return 1;
+    return 0;
+}
+
+/* Scan the triangles around `node` for the one whose two edge vectors from the
+ * shared node bracket (xx,xy). ce = element node coords [E*6], en = element node
+ * global ids [E*3]. Returns the 0-based elem id or -1. */
+static int edge_up_dn_scan(const fesom_mesh *m, const fesom_partit *partit,
+                           const real_t *ce, const real_t *en,
+                           int node, real_t xx, real_t xy)
+{
+    const real_t cyc = (real_t)FESOM_CYCLIC_LENGTH_RAD, hcyc = 0.5*cyc;
+    long long gnode = (long long)partit->myList_nod2D[node];   /* shared node global id */
+    int b0 = m->nod_in_elem2D_offsets[node], b1 = m->nod_in_elem2D_offsets[node + 1];
+    for (int k = b0; k < b1; ++k) {
+        int el = m->nod_in_elem2D[k];
+        int js = -1;
+        for (int j = 0; j < 3; ++j)
+            if ((long long)(en[(size_t)el*3 + j] + 0.5) == gnode) { js = j; break; }
+        if (js < 0) continue;
+        int jb = (js == 0) ? 1 : 0;     /* the two non-shared nodes, Fortran order */
+        int jc = (js == 2) ? 1 : 2;
+        real_t bx = ce[(size_t)el*6 + 2*jb + 0] - ce[(size_t)el*6 + 2*js + 0];
+        real_t by = ce[(size_t)el*6 + 2*jb + 1] - ce[(size_t)el*6 + 2*js + 1];
+        real_t cx = ce[(size_t)el*6 + 2*jc + 0] - ce[(size_t)el*6 + 2*js + 0];
+        real_t cy = ce[(size_t)el*6 + 2*jc + 1] - ce[(size_t)el*6 + 2*js + 1];
+        if (bx >  hcyc) bx -= cyc;  if (bx < -hcyc) bx += cyc;
+        if (cx >  hcyc) cx -= cyc;  if (cx < -hcyc) cx += cyc;
+        if (edge_x_between_bc(bx, by, cx, cy, xx, xy)) return el;
+    }
+    return -1;
+}
+
+void fesom_mesh_build_edge_up_dn_tri(fesom_mesh *m, fesom_partit *partit)
+{
+    const int Eme = m->myDim_edge2D;
+    const int E   = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
+    const real_t cyc = (real_t)FESOM_CYCLIC_LENGTH_RAD, hcyc = 0.5*cyc;
+
+    m->edge_up_dn_tri = malloc((size_t)Eme * 2 * sizeof(int));
+    FESOM_CHECK(m->edge_up_dn_tri, "edge_up_dn_tri alloc");
+    for (int i = 0; i < Eme * 2; ++i) m->edge_up_dn_tri[i] = -1;
+
+    /* coord_elem [E*6] + e_nodes (global ids) [E*3], on the wide element halo
+     * (F:192-235: exchange_elem of the element node coords + ids). */
+    real_t *ce = calloc((size_t)E * 6, sizeof(real_t));
+    real_t *en = calloc((size_t)E * 3, sizeof(real_t));
+    FESOM_CHECK(ce && en, "edge_up_dn_tri scratch alloc");
+    for (int el = 0; el < m->myDim_elem2D; ++el)
+        for (int j = 0; j < 3; ++j) {
+            int nd = m->elem_nodes[3*el + j];
+            ce[(size_t)el*6 + 2*j + 0] = m->coord_nod2D[2*nd + 0];
+            ce[(size_t)el*6 + 2*j + 1] = m->coord_nod2D[2*nd + 1];
+            en[(size_t)el*3 + j]       = (real_t)partit->myList_nod2D[nd];
+        }
+    if (partit && partit->npes > 1) {
+        fesom_halo_exchange(ce, FESOM_HALO_ELEM2D_FULL, 6, 1, partit);
+        fesom_halo_exchange(en, FESOM_HALO_ELEM2D_FULL, 3, 1, partit);
+    }
+
+    for (int ed = 0; ed < Eme; ++ed) {
+        int n1 = m->edges[2*ed + 0];
+        int n2 = m->edges[2*ed + 1];
+        real_t x0 = m->coord_nod2D[2*n2 + 0] - m->coord_nod2D[2*n1 + 0];
+        real_t x1 = m->coord_nod2D[2*n2 + 1] - m->coord_nod2D[2*n1 + 1];
+        if (x0 >  hcyc) x0 -= cyc;  if (x0 < -hcyc) x0 += cyc;
+        m->edge_up_dn_tri[2*ed + 0] = edge_up_dn_scan(m, partit, ce, en, n1, -x0, -x1);
+        m->edge_up_dn_tri[2*ed + 1] = edge_up_dn_scan(m, partit, ce, en, n2,  x0,  x1);
+    }
+    free(ce); free(en);
 }

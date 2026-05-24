@@ -42,6 +42,13 @@ typedef struct fesom_tracer_adv_scratch {
     real_t *fct_minus;           /* [nod2D  * nl]  negative limiter factor   */
     real_t *fct_aux;             /* [elem2D * nl * 2]  per-element max/min   */
 
+    /* MFCT 3rd-order horizontal flux (oce_adv_tra_hor.F90 adv_tra_hor_mfct).
+       tr_xy: elemental tracer gradient [elem*nl*2] (FESOM_ELEMVEC layout, c=0 x,
+       c=1 y), computed on myDim then wide-exchanged. edge_up_dn_grad: per-edge
+       up/down tracer gradients [myDim_edge2D*nl*4] from fill_up_dn_grad. */
+    real_t *tr_xy;               /* [elem2D * nl * 2]      */
+    real_t *edge_up_dn_grad;     /* [myDim_edge2D * nl * 4] */
+
     /* MPI: partit pointer used by FCT mid-pipeline halo exchange of
      * fct_plus / fct_minus. Set after init via direct field assignment. */
     struct fesom_partit *partit;
