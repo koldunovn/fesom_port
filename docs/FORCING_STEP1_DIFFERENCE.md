@@ -76,20 +76,42 @@ and the sea-ice port was validated at the *climate/advection* level ([[project_s
 NOT step-1 bit-identity — exactly the kind of small step-1 transient that perturbs `u_ice`. Bo's
 polar part is the analogous over-ice heat-flux difference (ice thermodynamics, depends on ice state).
 
-## Definitive next step (ready to run)
+## PINPOINTED (2026-05-25) — it's the step-1 sea-ice STATE (dominantly EVP u_ice)
 
-Cross-dump the step-1 ice state both codes, keyed by node gid, 16r (same partition):
-`a_ice, m_ice, u_ice, v_ice, srfoce_u, srfoce_v, stress_iceoce_x/y, stress_node_surf_x/y`.
-- **C:** add an env-gated dump in `fesom_step.c` (has `ctx->ice` + `forcing`) right at the KPP
-  point, reusing `fesom_kpp_dump_nodes`.
-- **Fortran:** add the matching dump in `ice_oce_coupling.F90` (the `stress2oce` routine has
-  `ice%`/`u_ice`/`a_ice`/`u_w` + `stress_node_surf` in scope) at step 1.
-Then diff with `scripts/kpp_dump_diff.py` + bin by lat. Expected: `srfoce≈0` and `a_ice` ~matching →
-the signal is `u_ice`/`v_ice` (EVP). If so, the root is the step-1 EVP solve; chase the EVP inputs
-(`stress_atmice`, ice strength P*, substep count, the EVP α/β) C-vs-Fortran — reuse
-[[reference_evp_dump_diagnostic]]. A quick climate-level cross-check: add `a_ice`/`uice` to
-`scripts/kpp_climate_compare.py` (K9 outputs them) to see whether the ice state stays close in the
-mean (transient) or drifts (structural).
+Cross-dumped the step-1 ice state from BOTH codes (tag `iceforce`, 16r same partition, C in
+`fesom_ice_coupling.c` `fesom_ice_oce_fluxes_mom` + Fortran `ice_oce_coupling.F90` `oce_fluxes_mom`;
+`/tmp/icf_cmp.py`). Polar (|lat|>50) C-vs-Fortran:
+
+| field | max\|Δ\| | typical val | comment |
+|---|---|---|---|
+| `srfoce_u/v` | **0.0 exactly** | 0 | ocean at rest → ice-ocean stress = ρ·cd·\|u_ice\|·u_ice·a_ice |
+| `u_ice`/`v_ice` | 0.24 / 0.27 | ~0.3 | **rel ~80% — the dominant difference (EVP velocity)** |
+| `a_ice` | 1.49e-2 | ~0.9 | ice concentration differs ~1.5% (36803 nodes) |
+| `m_ice` | 3.23e-2 | ~2.0 | ice thickness differs ~3% |
+
+Ice-free latitudes: every field bit-identical. So the **root is the step-1 sea-ice state** —
+dominantly the **EVP ice velocity `u_ice`** (rel ~80%, from a `u_ice`=0 cold-start IC the EVP is
+maximally sensitive), with a smaller `a_ice`/`m_ice` (concentration/thickness) contribution. This
+propagates through `stress_iceoce → stress_node_surf → ustar` (the polar 3e-3 ustar diff that KPP
+sees). The sea-ice was validated at the climate/advection level ([[project_sea_ice_port_state]]),
+NOT step-1 bit-identity — exactly this.
+
+**⚠️ dump caveat:** the `iceforce` dump's `stress_node_surf` column is captured at the ice-coupling
+point and is NOT the stress KPP reads — it disagrees with the `prestep` ustar by ~0.12 even in the
+tropics in BOTH codes (the atm-ocean stress is re-finalized between the ice coupling and the ocean
+step). Use `prestep` ustar (bit-identical tropics 8e-16, polar 3e-3) as the KPP-input ground truth;
+the `iceforce` a_ice/m_ice/u_ice/v_ice/srfoce columns are the reliable ice-state.
+
+## Remaining next level (the actual fix, post-KPP)
+
+Two sub-questions, both sea-ice-subsystem step-1 transients:
+1. **Why `u_ice` differs (dominant):** chase the EVP inputs/iteration C-vs-Fortran at step 1 —
+   `stress_atmice` (wind-on-ice, [[feedback_wind_rotation_g2r]]), ice strength P* (a_ice/m_ice,
+   [[feedback_ice_strength_halffactor]]), the EVP substep count + α/β. Reuse
+   [[reference_evp_dump_diagnostic]] (per-substep EVP dumps) to localize where the C and Fortran
+   ice velocity diverge within the step.
+2. **Why `a_ice`/`m_ice` differ (~1.5-3%):** ice IC interpolation vs one thermo/advection step —
+   compare the step-0 IC ice (C snap_000000) to the Fortran IC, then one step.
 
 **Heat/water-flux (Bo) tiny non-polar residual (~1e-9, rel ~1e-3):** a secondary, much smaller
 bulk-flux-assembly difference (SW/LW/sensible/latent or SST/humidity). Dump `heat_flux`/`water_flux`

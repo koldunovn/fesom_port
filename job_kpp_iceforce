@@ -1,0 +1,22 @@
+#!/bin/bash
+#SBATCH --job-name=kpp_icf
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:20:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/kpp_iceforce/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/kpp_iceforce/slurm.%j.err
+# [forcing-diff dig] C 16r KPP dump (nsteps=1) -> iceforce dump (a_ice/m_ice/
+# u_ice/v_ice/srfoce/stress_iceoce/stress_node_surf) at step 1, to compare vs the
+# Fortran ice state and separate u_ice from a_ice (the step-1 ustar-diff source).
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+BASE=/work/ab0995/a270088/port/kpp_iceforce; mkdir -p "$BASE/dump"
+BIN=/home/a/a270088/port2/fesom2_port/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+FESOM_MIX_SCHEME=KPP FESOM_KPP_DUMP_DIR=$BASE/dump FESOM_KPP_DUMP_STEP=1 \
+  srun -l "$BIN" "$MESH" "$BASE/dump" 1800 1 -1 "$PHC" 1958 > "$BASE/run.log" 2> "$BASE/run.err"
+echo "exit: $?"; ls "$BASE/dump"/kpp_dump_s1_iceforce_rank0.txt 2>/dev/null
