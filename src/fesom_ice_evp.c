@@ -246,7 +246,7 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
     /* Dump on step 1 AND step 2 — step 2 is where 8/16-rank crash. Tag the
      * dump filenames with the step so 1-rank vs N-rank diff stays clean. */
     int dump_now = (s_evp_dump_dir != NULL)
-                && (s_evp_call_step == 1 || s_evp_call_step == 2);
+                && (s_evp_call_step <= 16);
 
     if (dump_now) {
         /* Q: raw inputs to EVPdynamics at this step. */
@@ -356,6 +356,14 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
         const real_t *ev[1] = { ice_strength };
         evp_dump(s_evp_call_step, "P", "elem", ev, 1,
                  mesh->myDim_elem2D, partit->myList_elem2D, partit->mype);
+        /* F: EVP forcing inputs (wind-on-ice stress + ocean-surface velocity).
+         * At step 1 the velocity update reads only these (plus Q-derived
+         * inv_mass/u_rhs and mesh coriolis), since u_ice=u_w=0 at iter-0.
+         * stress_atmice is the prime suspect for the polar step-1 u_ice diff
+         * (rotated wind, feedback_wind_rotation_g2r); u_w confirms srfoce=0. */
+        const real_t *fv[4] = { stress_atmice_x, stress_atmice_y, u_w, v_w };
+        evp_dump(s_evp_call_step, "F", "node", fv, 4,
+                 mesh->myDim_nod2D, partit->myList_nod2D, partit->mype);
     }
 
     /* Step 5: EVP subcycle (Fortran lines 652-832).

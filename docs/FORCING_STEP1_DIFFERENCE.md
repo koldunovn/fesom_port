@@ -1,7 +1,41 @@
-# Step-1 forcing difference C-vs-Fortran (ustar / Bo) — ADDRESS IMMEDIATELY AFTER KPP
+# Step-1 forcing difference C-vs-Fortran (ustar / Bo) — RESOLVED (Fortran cold-start bug)
 
-**Status:** OPEN. Deferred by user decision (2026-05-24) to *immediately after KPP is fully
-ported* (after K9/K11). Recorded here so the investigation can start from full context.
+**Status: RESOLVED 2026-05-25.** Root cause = a **Fortran (FESOM2) cold-start bug**, not a C
+porting bug and not cold-start sensitivity. The C port is the *correct* one. See the "RESOLUTION"
+section at the end for the mechanism, proof, and fix. The investigation notes below are kept as the
+historical record of how it was narrowed (the earlier "EVP u_ice" framing was the symptom; the cause
+is one rotation upstream of the EVP).
+
+## RESOLUTION (2026-05-25): Fortran cold-start wind-rotation bug
+
+**The bug** (`gen_surface_forcing.F90`): on a rotated grid the geo→rotated (g2r) wind/stress rotation
+is applied **only in `sbc_do`**, gated on `do_rotation_wind`, which is set **only inside the
+`getcoeffld` (coefficient-refresh) branch** (~line 1542; rotation block ~1547). The cold-start init
+`nc_sbc_ini` (~603-700) loads the first coefficients (`getcoeffld`) and builds the wind
+(`data_timeinterp`) but **never rotates them**. At step 1 `force_newcoeff=.false.` (same year) and
+`rdate` is inside the first forcing window, so `sbc_do` does not refresh → the rotation block is
+skipped → the first forcing window's wind stress on **both ocean and ice** stays in the **geographic
+frame**, mis-directed by the local g2r angle.
+
+**Proof** (per-substep EVP dump, both codes, 16r, step 1; `scripts/evp_dump_diff.py` +
+`evp_dump_geo.py`, new `F` dump point = `stress_atmice`): every EVP input bit-identical (a_ice/m_ice
+IC, ice_strength, inv_mass, sigma, u_rhs) **except `stress_atmice`**, which differed at all 126858
+nodes. The diff was a **pure rotation** — per-node `|stress|` ratio C/F = 1.0000, direction off by
+**exactly the local g2r vector angle** (`|delta − theta| = 0.000` at every node). C rotates
+`jra->u_wind` from step 1 (`fesom_jra55.c:692`); Fortran's first-window wind is unrotated, so
+`F_stress = r2g(C_stress)`.
+
+**Why it hid the whole port:** rotation is magnitude-preserving, so `ustar`, fluxes, SST/SSS/SSH,
+ice area/volume and ice/ocean speed *ratios* are all blind to it; only the EVP velocity *vector*
+exposes it. And it is transient (self-corrects after the first forcing-window crossing, ~6 steps for
+3-hourly JRA at dt=1800), so multi-year climate matched regardless (re-baseline 2-yr RMS ~0.004).
+
+**Fix:** rotate the initial coefficients in `nc_sbc_ini` (mirror the `sbc_do` rotation, guarded by
+`l_xwind`/`l_xstre` `.and. rotated_grid`). Applied to `port2/fesom2`; the C port needs **no change**.
+PR to upstream `FESOM/fesom2` (bug confirmed in the latest main).
+
+---
+*Historical investigation notes (how it was narrowed) follow.*
 
 ## What
 

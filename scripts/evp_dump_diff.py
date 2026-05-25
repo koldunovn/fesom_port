@@ -16,6 +16,7 @@ POINTS = [
     ("U0",  "node", ["u_ice", "v_ice"]),
     ("P",   "node", ["inv_mass", "inv_areamass", "rhs_a", "rhs_m"]),
     ("P",   "elem", ["ice_strength"]),
+    ("F",   "node", ["stress_atmice_x", "stress_atmice_y", "u_w", "v_w"]),
     ("1",   "elem", ["sigma11", "sigma12", "sigma22"]),
     ("2",   "node", ["u_rhs", "v_rhs"]),
     ("3",   "node", ["u_ice", "v_ice"]),
