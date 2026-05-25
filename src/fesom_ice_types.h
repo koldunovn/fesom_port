@@ -162,7 +162,7 @@ typedef struct fesom_ice {
     real_t zeta_min;         /* 4.0e+8 kg/s   */
 
     int    evp_rheol_steps;  /* 120  EVP subcycles per ice timestep */
-    real_t ice_gamma_fct;    /* 0.25 smoothing in ice FCT advection */
+    real_t ice_gamma_fct;    /* 0.5 smoothing in ice FCT advection (CORE2 namelist) */
     real_t ice_diff;         /* 10.0 stabilising diffusion          */
     real_t theta_io;         /* 0.0  ice-ocean rotation angle       */
     real_t cd_oce_ice;       /* 5.5e-3 ocean-ice drag coefficient   */

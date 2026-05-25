@@ -58,7 +58,9 @@ void fesom_ice_init(fesom_ice           *ice,
     ice->Clim_evp        = 615.0;
     ice->zeta_min        = 4.0e+8;
     ice->evp_rheol_steps = 120;
-    ice->ice_gamma_fct   = 0.25;
+    ice->ice_gamma_fct   = 0.5;   /* CORE2 reference NAMELIST value (work_core /
+                                   * work_kpp_dump namelist.ice:44); NOT the 0.25 module
+                                   * default (MOD_ICE.F90:194). feedback_namelist_over_codedefault. */
     ice->ice_diff        = 10.0;
     ice->theta_io        = 0.0;
     ice->cd_oce_ice      = 5.5e-3;
