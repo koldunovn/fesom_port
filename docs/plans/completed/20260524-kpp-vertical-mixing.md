@@ -224,15 +224,17 @@ consumed by `enhance:1163-1177`), plus the wm/ws lookup tables and scalars `Vtc`
 - [x] Residual: the slow 1958→1959 SST-RMS growth (0.0046→0.0128) is the accumulated step-1
   sea-ice-forcing transient ([[project_forcing_step1_diff]]) + chaos; tiny, biases stay ~0.
 
-### Phase K10: Acceptance + stability
-- [ ] All Overview requirements met; KPP selectable; PP byte-identical when off; every ported routine dual-instrument-matched; climate matches the KPP reference.
-- [ ] Multi-year stability at dt=1800 with KPP (stronger mixing; watch the autumn transient, `project_5yr_milestone`).
-- [ ] Decide default `mix_scheme` (PP vs KPP) — separate, after validation.
+### Phase K10: Acceptance + stability ✅ (stability)
+- [x] All Overview requirements met: KPP selectable (`FESOM_MIX_SCHEME=KPP`); PP byte-identical when off (K8); every ported routine replay-bit-faithful (K1-K7); climate matches the KPP reference (K9, 0.005-0.013°C).
+- [x] **Multi-year stability (`kpp_5yr_dt1800`, job 25108160): C+KPP ran a full 5 yr (1958-1962, 87589 steps) clean — exit 0, no uv>5/NaN/blowup, max ice velocity ~1.2 m/s.** 5-yr global-mean drift tiny + bounded: SST yr2→yr5 −0.029°C, SSS −0.0085 PSU. KPP is stable at dt=1800.
+- [x] **Default `mix_scheme` = KPP** (user decision 2026-05-25, commit `8d0cdbc`): `fesom_step` dispatch defaults to KPP; `FESOM_MIX_SCHEME=PP` opts back to PP. Matches CORE2 production.
+- ➕ **Found while digging the forcing diff:** `ice_gamma_fct` used the 0.25 module default instead of the CORE2 namelist 0.5 ([[feedback_namelist_over_codedefault]]); fixed (`fesom_ice.c`). Re-baselines the ice/climate (re-validation owed); NOT the dominant forcing-diff root (that's the step-1 EVP `u_ice`).
 
-### Phase K11: [Final] Docs + memory + commit
-- [ ] Update `docs/NEXT_SESSION_HANDOFF.md`, memory (`project_dt1800_state`, `feedback_port_used_terms`, new `project_kpp_port_state`).
-- [ ] Commit per-phase; tag if it becomes a validated milestone.
-- [ ] Move this plan to `docs/plans/completed/`.
+### Phase K11: [Final] Docs + memory + commit ✅
+- [x] Updated `docs/NEXT_SESSION_HANDOFF.md` (KPP complete + default) + memory (`project_kpp_port_state`, `feedback_controlled_replay_validation`, `feedback_bvfreq_smoothing_gap`, `project_forcing_step1_diff`, `feedback_namelist_over_codedefault`).
+- [x] Committed per-phase (K0 `13bfe95` … K10/default `8d0cdbc`); tag the validated KPP milestone.
+- [x] Moved this plan to `docs/plans/completed/`.
+- ➕ Next-session kickoff for the deferred step-1 forcing fix: `docs/NEXT_SESSION_PROMPT.md` + `docs/FORCING_STEP1_DIFFERENCE.md`.
 
 ## Technical Details
 - **New aux** (stride `nl`, `myDim+eDim`): indexed `diffK[N*nl*ntr]`, node `viscA[N*nl]`, `dVsq`, `dbsfc`, `ghats`; `blmc[N*nl*3]`, `dkm1[N*3]`; per-node scalars `hbl`,`Bo`,`bfsfc`,`stable`,`caseA`,`ustar`; per-node int `kbl`.
