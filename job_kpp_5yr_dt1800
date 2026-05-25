@@ -1,0 +1,37 @@
+#!/bin/bash
+#SBATCH --job-name=kpp5yr_dt1800
+#SBATCH -p compute
+#SBATCH --nodes=7
+#SBATCH --ntasks=864
+#SBATCH --time=03:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/kpp_5yr_dt1800/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/kpp_5yr_dt1800/slurm.%j.err
+# Phase K10: multi-year KPP stability. C + KPP (FESOM_MIX_SCHEME=KPP), dt=1800,
+# 5 yr (1958-1962), 864r, linfs. KPP K0-K9 validated (climate matches Fortran-KPP
+# to ~0.01 C). Goal: confirm KPP stays stable over 5 yr -- no uv>5 trip, no NaN,
+# bounded drift -- watching the autumn transient that peaked 4.65 under PP at
+# dt=1800 (project_5yr_milestone). KPP's stronger mixing may change it. 87600
+# steps = 5 calendar yr (day 1825). monthly-only; FESOM_PRINT_EVERY=1000 ->
+# uv_max diagnostic + uv>5 guard logged every ~20.8 model-days.
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port/env.sh
+ulimit -s 204800
+REPO=/home/a/a270088/port2/fesom2_port
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/kpp_5yr_dt1800
+mkdir -p "$OUT"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt" 2>/dev/null
+export FESOM_MIX_SCHEME=KPP
+export FESOM_DIAG_MICE=1
+export FESOM_PRINT_EVERY=1000
+srun -l --ntasks=864 "$BIN" "$MESH" "$OUT" 1800 87600 -1 "$PHC" 1958 \
+     > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+echo "--- last mice-mon ---"; grep '\[mice-mon\]' "$OUT/run.err" | tail -3
+echo "--- BLOWUP / uv>5 ? ---"; grep -iE "blowup|uv>5|nan" "$OUT/run.err" | tail -3
+echo "--- uv trajectory (every 8000) ---"; grep -E "^ *0: +[0-9]+ +it=" "$OUT/run.log" | awk 'NR%8==1'
+echo "--- monthly files ---"; ls "$OUT"/*.monthly.nc 2>/dev/null | wc -l
+true
