@@ -81,7 +81,7 @@ def mean_field(path, suf, var, years):
         except Exception: break
     return np.nanmean(np.array(acc),0) if acc else None
 
-for var, unit, vlim, dlim in [("sst","°C",None,1.0), ("sss","PSU",None,0.5)]:
+for var, unit, vlim, dlim in [("sst","°C",None,0.3), ("sss","PSU",None,0.15)]:
     cC  = mean_field(C,".monthly",var,YEARS)            # C 5yr mean
     cF  = mean_field(Fk5,"",var,YEARS)                  # Fortran KPP dt1800 5yr mean (EXACT; None until run done)
     cF2 = mean_field(Fd18,"",var,range(1958,1960))      # Fortran KPP dt1800 2yr mean
