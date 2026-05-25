@@ -54,16 +54,17 @@ int fesom_timestep(int                          step_n,
     struct fesom_gm *gm = s_no_gmredi ? NULL : ctx->gm;
 
     /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3515 mix_scheme_nmb).
-     *   FESOM_MIX_SCHEME=PP  (default) → fesom_pp_mixing (Pacanowski-Philander)
-     *   FESOM_MIX_SCHEME=KPP           → fesom_kpp_mixing (K-Profile)
-     * Production will later read this from namelist mix_scheme; for now an env
-     * knob mirroring the FESOM_NO_GMREDI pattern. mo_convect runs after either
+     *   FESOM_MIX_SCHEME=KPP (DEFAULT) → fesom_kpp_mixing (K-Profile) — the CORE2
+     *                                    production scheme (mix_scheme='KPP'),
+     *                                    validated end-to-end (K0-K10).
+     *   FESOM_MIX_SCHEME=PP            → fesom_pp_mixing (Pacanowski-Philander), opt-out
+     * Env knob mirroring the FESOM_NO_GMREDI pattern. mo_convect runs after either
      * scheme (Fortran calls it in both branches, :3524 / :3531). */
     static int s_mix_env_loaded = 0;
-    static int s_use_kpp        = 0;
+    static int s_use_kpp        = 1;
     if (!s_mix_env_loaded) {
         const char *e = getenv("FESOM_MIX_SCHEME");
-        s_use_kpp = (e && (e[0] == 'K' || e[0] == 'k'));
+        s_use_kpp = !(e && (e[0] == 'P' || e[0] == 'p'));   /* default KPP; =PP to opt out */
         s_mix_env_loaded = 1;
     }
 

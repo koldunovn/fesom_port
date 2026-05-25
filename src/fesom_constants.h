@@ -34,7 +34,8 @@
  * Hardcoded Phase 1 namelist defaults, derived from FRESH_START.md §14.7
  * with the Phase 1 simplifications:
  *   - which_ALE        = 'linfs' (simplest free surface)
- *   - mix_scheme       = 'PP'    (simpler than KPP)
+ *   - mix_scheme       = 'KPP'   (CORE2 default; KPP ported+validated K0-K10,
+ *                                 FESOM_MIX_SCHEME=PP opts back to Pacanowski-Philander)
  *   - GM/Redi          = .false. (off until Phase 4)
  *
  * No namelist parser yet — these are intentionally compile-time
