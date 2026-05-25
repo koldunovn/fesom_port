@@ -11,6 +11,7 @@ Fig 2/3: 5-yr-mean SST / SSS maps (C, Fd12, C-Fd12) + the exact-config 2-yr C-Fd
 import pathlib, warnings; warnings.filterwarnings("ignore")
 import numpy as np, netCDF4 as nc
 import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+import cartopy.crs as ccrs
 import nereus as nr
 
 C    = "/work/ab0995/a270088/port/kpp_5yr_dt1800"      # C port, KPP, dt1800, 5yr
@@ -81,28 +82,28 @@ def mean_field(path, suf, var, years):
         except Exception: break
     return np.nanmean(np.array(acc),0) if acc else None
 
-for var, unit, vlim, dlim in [("sst","°C",None,0.3), ("sss","PSU",None,0.15)]:
+for var, unit, dlim in [("sst","°C",0.3), ("sss","PSU",0.15)]:
     cC  = mean_field(C,".monthly",var,YEARS)            # C 5yr mean
-    cF  = mean_field(Fk5,"",var,YEARS)                  # Fortran KPP dt1800 5yr mean (EXACT; None until run done)
+    cF  = mean_field(Fk5,"",var,YEARS)                  # Fortran KPP dt1800 5yr mean (exact)
     cF2 = mean_field(Fd18,"",var,range(1958,1960))      # Fortran KPP dt1800 2yr mean
     cC2 = mean_field(C,".monthly",var,range(1958,1960)) # C 2yr mean
-    nan = np.full_like(cC, np.nan)
+    nan  = np.full_like(cC, np.nan)
     cFok = cF if cF is not None else nan
-    fig = plt.figure(figsize=(15,9))
-    panels = [("C KPP dt1800 (5yr mean)", cC, None),
-              ("Fortran KPP dt1800 (5yr mean)" + ("" if cF is not None else " — RUN PENDING"), cFok, None),
-              ("Δ C−F (5yr mean, both dt1800)", np.where(np.isfinite(cC)&np.isfinite(cFok), cC-cFok, np.nan), dlim),
-              ("Δ C−F (2yr mean, exact dt1800)", np.where(np.isfinite(cC2)&np.isfinite(cF2), cC2-cF2, np.nan), dlim)]
-    for i,(ttl,d,dl) in enumerate(panels):
-        ax = fig.add_subplot(2,2,i+1)
-        cmap = "RdBu_r" if dl else "viridis"
-        kw = dict(cmap=cmap)
-        if dl: kw.update(vmin=-dl, vmax=dl)
-        try: nr.plot(d, lon, lat, ax=ax, **kw)
-        except Exception:
-            sc=ax.scatter(lon,lat,c=d,s=0.5,**kw); plt.colorbar(sc,ax=ax)
-        ax.set_title(f"{var.upper()} [{unit}]: {ttl}", fontsize=9)
-    fig.tight_layout(); fig.savefig(OUT/f"maps_{var}_5yr.png", dpi=130); plt.close(fig)
+    lo = np.nanpercentile(np.concatenate([cC[np.isfinite(cC)], cFok[np.isfinite(cFok)]]), 1)
+    hi = np.nanpercentile(np.concatenate([cC[np.isfinite(cC)], cFok[np.isfinite(cFok)]]), 99)
+    dC  = np.where(np.isfinite(cC)&np.isfinite(cFok), cC-cFok, np.nan)
+    dC2 = np.where(np.isfinite(cC2)&np.isfinite(cF2),  cC2-cF2, np.nan)
+    panels = [(f"C+KPP (5yr mean)",               cC,  "viridis", lo, hi,   f"{var} [{unit}]"),
+              (f"Fortran+KPP (5yr mean)",         cFok,"viridis", lo, hi,   f"{var} [{unit}]"),
+              (f"Δ = C − Fortran (5yr mean)",     dC,  "RdBu_r", -dlim, dlim, f"Δ{var} [{unit}]"),
+              (f"Δ = C − Fortran (2yr mean)",     dC2, "RdBu_r", -dlim, dlim, f"Δ{var} [{unit}]")]
+    fig = plt.figure(figsize=(16,9))
+    for i,(ttl,d,cmap,vmn,vmx,cl) in enumerate(panels):
+        ax = fig.add_subplot(2,2,i+1, projection=ccrs.Robinson()); ax.set_global()
+        nr.plot(d, lon, lat, projection="rob", cmap=cmap, vmin=vmn, vmax=vmx, ax=ax,
+                colorbar=True, colorbar_label=cl, title=ttl)
+    fig.suptitle(f"{var.upper()}: C+KPP vs Fortran+KPP, dt=1800, 5-yr (1958-1962)", fontsize=13)
+    fig.tight_layout(); fig.savefig(OUT/f"maps_{var}_5yr.png", dpi=120, bbox_inches="tight"); plt.close(fig)
     print(f"wrote {OUT}/maps_{var}_5yr.png")
 
 # ---------- quantitative: per-year global RMS, C vs Fortran-KPP (dt1800) ----------
