@@ -56,7 +56,7 @@
 #define KPP_TBL(i, j)  ((size_t)(i) * (size_t)(FESOM_KPP_NNJ + 2) + (size_t)(j))
 
 /* per-column stack-scratch cap (matches NL_MAX in fesom_gm/eos/momentum). */
-enum { KPP_NL_MAX = 64 };
+enum { KPP_NL_MAX = 128 };
 
 /* fesom_kpp_mixing call index (= ocean step); mirrors the Fortran module's
  * kpp_call_count. Used for dump-step gating. */

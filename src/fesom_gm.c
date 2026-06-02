@@ -20,7 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { NL_MAX = 64 };          /* matches the cap used in fesom_eos / momentum */
+enum { NL_MAX = 128 };         /* matches the cap used in fesom_eos / momentum (was 64; 128 fits NG5 nl=70) */
 
 #define GM_K_GM_MAX 1000.0   /* matches namelist.oce K_GM_max default
                               * and oce_setup_step.F90:934 fer_K init   */

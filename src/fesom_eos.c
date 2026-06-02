@@ -101,8 +101,8 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
         /* Skip nodes with no wet layers (shouldn't happen in Phase 1 but guard). */
         if (nzmax <= nzmin) continue;
 
-        real_t bulk_0[64], bulk_pz[64], bulk_pz2[64], rhopot[64], rho[64];
-        /* nl≤48 in Phase 1; static cap of 64 leaves headroom and keeps the
+        real_t bulk_0[128], bulk_pz[128], bulk_pz2[128], rhopot[128], rho[128];
+        /* static cap of 128 (was 64) — covers NG5's 70 levels; keeps the
            compiler from generating dynamic-stack code. */
 
         /* Pass 1: JM-EOS components per layer. */

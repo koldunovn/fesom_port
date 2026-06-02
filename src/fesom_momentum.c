@@ -161,7 +161,7 @@ void fesom_momentum_adv_scalar(const struct fesom_mesh *mesh,
     const real_t *uv  = dyn->uv;
     real_t       *un  = dyn->uvnode_rhs;        /* [2*FESOM_NODE3D(n,nz,nl)+c] */
     const real_t *we  = dyn->w_e;
-    enum { NL_MAX = 64 };
+    enum { NL_MAX = 128 };
 
     /* 1. vertical advection: w·du/dz at vertices (Fortran 369-420) */
     for (int n = 0; n < mesh->myDim_nod2D; ++n) {
@@ -300,7 +300,7 @@ void fesom_impl_vert_visc(const struct fesom_mesh    *mesh,
     const real_t inv_density_0 = 1.0 / (real_t)FESOM_DENSITY_0;
 
     /* Per-column scratch — nl ≤ 48 so static cap of 64 is safe. */
-    enum { NL_MAX = 64 };
+    enum { NL_MAX = 128 };
 
     for (int e = 0; e < E; ++e) {
         int nzmin = mesh->ulevels[e]   - 1;

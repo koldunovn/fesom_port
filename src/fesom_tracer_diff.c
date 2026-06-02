@@ -33,7 +33,7 @@
 #include "fesom_tracers.h"
 #include "fesom_types.h"
 
-enum { NL_MAX = 64 };
+enum { NL_MAX = 128 };
 
 /* ------------------------------------------------------------------------ *
  * bc_surface — oce_ale_tracer.F90:1475-1524                                *
