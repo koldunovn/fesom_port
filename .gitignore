@@ -1,4 +1,5 @@
-build/
+# build dirs (build/, build_dbg/, build_nl128/, …) — never commit
+build*/
 *.o
 *.obj
 core
@@ -7,9 +8,10 @@ core.*
 .idea/
 compile_commands.json
 runs/
+__pycache__/
+*.pyc
 
 # SLURM run outputs / regression baselines — large netCDF, never commit
-build_dbg/
 tests/regression_reference/
 *.nc
 slurm.*.out

@@ -110,9 +110,21 @@ The model calendar starts at `jra55_year` (Gregorian) so the JRA reader
 and the output stream filenames are dated correctly; with JRA disabled
 it defaults to 1958 for CF time stamps.
 
-## Sample SLURM job (864 ranks, 5-year production)
+## Job templates
 
-The current production template (cf. `job_kpp_5yr_fix`, `job_stab_5yr_dt1800`):
+Ready-to-submit SLURM scripts live in [`jobs/`](jobs/) — see
+[`jobs/README.md`](jobs/README.md) for the full list and how to adapt them:
+
+| Script | Ranks | Length | Notes |
+|---|---|---|---|
+| `smoke_8rank.sh` | 8 | ~1 month | quick "does it build, run, write output?" check |
+| `production_864_5yr.sh` | 864 | 5 yr | validated reference run, KPP (default) |
+| `production_pp.sh` | 864 | 5 yr | same, with `FESOM_MIX_SCHEME=PP` |
+| `validation_2yr.sh` | 864 | 2 yr | daily+monthly output for Fortran comparison |
+
+Submit from the repo root with `sbatch jobs/<script>`. The 864-rank,
+5-year production template (`jobs/production_864_5yr.sh`) is shaped like
+this:
 
 ```bash
 #!/bin/bash
@@ -155,7 +167,7 @@ its keep. Recording `git rev-parse HEAD` into the run dir makes a run
 reproducible after the fact.
 
 Shorter smoke / validation jobs (1–256 ranks, a month or a year) follow
-the same shape — see the many `job_*` templates in the tree.
+the same shape — see `jobs/smoke_8rank.sh` and `jobs/validation_2yr.sh`.
 
 ## Output
 
