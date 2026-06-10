@@ -503,12 +503,23 @@ must already have the zstar composition; plan-review finding 5.)*
       ➕ RESULTS.md + climate_compare_output.txt committed.
 
 ### Phase Z10: Acceptance + handoff
-- [ ] All Overview requirements met: FESOM_ALE switch works; linfs byte-identical to v1.0;
+- [x] All Overview requirements met: FESOM_ALE switch works; linfs byte-identical to v1.0;
       every ported routine dump-validated; 2yr climate matches the zstar reference.
-- [ ] Decision point (user): keep linfs default vs flip to zstar (KPP precedent: flip after
+      ➕ CONFIRMED: switch live (zstar runs 3-step/5-day/30-day/2yr clean); linfs
+      byte-gates worst |Δ|=0 at Z0/Z2-Z6/Z2-Z7; per-routine dumps at the noise floor
+      (pgf bit-faithful); Z9 climate 0.0038/0.0014 + contrast 3-9× (RESULTS.md).
+- [x] Decision point (user): keep linfs default vs flip to zstar (KPP precedent: flip after
       validation). Tag suggestion: `zstar-validated-<date>`.
-- [ ] Update docs/NEXT_SESSION_HANDOFF.md + auto-memory (`project_zstar_port_state`);
+      ➕ USER DECISION 2026-06-11: **keep linfs the default for now** (FESOM_ALE=zstar
+      opts in); tag `zstar-validated-2026-06-10` created on the validated HEAD.
+- [x] Update docs/NEXT_SESSION_PROMPT.md + auto-memory (`project_zstar_port_state`);
       commit per-phase; move this plan to `docs/plans/completed/`.
+      ➕ Done — next session = TKE plan T0 (kickoff rewritten). Open formality left
+      running: the linfs-baseline cross-rank (job 25499700) for the apples-to-apples
+      rank-noise magnitude bar; the zstar cross-rank already passed on the
+      step-0-IC-origin evidence (spread originates in snap_000000 and shrinks by day 5).
+
+**ZSTAR PORT COMPLETE — Z0–Z10 all phases done, 2026-06-10/11.**
 
 ## Technical Details
 - **New state**: mesh `Z_3d_n[N·nl]`, `dhe[E]`, `bottom_node_thickness[N]`,

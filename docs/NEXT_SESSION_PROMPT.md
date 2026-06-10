@@ -1,58 +1,58 @@
-# Next-session prompt — zstar Z7/Z8/Z9 verdicts → Z10
+# Next-session prompt — start the TKE port (Phase T0)
 
 Copy the block below as the next session's opening prompt.
-(Previous prompt's task — "start the zstar port" — was executed 2026-06-10 FAR past Z0:
-**Z0–Z7 are implemented, dump-validated, and committed** on branch `zstar`;
-three validation runs were left in flight.)
+(The previous prompt's task — zstar Z7/Z8/Z9 verdicts → Z10 — was COMPLETED 2026-06-11:
+**the zstar port is DONE, Z0–Z10**, tag `zstar-validated-2026-06-10`, plan moved to
+`docs/plans/completed/`. User kept **linfs as the default**; `FESOM_ALE=zstar` opts in.)
 
 ---
 
-> Continue the zstar port in the worktree **`/home/a/a270088/port2/fesom2_port_zstar`**
-> (branch `zstar`, HEAD 89611d5; the main `fesom2_port/` checkout still holds the
-> jax-mesh-export WIP — don't disturb it). Read auto-memory `project_zstar_port_state`
-> and the plan `docs/plans/20260610-zstar-vertical-coordinate.md` (Z0–Z7 checked off with
-> evidence; Z8/Z9 partially noted).
+> Continue the FESOM2→C port in the worktree **`/home/a/a270088/port2/fesom2_port_zstar`**
+> (branch `zstar`; the main `fesom2_port/` checkout still holds jax-mesh-export WIP — don't
+> disturb it). **This session: start the CVMix classical-TKE port — Phase T0 of
+> `docs/plans/20260610-tke-vertical-mixing.md`** (plan-reviewed 2026-06-10; the second of
+> the two approved plans, zstar-first order ✓ done).
 >
-> **This session: evaluate the three in-flight validation jobs and close Z7→Z9:**
-> 1. **25495447 `z7_xrank`** (`/work/ab0995/a270088/port/zstar/z7_xrank/slurm.*.out`):
->    zstar 5-day at 1/8/16 ranks + pairwise final-snapshot compare. Bar: agreement at the
->    PHC rank-noise scale (GM/sea-ice precedent) — NOT bit-identity. A large/growing
->    cross-rank gap = halo bug in the new zstar write loops (Wvel/hnode_new/helem/
->    ssh_rhs_old/hbar/dhe) → exchange-and-compare probe per feedback_write_loops_halo.
-> 2. **25495448 `z8_month`** (`.../z8_month/`): 30-day dt=1800 16r zstar. Bar: clean exit,
->    bounded max|uv| (linfs margin lore: autumn peak 4.65), physical SSH/SST/SSS. Watch
->    Aleutian el 194724 + the 1-ring hbar-spread checkerboard.
-> 3. **25495449 `z9_zstar2yr`** (`.../c_zstar_2yr/`): C zstar+KPP 2yr 864r. Run
->    `scripts/zstar_climate_compare.py` (paths pre-wired: F-zstar reference
->    `fortran_zstar_2yr`, contrast `fortran_linfs_2yr_b` — both COMPLETE, exit 0).
->    Bar: KPP-class (SST/SSS RMS ~0.005/0.002, biases ~0, non-drifting); the LIN contrast
->    column must be CLEARLY larger than ZS (the comparison resolves the coordinate).
-> 4. Then Z9 checkbox + `docs/validation_zstar_2yr/` numbers, and **Z10**: handoff,
->    plan → completed/, memory update, tag suggestion `zstar-validated-<date>`,
->    user decision point on the default-coordinate flip. The TKE plan
->    (`docs/plans/20260610-tke-vertical-mixing.md`) comes next.
+> 1. **Read the plan first**, then auto-memories `project_zstar_tke_plans` (approved
+>    decisions: two C files mirroring Fortran — `fesom_cvmix_tke.c` = cvmix_tke.F90 column
+>    core, `fesom_tke.c` = gen_modules_cvmix_tke.F90 driver; `FESOM_MIX_SCHEME=TKE` third
+>    option, KPP stays default; diagnostics computed per-column but stored only under
+>    `FESOM_TKE_DIAG=1`; `tke_cd=3.75` from namelist.cvmix NOT the 1.0 module default;
+>    `handle_old_vals`/old_KappaM/H are DEAD; driver loops OWNED-ONLY; `iw_diss` read
+>    unconditionally → pass a real zero column) and `project_zstar_port_state`.
+> 2. **T0 first moves:** `struct fesom_tke` + `FESOM_MIX_SCHEME=TKE` abort-stub dispatch +
+>    `FESOM_TKE_DIAG` parse; **launch the Fortran reference runs immediately** (queue
+>    time): `work_tke_dump` (16r, dt=1800, 3 steps, dump gate) and `work_linfs_tke`
+>    (2yr; copy work_linfs_2yr, flip `mix_scheme='cvmix_TKE'`, copy namelist.cvmix in;
+>    same Intel binary — CVMIX=ON already). Unique OUT_DIRs, purge-safe /work, archive
+>    namelists + PROVENANCE (the zstar Z0 pattern; consider a frozen binary copy like
+>    `frozen_zstar_refs/`).
+> 3. **Provenance hardening (plan finding 6):** grep BOTH reference logs for the
+>    `init_cvmix_tke` echo (`tke_cd = 3.75`, `tke_only = T`) — proves the namelist was
+>    consumed AND `__cvmix` is compiled (else a plausible-looking broken reference).
+> 4. **Gate:** TKE off → byte-identical to the current HEAD (16r/200/dt=500;
+>    `jobs/job_zstar_z0_byteident` is the recipe — point run A at a HEAD-built binary).
 >
-> Known/expected: steps 2-3 cross-code dump diffs are threshold-amplified input noise
-> (kbl flips 7.9%, fully analyzed in the plan Z8 note + the Z2-Z7 commit message) — do
-> NOT re-litigate; the climate run is the binding test. linfs byte-gates PASSED at
-> Z0/Z1/Z2-Z6/Z2-Z7 (worst |Δ|=0 every time; run.log diffs are the 3 out_dir path
-> strings only) — `jobs/job_zstar_z0_byteident` re-runs it in ~15 min if needed.
+> GUIDING PRINCIPLE unchanged: strict faithful port; namelist values over module defaults;
+> port what the reference exercises (Langmuir/IDEMIX/Dirichlet gate-only); every phase ends
+> with its Validate gate.
 
 ---
 
 ## Quick reference
 
-- **Worktrees:** `fesom2_port_zstar` (branch zstar — THE working tree),
-  `fesom2_port_v10` (detached v1.0 — byte-gate reference binary; keep).
-- **Fortran refs (purge-safe):** `/work/ab0995/a270088/port/zstar/{fortran_zstar_2yr,
-  fortran_linfs_2yr_b,fdump/dump,fdump_k2/kdump}`; frozen binary
-  `fesom2/frozen_zstar_refs/` (sha 700e2d19…); namelists archived in
-  `docs/zstar_reference_namelists/` + PROVENANCE.md. Fortran ALE dump gate =
-  `ale_dump_mod` UNCOMMITTED in `fesom2/src/oce_ale.F90` (KPP-gate convention).
-- **Dump tooling:** `FESOM_ALE_DUMP_DIR` + `FESOM_ALE_DUMP_STEPS` (both codes,
-  identical format), `scripts/ale_dump_diff.py`; per-run C dumps under
-  `/work/ab0995/a270088/port/zstar/{z1_smoke,z2_cdump,z7_kdump}`.
+- **zstar (DONE):** tag `zstar-validated-2026-06-10`; results
+  `docs/validation_zstar_2yr/RESULTS.md`; references under
+  `/work/ab0995/a270088/port/zstar/` (fortran_zstar_2yr, fortran_linfs_2yr_b, fdump/dump);
+  switch `FESOM_ALE=linfs|zstar` (default linfs). One leftover formality: the
+  linfs-baseline cross-rank job 25499700 (`z7_xrank_linfs/`) — paste its day-5 spread
+  next to the zstar one in RESULTS.md if it looks as expected (same IC-noise scale).
+- **Run matrix remainder (approved):** after TKE validates per-feature →
+  Fortran `work_zstar_tke` 2yr (both knobs) + C zstar+TKE 2yr compare + 5yr C
+  zstar+TKE stability (re-measure the autumn uv margin; linfs was 0.35).
 - Build C: `source /sw/etc/profile.levante && source env.sh && make -C build fesom_port`
-  (from the worktree). Python: `/work/ab0995/a270088/mambaforge/envs/nereus/bin/python`
-  (PYTHONPATH=/home/a/a270088/PYTHON).
-- Switch: `FESOM_ALE=linfs|zstar` (default linfs = byte-identical to v1.0).
+  (worktree). Fortran: `make -C build fesom.x -j8 && make -C build install` (install
+  mandatory). Python: `/work/ab0995/a270088/mambaforge/envs/nereus/bin/python`.
+- Byte/dump tooling to clone: `jobs/job_zstar_z0_byteident`, `scripts/ale_dump_diff.py`
+  → `scripts/tke_dump_diff.py`; Fortran dump-gate pattern = `ale_dump_mod` (uncommitted,
+  top of `fesom2/src/oce_ale.F90`) / the KPP gates in `oce_ale_mixing_kpp.F90`.
