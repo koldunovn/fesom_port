@@ -1,11 +1,36 @@
 #include "fesom_ale.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
+#include "fesom_halo.h"
 #include "fesom_mesh.h"
+#include "fesom_partit.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* --- which_ALE runtime switch (Phase Z0) --------------------------------- */
+int    fesom_ale_zstar     = 0;
+int    fesom_use_virt_salt = 1;
+real_t fesom_is_nonlinfs   = 0.0;
+
+void fesom_ale_mode_init(void)
+{
+    const char *e = getenv("FESOM_ALE");
+    if (!e || !e[0] || strcmp(e, "linfs") == 0) {
+        fesom_ale_zstar = 0;
+    } else if (strcmp(e, "zstar") == 0) {
+        fesom_ale_zstar = 1;
+    } else {
+        /* zlevel + the local-zstar fallback are NOT ported (no reference
+         * run exercises them) — gate-only abort, like which_pgf others. */
+        fprintf(stderr, "FESOM_ALE=%s not supported (linfs|zstar)\n", e);
+        exit(1);
+    }
+    fesom_use_virt_salt = !fesom_ale_zstar;
+    fesom_is_nonlinfs   = fesom_ale_zstar ? 1.0 : 0.0;
+}
 
 void fesom_ale_thickness_linfs(struct fesom_mesh *mesh)
 {
@@ -13,6 +38,157 @@ void fesom_ale_thickness_linfs(struct fesom_mesh *mesh)
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
     size_t bytes = (size_t)N * (size_t)mesh->nl * sizeof(real_t);
     memcpy(mesh->hnode_new, mesh->hnode, bytes);
+}
+
+/* --- Phase Z1: zstar thickness machinery (see fesom_ale.h) ---------------- */
+
+void fesom_ale_init_thickness_zstar(struct fesom_mesh   *mesh,
+                                    struct fesom_dyn    *dyn,
+                                    struct fesom_partit *partit)
+{
+    const int    nl    = mesh->nl;
+    const int    N     = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    const real_t alpha = (real_t)FESOM_PHASE1_ALPHA;
+    const real_t dt    = (real_t)FESOM_PHASE1_DT;
+
+    /* Mode-shared pre-block (oce_ale.F90:1002-1007). All zeros at cold start
+     * (hbar = hbar_old = 0); ported literally for shape fidelity. */
+    for (int n = 0; n < N; ++n) {
+        int ul = mesh->ulevels_nod2D[n] - 1;
+        dyn->ssh_rhs_old[n] = (mesh->hbar[n] - mesh->hbar_old[n])
+                            * mesh->areasvol[FESOM_NODE3D(n, ul, nl)] / dt;
+    }
+    for (int n = 0; n < N; ++n) {
+        dyn->eta_n[n] = alpha * mesh->hbar_old[n]
+                      + (1.0 - alpha) * mesh->hbar[n];
+    }
+
+    /* zstar node thicknesses (:1134-1172). 1-based bounds annotated. */
+    for (int n = 0; n < N; ++n) {
+        int nzmin_f = mesh->ulevels_nod2D[n];        /* 1-based top level   */
+        int nzmax_f = mesh->nlevels_nod2D[n] - 1;    /* 1-based bottom layer*/
+        int min_f   = mesh->nlevels_nod2D_min[n];    /* K_v⁻, 1-based       */
+
+        if (nzmin_f == 1) {
+            /* depth anomaly down to the last level whose scalar prism does
+             * not intersect the bottom: dd = zbar(1) - zbar(min-1) */
+            real_t dd = mesh->zbar[0] - mesh->zbar[min_f - 2];
+
+            /* distribute hbar linearly: Fortran nz = 1 .. min-2 */
+            for (int nz = 0; nz <= min_f - 3; ++nz) {
+                mesh->hnode[FESOM_NODE3D(n, nz, nl)] =
+                    (mesh->zbar[nz] - mesh->zbar[nz + 1])
+                    * (1.0 + mesh->hbar[n] / dd);
+            }
+            /* bottom-intersecting levels keep nominal spacing:
+             * Fortran nz = min-1 .. nzmax-1 */
+            for (int nz = min_f - 2; nz <= nzmax_f - 2; ++nz) {
+                mesh->hnode[FESOM_NODE3D(n, nz, nl)] =
+                    mesh->zbar[nz] - mesh->zbar[nz + 1];
+            }
+        } else {
+            /* cavity arm (unreachable in our meshes): fixed geometry */
+            for (int nz = nzmin_f - 1; nz <= nzmax_f - 2; ++nz) {
+                mesh->hnode[FESOM_NODE3D(n, nz, nl)] =
+                    mesh->zbar_3d_n[FESOM_NODE3D(n, nz,     nl)]
+                  - mesh->zbar_3d_n[FESOM_NODE3D(n, nz + 1, nl)];
+            }
+        }
+        /* bottom layer: Fortran hnode(nzmax) = bottom_node_thickness */
+        mesh->hnode[FESOM_NODE3D(n, nzmax_f - 1, nl)] =
+            mesh->bottom_node_thickness[n];
+    }
+
+    /* zstar element thicknesses + dhe (:1176-1206). Owned elements only,
+     * then exchange. Reads hnode at halo nodes (filled above). */
+    for (int e = 0; e < mesh->myDim_elem2D; ++e) {
+        int nzmin_f = mesh->ulevels[e];
+        int nzmax_f = mesh->nlevels[e] - 1;
+        int n0 = mesh->elem_nodes[3*e + 0];
+        int n1 = mesh->elem_nodes[3*e + 1];
+        int n2 = mesh->elem_nodes[3*e + 2];
+
+        if (nzmin_f == 1) {
+            mesh->dhe[e] = (mesh->hbar[n0] + mesh->hbar[n1] + mesh->hbar[n2])
+                           / 3.0;
+            mesh->helem[FESOM_ELEM3D(e, 0, nl)] =
+                (mesh->hnode[FESOM_NODE3D(n0, 0, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n1, 0, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n2, 0, nl)]) / 3.0;
+        } else {
+            /* cavity arm (unreachable): Fortran zeroes the WHOLE dhe array
+             * here (`dhe = 0.0_WP`, an array assignment) and pins the top
+             * helem to the cavity surface depth. No zbar_e_srf in C (no
+             * cavities) — keep the guard, make the body fatal if ever hit. */
+            fprintf(stderr, "init_thickness_zstar: cavity element %d "
+                            "(ulevels=%d) not supported\n", e, nzmin_f);
+            exit(1);
+        }
+        /* Fortran nz = nzmin+1 .. nzmax-1 (2..nlevels-2) */
+        for (int nz = 1; nz <= nzmax_f - 2; ++nz) {
+            mesh->helem[FESOM_ELEM3D(e, nz, nl)] =
+                (mesh->hnode[FESOM_NODE3D(n0, nz, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n1, nz, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n2, nz, nl)]) / 3.0;
+        }
+        /* bottom layer: Fortran helem(nzmax) = bottom_elem_thickness */
+        mesh->helem[FESOM_ELEM3D(e, nzmax_f - 1, nl)] =
+            mesh->bottom_elem_thickness[e];
+    }
+
+    /* hnode_new = hnode (:1217) — only the variable part is updated later. */
+    memcpy(mesh->hnode_new, mesh->hnode,
+           (size_t)N * (size_t)nl * sizeof(real_t));
+
+    /* exchange_elem(helem) (:1218) */
+    if (partit && partit->npes > 1)
+        fesom_exchange_elem3D(mesh->helem, nl, partit);
+}
+
+void fesom_ale_update_thickness_zstar(struct fesom_mesh   *mesh,
+                                      struct fesom_partit *partit)
+{
+    const int nl = mesh->nl;
+    const int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
+
+    /* node commit, bottom→top (oce_ale.F90:1382-1416). myDim+eDim — reads
+     * the hnode_new halo (exchanged at the end of vert_vel, Z5). */
+    for (int n = 0; n < N; ++n) {
+        int nzmin_f = mesh->ulevels_nod2D[n];
+        if (nzmin_f > 1) continue;                   /* cavity guard */
+        int top_f = mesh->nlevels_nod2D_min[n] - 2;  /* 1-based commit top */
+
+        for (int nzf = top_f; nzf >= nzmin_f; --nzf) {
+            int nz = nzf - 1;                        /* 0-based layer */
+            size_t k  = FESOM_NODE3D(n, nz,     nl);
+            size_t k1 = FESOM_NODE3D(n, nz + 1, nl);
+            mesh->hnode[k]     = mesh->hnode_new[k];
+            mesh->zbar_3d_n[k] = mesh->zbar_3d_n[k1] + mesh->hnode_new[k];
+            mesh->Z_3d_n[k]    = mesh->zbar_3d_n[k1] + mesh->hnode_new[k] / 2.0;
+        }
+    }
+
+    /* element mean thickness (:1421-1434): nz = 1 .. nlevels(elem)-2
+     * (1-based) — the bottom helem keeps bottom_elem_thickness. */
+    for (int e = 0; e < mesh->myDim_elem2D; ++e) {
+        int nzmin_f = mesh->ulevels[e];
+        if (nzmin_f > 1) continue;                   /* cavity guard */
+        int nzmax_f = mesh->nlevels[e] - 1;
+        int n0 = mesh->elem_nodes[3*e + 0];
+        int n1 = mesh->elem_nodes[3*e + 1];
+        int n2 = mesh->elem_nodes[3*e + 2];
+        for (int nzf = nzmin_f; nzf <= nzmax_f - 1; ++nzf) {
+            int nz = nzf - 1;
+            mesh->helem[FESOM_ELEM3D(e, nz, nl)] =
+                (mesh->hnode[FESOM_NODE3D(n0, nz, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n1, nz, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n2, nz, nl)]) / 3.0;
+        }
+    }
+
+    /* exchange_elem(helem) (:1440) */
+    if (partit && partit->npes > 1)
+        fesom_exchange_elem3D(mesh->helem, nl, partit);
 }
 
 void fesom_ale_commit_thickness(struct fesom_mesh *mesh)

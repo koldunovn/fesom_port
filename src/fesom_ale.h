@@ -7,6 +7,24 @@ struct fesom_mesh;
 struct fesom_dyn;
 
 /*
+ * which_ALE runtime switch (Phase Z0 of the zstar port).
+ *
+ * Mirrors the Fortran module globals: g_config which_ALE,
+ * gen_modules_forcing use_virt_salt and o_PARAM is_nonlinfs — the latter
+ * two are DERIVED from which_ALE in oce_setup_step.F90:115-125:
+ *   linfs  → use_virt_salt = .true.,  is_nonlinfs = 0.0
+ *   zstar  → use_virt_salt = .false., is_nonlinfs = 1.0
+ *
+ * Selected by FESOM_ALE=linfs|zstar (default linfs — byte-identical to v1.0).
+ * Any other value (zlevel etc.) aborts: not ported (no reference run).
+ * fesom_ale_mode_init must be called once at startup before any consumer.
+ */
+extern int    fesom_ale_zstar;      /* 0 = linfs (default), 1 = zstar      */
+extern int    fesom_use_virt_salt;  /* 1 under linfs, 0 under zstar        */
+extern real_t fesom_is_nonlinfs;    /* 0.0 under linfs, 1.0 under zstar    */
+void fesom_ale_mode_init(void);
+
+/*
  * ALE (Arbitrary Lagrangian-Eulerian) step. Phase 1 implements only the
  * `which_ALE = 'linfs'` branch:
  *
@@ -37,6 +55,43 @@ void fesom_ale_thickness_linfs(struct fesom_mesh *mesh);
 
 /* Commit at end of timestep: hnode := hnode_new and helem := mean of 3 vertex hnode. */
 void fesom_ale_commit_thickness(struct fesom_mesh *mesh);
+
+struct fesom_partit;
+struct fesom_dyn;
+
+/*
+ * Phase Z1 — zstar thickness machinery.
+ *
+ * fesom_ale_init_thickness_zstar: literal port of init_thickness_ale
+ * (oce_ale.F90:962-1221), zstar case, including the mode-shared pre-block
+ * (ssh_rhs_old = (hbar-hbar_old)·areasvol/dt; eta_n = α·hbar_old+(1-α)·hbar —
+ * note the REVERSED weights vs the per-step update; all zeros at cold start).
+ * Node loop (myDim+eDim): hnode = (zbar(nz)-zbar(nz+1))·(1+hbar/dd) for
+ * nz=1..nlevels_nod2D_min-2 with dd = zbar(1)-zbar(nlevels_nod2D_min-1);
+ * nominal spacing for the bottom-intersecting levels; bottom layer =
+ * bottom_node_thickness. Element loop (myDim): dhe = mean(hbar), helem =
+ * mean of vertex hnode, bottom = bottom_elem_thickness. Then
+ * hnode_new := hnode and exchange_elem(helem). Replaces fesom_ic_thickness
+ * when FESOM_ALE=zstar (cold start hbar=0 → values equal the linfs init by
+ * construction; helem may differ from the linfs zbar-diff form by ≤1 ulp
+ * because the mean-of-3 formula rounds differently — exactly as in Fortran).
+ *
+ * fesom_ale_update_thickness_zstar: literal port of update_thickness_ale
+ * (oce_ale.F90:1226-1444), zstar case. Per-step COMMIT over myDim+eDim,
+ * bottom→top for nz = nlevels_nod2D_min-2 .. 1 (1-based):
+ *   hnode = hnode_new; zbar_3d_n(nz) = zbar_3d_n(nz+1) + hnode_new(nz);
+ *   Z_3d_n(nz) = zbar_3d_n(nz+1) + hnode_new(nz)/2
+ * (bottom-protected levels keep their init geometry); helem = mean of vertex
+ * hnode for nz = 1..nlevels(elem)-2 (bottom helem stays bottom_elem_thickness);
+ * exchange_elem(helem). ldiag_DVD rescue NOT ported (diagnostic off).
+ * NOTE: until Z5 produces hnode_new, this commit is a no-op by construction.
+ */
+void fesom_ale_init_thickness_zstar(struct fesom_mesh   *mesh,
+                                    struct fesom_dyn    *dyn,
+                                    struct fesom_partit *partit);
+
+void fesom_ale_update_thickness_zstar(struct fesom_mesh   *mesh,
+                                      struct fesom_partit *partit);
 
 /*
  * Vertical CFL (compute_CFLz, oce_ale.F90:2935-3022):

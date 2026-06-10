@@ -56,6 +56,14 @@ typedef struct fesom_step_ctx {
      * if the FESOM_NO_ICE_THERMO env knob is set. */
     const struct fesom_jra55      *jra;
     const struct fesom_sss_runoff *sr;
+
+    /* which_ALE switch (Phase Z0) — copies of the fesom_ale.h globals
+     * (fesom_ale_zstar / fesom_use_virt_salt / fesom_is_nonlinfs), set by
+     * main after fesom_ale_mode_init. linfs defaults keep every consumer on
+     * the v1.0 code path. */
+    int    ale_zstar;       /* 0 = linfs (default), 1 = zstar */
+    int    use_virt_salt;   /* 1 under linfs, 0 under zstar   */
+    real_t is_nonlinfs;     /* 0.0 under linfs, 1.0 under zstar */
 } fesom_step_ctx;
 
 /*

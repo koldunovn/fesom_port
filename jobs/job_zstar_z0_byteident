@@ -1,0 +1,56 @@
+#!/bin/bash
+#SBATCH --job-name=z0_byteident
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:40:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/zstar/z0_byteident/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/zstar/z0_byteident/slurm.%j.err
+#
+# Phase Z0 byte-gate: the zstar-branch binary with FESOM_ALE unset (= linfs)
+# must be bit-identical to the v1.0 binary. 16 ranks, 200 steps, dt=500,
+# snapshots every 25 (the KPP K0 gate recipe). Runs both binaries
+# sequentially, then compares all snapshots + run.log.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+BIN_V10=/home/a/a270088/port2/fesom2_port_v10/build/fesom_port
+BIN_Z=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+BASE=/work/ab0995/a270088/port/zstar/z0_byteident
+OUT_A=$BASE/v10
+OUT_B=$BASE/zbranch_linfs
+mkdir -p "$OUT_A" "$OUT_B"
+
+unset FESOM_ALE FESOM_ALE_DUMP_DIR FESOM_ALE_DUMP_STEPS
+
+echo "=== run A: v1.0 binary ==="
+srun -l "$BIN_V10" "$MESH" "$OUT_A" 500 200 25 "$PHC" 1958 \
+    > "$OUT_A/run.log" 2> "$OUT_A/run.err"
+echo "exit A: $?"
+
+echo "=== run B: zstar branch, FESOM_ALE unset ==="
+srun -l "$BIN_Z" "$MESH" "$OUT_B" 500 200 25 "$PHC" 1958 \
+    > "$OUT_B/run.log" 2> "$OUT_B/run.err"
+echo "exit B: $?"
+
+echo "=== run.log diff (must be empty) ==="
+if cmp -s "$OUT_A/run.log" "$OUT_B/run.log"; then
+    echo "run.log: IDENTICAL"
+else
+    echo "run.log: DIFFERS"
+    diff "$OUT_A/run.log" "$OUT_B/run.log" | head -40
+fi
+
+echo "=== snapshot byte-compare ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+PYTHONPATH=/home/a/a270088/PYTHON $PY \
+    /home/a/a270088/port2/fesom2_port_zstar/scripts/kpp_byteident_check.py \
+    "$OUT_A" "$OUT_B"
+echo "byteident exit: $?"

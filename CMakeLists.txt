@@ -56,6 +56,7 @@ add_executable(fesom_port
   src/fesom_ic.c
   src/fesom_eos.c
   src/fesom_ale.c
+  src/fesom_ale_dump.c
   src/fesom_ssh.c
   src/fesom_momentum.c
   src/fesom_tracer_adv.c

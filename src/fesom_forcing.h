@@ -44,6 +44,15 @@ typedef struct fesom_forcing {
        temperature tracer equation (oce_ale_tracer.F90:990). */
     real_t *chl;             /* [nod2D]        chlorophyll concentration            */
     real_t *sw_3d;           /* [nod2D * nl]   shortwave T-flux at interfaces        */
+
+    /* Sea-ice REAL salt flux (Fortran g_forcing_arrays real_salt_flux,
+       gen_modules_forcing.F90:108). Producer: standalone therm_ice assigns it
+       unconditionally (ice_thermo_oce.F90:352; rsf is use_virt_salt-branched at
+       :617/:646). Under zstar (use_virt_salt=.false.) it carries the
+       brine-rejection/melt salt flux that REPLACES virtual_salt in the S
+       surface BC. Stays 0 under linfs (Phase Z0: allocated, no producer yet;
+       Z2 wires fesom_ice_thermo's rsf into it). */
+    real_t *real_salt_flux;  /* [nod2D] */
 } fesom_forcing;
 
 void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh);

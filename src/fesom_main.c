@@ -251,6 +251,12 @@ int main(int argc, char **argv)
     int snap_every_cli = (argc >= 6) ? atoi(argv[5]) : 0;
     const char *phc_path = (argc >= 7 && argv[6][0] != '\0') ? argv[6] : NULL;
     int jra55_year = (argc >= 8) ? atoi(argv[7]) : 0;  /* 0 disables JRA55 */
+    /* which_ALE switch (Phase Z0). Default linfs is silent so the linfs
+     * run.log stays byte-identical to v1.0. */
+    fesom_ale_mode_init();
+    if (fesom_ale_zstar)
+        printf("[fesom_port] ALE mode: zstar (use_virt_salt=F, is_nonlinfs=1)\n");
+
     if (out_dir) printf("[fesom_port] snapshots → %s/snap_NNNNNN.nc\n", out_dir);
     printf("[fesom_port] dt = %.1f s\n", (double)fesom_phase1_dt);
     if (phc_path) printf("[fesom_port] PHC IC source: %s\n", phc_path);
@@ -363,8 +369,15 @@ int main(int argc, char **argv)
            "approx 3D bytes=%.1f MiB\n",
            dyn.AB_order, tracers.num_tracers, (double)bytes / (1024.0 * 1024.0));
 
-    /* Phase 1 step 3: initial conditions. */
-    fesom_ic_thickness(&mesh, &mesh, &dyn);
+    /* Phase 1 step 3: initial conditions.
+     * Thickness init dispatch (init_thickness_ale): linfs keeps the v1.0
+     * fesom_ic_thickness; zstar runs the Z1 literal port (identical values
+     * at cold start hbar=0, except ≤1-ulp helem rounding from the
+     * mean-of-3 formula — exactly as in Fortran). */
+    if (fesom_ale_zstar)
+        fesom_ale_init_thickness_zstar(&mesh, &dyn, &mpi);
+    else
+        fesom_ic_thickness(&mesh, &mesh, &dyn);
     fesom_ic_tracers_constant(&mesh, &tracers, 10.0, 35.0);
     /* (Phase 2 T blob is added below, AFTER the IC/rest-state sanity tests so
        those still see the unperturbed constant field.) */
@@ -834,7 +847,10 @@ skip_rest_state:
                                .gm     = &gm,
                                .kpp    = &kpp,
                                .jra    = use_jra ? &jra : NULL,
-                               .sr     = use_sr  ? &sr  : NULL };
+                               .sr     = use_sr  ? &sr  : NULL,
+                               .ale_zstar     = fesom_ale_zstar,
+                               .use_virt_salt = fesom_use_virt_salt,
+                               .is_nonlinfs   = fesom_is_nonlinfs };
         const int nsteps      = (nsteps_cli > 0)     ? nsteps_cli     : 500;
         /* snap_every semantics:
          *   > 0  → snapshot every N steps

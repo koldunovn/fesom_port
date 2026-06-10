@@ -196,37 +196,85 @@ stretching is applied only where `area(nz,n)=area(1,n)`).
 
 ### Phase Z0: Scaffolding — switch, mesh arrays, dump harness, reference runs (NO behavior change)
 **Files:** Modify `src/fesom_main.c`, `src/fesom_mesh.{c,h}`, `src/fesom_ale.{c,h}`, `src/fesom_step.c`; Create `scripts/ale_dump_diff.py`, `jobs/job_zstar_*`; Fortran `oce_ale.F90` (dump gate, uncommitted)
-- [ ] Branch from main@v1.0. Add `FESOM_ALE=linfs|zstar` env parsing (default linfs) → step-ctx
+- [x] Branch from main@v1.0. Add `FESOM_ALE=linfs|zstar` env parsing (default linfs) → step-ctx
       flags `ale_zstar`, `use_virt_salt=!ale_zstar`, `is_nonlinfs=ale_zstar?1.0:0.0`.
-- [ ] Add mesh arrays, **initialized to linfs-identical values**: per-node `Z_3d_n[N·nl]`
+      ➕ 2026-06-10: branch `zstar` lives in git worktree `fesom2_port_zstar/` (the main
+      checkout keeps jax-mesh-export WIP undisturbed); v1.0 reference binary built in
+      detached worktree `fesom2_port_v10/`. Flags = globals in fesom_ale.{c,h} (mirror of
+      the Fortran o_PARAM/g_config module globals) + copies in step-ctx; zstar-only
+      startup print (linfs run.log stays byte-identical); unknown FESOM_ALE values abort.
+- [x] Add mesh arrays, **initialized to linfs-identical values**: per-node `Z_3d_n[N·nl]`
       (=mesh->Z per level), `dhe[elem2D]`(=0), `bottom_node_thickness[N]`/`bottom_elem_thickness[E]`
       (nominal zbar spacing at the column bottom, full cells), forcing `real_salt_flux[N]`(=0).
-      No consumer change yet.
-- [ ] Audit-confirm `oce_ale_vel_rhs.F90`: use_virt_salt imported-unused; floatice pressure
+      No consumer change yet. ➕ Z_3d_n/bottom_* built in fesom_mesh_compute_metrics (next
+      to compute_zbar_3d_n); dhe in fesom_mesh_alloc_state; real_salt_flux in fesom_forcing.
+- [x] Audit-confirm `oce_ale_vel_rhs.F90`: use_virt_salt imported-unused; floatice pressure
       term ×use_pice=0 → byte-identical for our config (record in plan).
-- [ ] Launch the **Fortran reference runs NOW** (queue time): (a) `work_zstar_dump` 16r dt=1800
+      ➕ CONFIRMED: `use_virt_salt` only at :44 (import), zero body uses. `use_pice=0`
+      (:93) flips to 1 only if `use_floatice .and. .not. linfs` (:94); use_floatice=.false.
+      in the reference → the p_ice=0.0 arm (:177) runs under BOTH modes.
+- [x] Launch the **Fortran reference runs NOW** (queue time): (a) `work_zstar_dump` 16r dt=1800
       3 steps with the ALE dump gate; (b) `work_zstar_kpp` 2yr dt=1800 (copy of work_linfs_2yr,
       flip `which_ALE='zstar'` only, same Intel binary). Unique OUT_DIRs. Archive namelists →
       `docs/zstar_reference_namelists/` + PROVENANCE.md; re-confirm the config table above.
-- [ ] Add `FESOM_ALE_DUMP_DIR` dump plumbing in C (writer skeleton; fields wired per phase)
+      ➕ Launched 2026-06-10: jobs 25492898 (work_zstar_kpp) + 25492899 (work_linfs_2yr_b —
+      RERUN of the linfs reference: the original /scratch/.../fortran_2yr_dt1800 was PURGED;
+      rerun with the SAME frozen binary as the zstar job → perfectly-paired one-knob pair +
+      restores the Z9 contrast baseline) + 25493084 (work_zstar_dump, COMPLETED exit 0:
+      576 files = 12 tags × 3 steps × 16 ranks; step-1 virtual_salt=0 confirms the
+      use_virt_salt=F derivation in the reference; hbar evolves s1→s3; no NaN). Outputs
+      under /work/ab0995/a270088/port/zstar/ (purge-safe). Namelists archived +
+      PROVENANCE.md (frozen-binary sha, one-knob diff proof, dump-gate site table).
+      Config table re-confirmed against the actual run namelists (which_pgf absent ✓,
+      i_vert_diff=T ✓, use_partial_cell=F ✓, use_floatice=F ✓, use_ssh_se_subcycl=F ✓).
+- [x] Add `FESOM_ALE_DUMP_DIR` dump plumbing in C (writer skeleton; fields wired per phase)
       + the Fortran dump gate (uncommitted, Intel tree) + `scripts/ale_dump_diff.py`.
-- [ ] **Validate:** C with FESOM_ALE unset/linfs **byte-identical to v1.0** (16r/200/dt=500,
+      ➕ C: src/fesom_ale_dump.{c,h} with ALL 12 tags wired at the 6 mirrored driver sites
+      (not per-phase — every dumped field already exists in C); Fortran: `ale_dump_mod` at
+      the top of oce_ale.F90 + 6 one-line call sites (uncommitted, KPP-gate convention);
+      identical filename/format; FESOM_ALE_DUMP_STEPS default 3. ⚠️ The C vertvel dump
+      sits BEFORE the GM bolus add (13a) which modifies dyn->w in place — matching the
+      Fortran site (before solve_tracers_ale).
+- [x] **Validate:** C with FESOM_ALE unset/linfs **byte-identical to v1.0** (16r/200/dt=500,
       snapshots + run.log). Fortran zstar dump run sane (hbar evolves, no NaN).
+      ➕ Fortran dump sanity PASSED (above). Byte-gate job 25493375 PASSED
+      (jobs/job_zstar_z0_byteident: v1.0 binary vs zstar-branch binary, both FESOM_ALE
+      unset): all 9 snapshots BYTE-IDENTICAL (worst |Δ|=0); run.log content identical —
+      the only diff lines are the out_dir PATH embedded in two log strings + srun rank
+      interleaving order (sorted diff shows path-only lines). Z0 COMPLETE 2026-06-10.
 
 ### Phase Z1: Thickness machinery — init_thickness_ale + update_thickness_ale (zstar cases)
 **Files:** Modify `src/fesom_ale.{c,h}`, `src/fesom_ic.c` (init call), `src/fesom_step.c` (commit call)
-- [ ] Port init_thickness_ale zstar: proportional hnode over nz=1..`nlevels_nod2D_min`-2
+- [x] Port init_thickness_ale zstar: proportional hnode over nz=1..`nlevels_nod2D_min`-2
       (myDim+eDim loop), nominal bottom-touching levels, `hnode(nzmax)=bottom_node_thickness`,
       helem mean + `dhe=mean(hbar)` + `bottom_elem_thickness`, `hnode_new=hnode`,
       `exchange_elem(helem)`. (Cold start hbar=0 → values equal linfs init — by construction.)
-- [ ] Port update_thickness_ale zstar: bottom→top commit loop (myDim+eDim) writing hnode,
+      ➕ `fesom_ale_init_thickness_zstar` (fesom_ale.c) incl. the mode-shared pre-block
+      (ssh_rhs_old/eta_n — REVERSED α weights, zeros at cold start); dispatched from
+      fesom_main (zstar replaces fesom_ic_thickness). Cavity elem-arm = fatal guard
+      (zbar_e_srf not ported, unreachable).
+- [x] Port update_thickness_ale zstar: bottom→top commit loop (myDim+eDim) writing hnode,
       zbar_3d_n, Z_3d_n; helem mean to `nlevels(elem)-2`; `exchange_elem(helem)`. Wire as the
       step-end commit when zstar (linfs keeps `fesom_ale_thickness_linfs`).
       ⚠️ Note: until Z5 produces `hnode_new`, the commit is a NO-OP (hnode_new=hnode from
       init) — its bottom→top geometry writes are first meaningfully validated at Z5/Z8.
-- [ ] **Validate:** (a) zstar step-0 state (hnode/helem/zbar_3d_n/Z_3d_n) bit-equal to linfs at
+      ➕ `fesom_ale_update_thickness_zstar`; step-12 linfs hnode_new=hnode copy SKIPPED
+      under zstar (Fortran has no per-step copy); step-14 dispatch (zstar path does NOT
+      exchange hnode — Fortran doesn't; commit covers myDim+eDim from the exchanged
+      hnode_new halo).
+- [x] **Validate:** (a) zstar step-0 state (hnode/helem/zbar_3d_n/Z_3d_n) bit-equal to linfs at
       cold start (hbar=0 degenerate case); (b) linfs byte-gate vs v1.0; (c) dump-diff hnode/helem
       vs Fortran zstar init (16r) — bit-identical expected (pure geometry).
+      ➕ Job 25493641 (jobs/job_zstar_z1_smoke, 16r dt=1800 3 steps zstar + linfs, dumps on):
+      BOTH runs exit 0; ale_dump_diff zstar-vs-linfs over ALL 12 tags × 3 steps:
+      **worst max|diff| = 0.000e+00 — the entire zstar run is BIT-IDENTICAL to linfs**
+      (expected: no behavioral arm is live until Z2; even helem's mean-of-3 is exact
+      because the CORE2 zbar values are round numbers). This subsumes (a); (b) covered by
+      the Z0 byte-gate (25493375, snapshots worst |Δ|=0). (c) replaced by the stronger
+      bit-identity: the Fortran fdump thickness tags reflect step-1..3 EVOLVED geometry
+      (full chain live in Fortran from step 1), so the cross-code geometry compare lands
+      at Z5/Z8 as the ⚠️ above says; the init-state equivalence is proven exactly here.
+      Z1 COMPLETE 2026-06-10.
 
 ### Phase Z2: Freshwater/salt plumbing flip (use_virt_salt=.false.) + real_salt_flux producer + ice
 **Files:** Modify `src/fesom_ice_coupling.c`, `src/fesom_ice_thermo.c`, `src/fesom_ice_evp.c`, `src/fesom_tracer_diff.c`, `src/fesom_sss_runoff.c` (if restoring touched)

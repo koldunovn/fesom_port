@@ -41,6 +41,10 @@ void fesom_mesh_free(fesom_mesh *m)
     free(m->zbar);
     free(m->Z);
     free(m->zbar_3d_n);
+    free(m->Z_3d_n);
+    free(m->bottom_node_thickness);
+    free(m->bottom_elem_thickness);
+    free(m->dhe);
     free(m->depth);
     free(m->mesh_resolution);
     free(m->nod_in_elem2D_offsets);
@@ -78,7 +82,11 @@ void fesom_mesh_alloc_state(fesom_mesh *m)
     m->helem     = calloc(e_nl, sizeof(real_t));
     m->hbar      = calloc((size_t)N, sizeof(real_t));
     m->hbar_old  = calloc((size_t)N, sizeof(real_t));
-    FESOM_CHECK(m->hnode && m->hnode_new && m->helem && m->hbar && m->hbar_old,
+    /* dhe = 0 at init (Fortran init_thickness_ale sets dhe=mean(hbar)=0 at
+     * cold start) → the step-1 stiffness update is a no-op. */
+    m->dhe       = calloc((size_t)E, sizeof(real_t));
+    FESOM_CHECK(m->hnode && m->hnode_new && m->helem && m->hbar && m->hbar_old
+                && m->dhe,
                 "mesh state alloc: out of memory");
 }
 
@@ -630,6 +638,55 @@ static void compute_zbar_3d_n(fesom_mesh *m)
         for (int nz = 0; nz < nzmax; ++nz) {
             m->zbar_3d_n[(size_t)n * nl + nz] = m->zbar[nz];
         }
+    }
+}
+
+/* Z_3d_n — per-node mid-layer depths (Phase Z0). Fortran mesh_auxiliary_arrays
+ * (oce_ale.F90, after init_bottom_*_thickness): with nzmin=1 (no cavity) and
+ * full cells (zbar_n_srf=zbar(1), zbar_n_bot=zbar(nzmax)) every branch reduces
+ * to Z_3d_n(nz,n) = Z(nz) for nz = 1..nzmax-1, 0 beyond. C is 0-based with the
+ * Fortran (nl-1, N) array padded to stride nl (last slot per column unused).
+ * Constant under linfs; rewritten per step by the zstar commit (Z1+). */
+static void compute_Z_3d_n(fesom_mesh *m)
+{
+    int N  = m->myDim_nod2D + m->eDim_nod2D;
+    int nl = m->nl;
+    m->Z_3d_n = calloc((size_t)N * nl, sizeof(real_t));
+    FESOM_CHECK(m->Z_3d_n, "Z_3d_n: out of memory");
+
+    for (int n = 0; n < N; ++n) {
+        int nzmax = m->nlevels_nod2D[n];   /* 1-based count */
+        for (int nz = 0; nz < nzmax - 1; ++nz) {
+            m->Z_3d_n[(size_t)n * nl + nz] = m->Z[nz];
+        }
+    }
+}
+
+/* bottom_node/elem_thickness — full-cell branch of init_bottom_node_thickness
+ * (oce_ale.F90:798-804) and init_bottom_elem_thickness (:686-692):
+ *   bottom_node_thickness(n) = zbar(nln-1) - zbar(nln),  nln = nlevels_nod2D(n)
+ *   bottom_elem_thickness(e) = zbar(nle-1) - zbar(nle),  nle = nlevels(e)
+ * Fortran fills myDim then exchange_nod/elem; the values are deterministic
+ * from static mesh data, so filling the full local extent is identical. */
+static void compute_bottom_thickness(fesom_mesh *m)
+{
+    int N = m->myDim_nod2D + m->eDim_nod2D;
+    int E = m->myDim_elem2D + m->eDim_elem2D + m->eXDim_elem2D;
+    m->bottom_node_thickness = calloc((size_t)N, sizeof(real_t));
+    m->bottom_elem_thickness = calloc((size_t)E, sizeof(real_t));
+    FESOM_CHECK(m->bottom_node_thickness && m->bottom_elem_thickness,
+                "bottom thickness: out of memory");
+
+    for (int n = 0; n < N; ++n) {
+        int nln = m->nlevels_nod2D[n];     /* 1-based count */
+        if (nln >= 2)
+            m->bottom_node_thickness[n] = m->zbar[nln - 2] - m->zbar[nln - 1];
+    }
+    for (int e = 0; e < E; ++e) {
+        int nle = m->nlevels[e];           /* 1-based count; guard the eXDim
+                                              tail where nlevels may be unset */
+        if (nle >= 2)
+            m->bottom_elem_thickness[e] = m->zbar[nle - 2] - m->zbar[nle - 1];
     }
 }
 
@@ -1245,6 +1302,8 @@ void fesom_mesh_compute_metrics(fesom_mesh *m, fesom_partit *partit)
     /* GM/Redi mesh prerequisites — needs areasvol + elem_area + nlevels. */
     compute_mesh_resolution(m, partit);
     compute_zbar_3d_n(m);
+    compute_Z_3d_n(m);
+    compute_bottom_thickness(m);
 
     /* ocean_area: local sum (computed in compute_node_areas) → MPI_Allreduce. */
     if (partit->npes > 1) {

@@ -5,6 +5,7 @@
  */
 #include "fesom_step.h"
 #include "fesom_ale.h"
+#include "fesom_ale_dump.h"
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
@@ -52,6 +53,12 @@ int fesom_timestep(int                          step_n,
     }
     /* Local alias so the original ctx->gm isn't mutated. */
     struct fesom_gm *gm = s_no_gmredi ? NULL : ctx->gm;
+
+    /* ALE-port dump: surface freshwater/salt forcing entering this step
+     * (set by the preceding ice/coupling phase). Mirrors the Fortran
+     * ale_dump_forcing site at oce_timestep_ale entry. No-op unless
+     * FESOM_ALE_DUMP_DIR is set. */
+    fesom_ale_dump_forcing(step_n, forcing, mesh, p);
 
     /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3515 mix_scheme_nmb).
      *   FESOM_MIX_SCHEME=KPP (DEFAULT) → fesom_kpp_mixing (K-Profile) — the CORE2
@@ -104,6 +111,7 @@ int fesom_timestep(int                          step_n,
     fesom_pressure_force_linfs_fullcell(mesh, aux);
     fesom_exchange_elem3D(aux->pgf_x, nl, p);
     fesom_exchange_elem3D(aux->pgf_y, nl, p);
+    fesom_ale_dump_pgf(step_n, aux, mesh, p);
 
     /*  3. mixing: UVnode → (PP or KPP) → convective adjustment.
      *     Dispatch mirrors oce_ale.F90:3515-3531 (mix_scheme_nmb 1=KPP / 2=PP);
@@ -153,6 +161,7 @@ int fesom_timestep(int                          step_n,
      * (Fortran solver.F90:279). For now we keep the explicit exchange here
      * because the parallel CG modifications are slice 30e, not 30d. */
     fesom_exchange_nod2D(dyn->d_eta, p);
+    fesom_ale_dump_sshsolve(step_n, dyn, mesh, p);
 
     /*  9. velocity update with SSH-gradient correction  */
     fesom_update_vel(mesh, dyn);
@@ -247,10 +256,15 @@ int fesom_timestep(int                          step_n,
         }
     }
     /* eta_n already covers myDim+eDim because hbar/hbar_old are exchanged. */
+    fesom_ale_dump_hbar(step_n, dyn, mesh, p);
 
-    /* 12. ALE step (linfs). */
-    fesom_ale_thickness_linfs(mesh);
-    /* hnode_new = hnode (no exchange needed; both already cover halo). */
+    /* 12. ALE step. linfs: hnode_new = hnode each step (the C analog of the
+     * linfs invariant; no exchange needed, both cover the halo). zstar: NO
+     * such copy — Fortran never re-copies; hnode_new is produced by
+     * vert_vel_ale (Z5) on the stretched levels and stays equal to hnode
+     * (init/commit) on the bottom-protected ones. */
+    if (!ctx->ale_zstar)
+        fesom_ale_thickness_linfs(mesh);
 
     fesom_ale_vert_vel_linfs(mesh, dyn, gm ? 1 : 0);
     fesom_exchange_nod3D(dyn->w, nl, p);     /* Fortran oce_ale.F90:2679 */
@@ -258,6 +272,11 @@ int fesom_timestep(int                          step_n,
         /* Mirror Fortran oce_ale.F90:2681 — exchange_nod(fer_Wvel). */
         fesom_exchange_nod3D(dyn->fer_w, nl, p);
     }
+
+    /* ALE-port dump site mirrors Fortran (right after vert_vel_ale +
+     * exchanges, BEFORE the GM bolus add below, which modifies dyn->w
+     * in place). */
+    fesom_ale_dump_vertvel(step_n, dyn, mesh, p);
 
     fesom_ale_compute_cflz(mesh, dyn);
     fesom_exchange_nod3D(dyn->cfl_z, nl, p);
@@ -391,10 +410,20 @@ int fesom_timestep(int                          step_n,
         }
     }
 
-    /* 14. commit thickness: hnode := hnode_new, helem from vertex mean. */
-    fesom_ale_commit_thickness(mesh);
-    fesom_exchange_nod3D (mesh->hnode, nl, p);   /* both already same — but be explicit */
-    fesom_exchange_elem3D(mesh->helem, nl, p);   /* Fortran oce_ale.F90:1027,1249 */
+    /* 14. commit thickness (update_thickness_ale dispatch).
+     * zstar: bottom→top commit of hnode/zbar_3d_n/Z_3d_n over myDim+eDim +
+     * helem mean + exchange_elem (all inside the Z1 routine — Fortran does
+     * NOT exchange hnode here; the myDim+eDim commit reads the exchanged
+     * hnode_new halo).
+     * linfs: hnode := hnode_new + helem mean + explicit exchanges (v1.0). */
+    if (ctx->ale_zstar) {
+        fesom_ale_update_thickness_zstar(mesh, p);
+    } else {
+        fesom_ale_commit_thickness(mesh);
+        fesom_exchange_nod3D (mesh->hnode, nl, p);   /* both already same — but be explicit */
+        fesom_exchange_elem3D(mesh->helem, nl, p);   /* Fortran oce_ale.F90:1027,1249 */
+    }
+    fesom_ale_dump_thickness(step_n, mesh, p);
 
     /* Sea-ice step is now called from fesom_main BEFORE the ocean step
      * (ice writes heat_flux/water_flux that the ocean step consumes). */
