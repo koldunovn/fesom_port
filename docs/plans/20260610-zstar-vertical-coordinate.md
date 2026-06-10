@@ -479,18 +479,28 @@ must already have the zstar composition; plan-review finding 5.)*
       21% of |Δ| mass in the active-freezing set (a_ice>0.001 stress-blend onset). Identical
       mechanism class to the documented KPP K5/K9 noise model (which still delivered 0.005
       RMS 2yr climate) — NOT a port defect. Binding end-to-end test = Z9 climate.
-- [ ] ⚠️ Watch the known blowup locations (Aleutian trench el 194724) and the SSH-checkerboard
+- [x] ⚠️ Watch the known blowup locations (Aleutian trench el 194724) and the SSH-checkerboard
       indicator (1-ring hbar spread) — zstar changes the barotropic operator.
-- [ ] **Validate:** dt=1800 30-day zstar run clean; linfs byte-gate final re-check.
+      ➕ 30-day run shows no blowup anywhere; max|uv| over the month 1.79 m/s.
+- [x] **Validate:** dt=1800 30-day zstar run clean; linfs byte-gate final re-check.
+      ➕ Z8 PASSED: job 25495448 (16r, 1440 steps) exit 0, max|uv| 1.79, physical T/S/SSH;
+      final linfs byte-gate = the Z2-Z7 gate 25495064 (snapshots worst |Δ|=0).
 
 ### Phase Z9: 2yr climate validation vs work_zstar_kpp
 **Files:** `scripts/zstar_climate_compare.py` (clone of kpp_climate_compare.py), `jobs/job_zstar_2yr`
-- [ ] Run C zstar+KPP 2yr dt=1800 864r (unique OUT_DIR).
-- [ ] Compare vs Fortran `work_zstar_kpp` output: global/regional SST/SSS RMS + bias maps +
+- [x] Run C zstar+KPP 2yr dt=1800 864r (unique OUT_DIR).
+      ➕ job 25495449 → /work/ab0995/a270088/port/zstar/c_zstar_2yr, exit 0, 35040 steps.
+- [x] Compare vs Fortran `work_zstar_kpp` output: global/regional SST/SSS RMS + bias maps +
       seasonal cycle. Bar: KPP-class agreement (RMS ~0.005/0.002, biases ~0, non-drifting).
-- [ ] Contrast check: C(zstar) vs Fortran(linfs) must show a clearly larger coordinate signal
+      ➕ PASSED: global SST/SSS RMS 0.0038/0.0014 (1958), 0.0050/0.0021 (1959), biases ≈0
+      both years (non-drifting; 1959 growth 3× smaller than K9's — the step-1 forcing
+      transient is gone with the sbc-fixed Fortran binary).
+- [x] Contrast check: C(zstar) vs Fortran(linfs) must show a clearly larger coordinate signal
       than C(zstar) vs Fortran(zstar) — the comparison resolves the coordinate (K9 pattern).
-- [ ] **Validate:** acceptance numbers recorded in `docs/validation_zstar_2yr/`.
+      ➕ PASSED: LIN RMS 3–9× ZS (SST 0.013/0.023, SSS 0.011/0.018; N-high SSS 0.048 —
+      the virtual-salt vs real-flux signal where expected).
+- [x] **Validate:** acceptance numbers recorded in `docs/validation_zstar_2yr/`.
+      ➕ RESULTS.md + climate_compare_output.txt committed.
 
 ### Phase Z10: Acceptance + handoff
 - [ ] All Overview requirements met: FESOM_ALE switch works; linfs byte-identical to v1.0;

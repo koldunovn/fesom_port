@@ -1,0 +1,36 @@
+====================================================================================
+YEAR 1958   dSST/dSSS (C-zstar − Fortran), area-weighted
+   ZS = C-zstar vs F-zstar (headline) | LIN = C-zstar vs F-linfs (coordinate contrast)
+====================================================================================
+  dSST [degC]  region               ZS bias   ZS rms |  LIN bias  LIN rms
+               GLOBAL               -0.0004   0.0038 |   +0.0011   0.0130
+               Tropics |lat|<23     -0.0002   0.0030 |   +0.0028   0.0121
+               Midlat 40-60         -0.0009   0.0054 |   +0.0021   0.0131
+               N high >60           -0.0002   0.0020 |   +0.0018   0.0276
+               S high <-60          +0.0001   0.0030 |   +0.0021   0.0075
+
+  dSSS [PSU]  region               ZS bias   ZS rms |  LIN bias  LIN rms
+               GLOBAL               +0.0000   0.0014 |   +0.0033   0.0108
+               Tropics |lat|<23     +0.0001   0.0014 |   +0.0034   0.0066
+               Midlat 40-60         +0.0000   0.0015 |   +0.0041   0.0138
+               N high >60           +0.0001   0.0010 |   -0.0075   0.0306
+               S high <-60          -0.0008   0.0014 |   +0.0023   0.0058
+
+====================================================================================
+YEAR 1959   dSST/dSSS (C-zstar − Fortran), area-weighted
+   ZS = C-zstar vs F-zstar (headline) | LIN = C-zstar vs F-linfs (coordinate contrast)
+====================================================================================
+  dSST [degC]  region               ZS bias   ZS rms |  LIN bias  LIN rms
+               GLOBAL               -0.0005   0.0050 |   +0.0006   0.0231
+               Tropics |lat|<23     -0.0001   0.0039 |   +0.0030   0.0236
+               Midlat 40-60         -0.0009   0.0076 |   +0.0024   0.0285
+               N high >60           -0.0001   0.0027 |   -0.0003   0.0301
+               S high <-60          -0.0001   0.0061 |   +0.0065   0.0114
+
+  dSSS [PSU]  region               ZS bias   ZS rms |  LIN bias  LIN rms
+               GLOBAL               +0.0001   0.0021 |   +0.0048   0.0178
+               Tropics |lat|<23     +0.0001   0.0027 |   +0.0049   0.0140
+               Midlat 40-60         +0.0001   0.0022 |   +0.0059   0.0210
+               N high >60           +0.0001   0.0011 |   -0.0159   0.0480
+               S high <-60          +0.0001   0.0013 |   +0.0029   0.0065
+

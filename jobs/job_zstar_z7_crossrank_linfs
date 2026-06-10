@@ -1,0 +1,45 @@
+#!/bin/bash
+#SBATCH --job-name=z7_xrank_linfs
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=04:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/zstar/z7_xrank_linfs/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/zstar/z7_xrank_linfs/slurm.%j.err
+#
+# Phase Z7 cross-rank: FESOM_ALE=zstar 5-day (240 steps, dt=1800) at 1, 8, and
+# 16 ranks; final-snapshot pairwise compare. Expectation: agreement at the
+# PHC-IC rank-noise scale (NOT bit-identity — feedback_phc_rank_dependent),
+# matching the GM/sea-ice cross-rank precedent. Catches halo bugs in the new
+# zstar write loops (Wvel/hnode_new/helem/ssh_rhs_old/hbar/dhe).
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+BIN=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port/zstar/z7_xrank_linfs
+export FESOM_ALE=linfs   # BASELINE run for the zstar cross-rank bar
+unset FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR
+
+for NP in 1 8 16; do
+    OUT=$BASE/np$NP; mkdir -p "$OUT"
+    echo "=== np=$NP ==="
+    srun -l -n $NP "$BIN" "$MESH" "$OUT" 1800 240 240 "$PHC" 1958 \
+        > "$OUT/run.log" 2> "$OUT/run.err"
+    echo "exit np$NP: $?"
+    tail -2 "$OUT/run.log" | head -1
+done
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+for pair in "np1 np8" "np8 np16" "np1 np16"; do
+    set -- $pair
+    echo "=== compare $1 vs $2 (final snapshot; PHC-noise scale expected) ==="
+    PYTHONPATH=/home/a/a270088/PYTHON $PY \
+        /home/a/a270088/port2/fesom2_port_zstar/scripts/kpp_byteident_check.py \
+        "$BASE/$1" "$BASE/$2" 2>&1 | tail -6
+done
