@@ -9,6 +9,7 @@ struct fesom_dyn;
 struct fesom_tracers;
 struct fesom_forcing;
 struct fesom_sss_runoff;
+struct fesom_jra55;
 
 /*
  * Ocean → ice direction. Mirror of Fortran ocean2ice (ice_oce_coupling.F90:154).
@@ -39,12 +40,21 @@ void fesom_ocean2ice(fesom_ice                 *ice,
  * sr (sss_runoff state) provides ref_sss / ref_sss_local / use_virt_salt /
  * surf_relax_S. After this lands, the runoff subtraction inside
  * fesom_sss_runoff_step must be removed (Task C3b) to avoid double-counting.
+ *
+ * Z2 (zstar): when sr->use_virt_salt is false, the Fortran freshwater-flux
+ * global balancing (:584-686) runs — flux assembly from evaporation/
+ * ice_sublimation/prec_rain/prec_snow·(1−a_ice_old)/runoff, MINUS the
+ * thdgr/thdgrsn ice-growth volume terms, then water_flux += net/ocean_area.
+ * jra supplies prec_rain/prec_snow (NULL → zero precipitation, e.g. analytic
+ * forcing smoke runs). Under linfs the block is skipped (v1.0 byte-locked;
+ * the balancing is physically invisible there — see the .c comment).
  */
 void fesom_ice_oce_fluxes(fesom_ice                     *ice,
                           struct fesom_partit           *partit,
                           struct fesom_mesh             *mesh,
                           const struct fesom_tracers    *tracers,
                           struct fesom_forcing          *forcing,
+                          const struct fesom_jra55      *jra,
                           const struct fesom_sss_runoff *sr);
 
 /*

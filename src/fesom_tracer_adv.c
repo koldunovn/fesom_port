@@ -608,8 +608,8 @@ static void adv_tra_hor_mfct(const struct fesom_mesh *mesh, const struct fesom_d
  *   num_ord ∈ [0, 1]: fraction of pure 4th-order (1.0 = full 4th-order,
  *                     0.0 = full upwind-blend). Pi config sets it to 1.
  *
- * For Phase 1 (no partial cells, no cavity), Z_3d_n[nz, n] = mesh->Z[nz] and
- * zbar_3d_n[nz, n] = mesh->zbar[nz] for all n.
+ * Z7: reads the per-node Z_3d_n / zbar_3d_n exactly as the Fortran does
+ * (live under zstar; identical to mesh->Z / mesh->zbar under linfs).
  *
  * Sign convention (cf. FRESH_START.md §14.5): vertical W is positive UPWARD.
  * Surface flux = -ttf·W·area  (W>0 advects ttf out of the surface layer).
@@ -670,10 +670,14 @@ static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
         }
         /* Interior (nzmin+2 .. nzmax-2 inclusive): 4th-order quadratic. */
         for (int nz = nzmin + 2; nz <= nzmax - 2; ++nz) {
-            real_t Z_um1 = mesh->Z[nz - 1];
-            real_t Z_u   = mesh->Z[nz];
-            real_t Z_dn  = mesh->Z[nz + 1];
-            real_t Z_um2 = mesh->Z[nz - 2];
+            /* Z7: Fortran oce_adv_tra_ver.F90:417-422 reads the per-node
+             * Z_3d_n / zbar_3d_n DIRECTLY here (live under zstar) — unlike
+             * the local hnode_new-built zbar_n/Z_n used by the flux-limited
+             * pieces (:137-150); a deliberate dual-geometry subtlety. */
+            real_t Z_um1 = mesh->Z_3d_n[FESOM_NODE3D(n, nz - 1, nl)];
+            real_t Z_u   = mesh->Z_3d_n[FESOM_NODE3D(n, nz,     nl)];
+            real_t Z_dn  = mesh->Z_3d_n[FESOM_NODE3D(n, nz + 1, nl)];
+            real_t Z_um2 = mesh->Z_3d_n[FESOM_NODE3D(n, nz - 2, nl)];
             real_t Tum1 = ttf[FESOM_NODE3D(n, nz - 1, nl)];
             real_t Tu   = ttf[FESOM_NODE3D(n, nz,     nl)];
             real_t Tdn  = ttf[FESOM_NODE3D(n, nz + 1, nl)];
@@ -683,7 +687,7 @@ static void adv_tra_ver_qr4c(const struct fesom_mesh *mesh,
             real_t qu = (Tu   - Tdn) / (Z_u   - Z_dn);
             real_t qd = (Tum2 - Tum1)/ (Z_um2 - Z_um1);
 
-            real_t zb = mesh->zbar[nz];
+            real_t zb = mesh->zbar_3d_n[FESOM_NODE3D(n, nz, nl)];   /* :421 */
             real_t Tmean1 = Tu  + (2.0*qc + qu) * (zb - Z_u  ) / 3.0;
             real_t Tmean2 = Tum1 + (2.0*qc + qd) * (zb - Z_um1) / 3.0;
             real_t w_iface = W[FESOM_NODE3D(n, nz, nl)];

@@ -69,6 +69,17 @@ void fesom_pressure_force_linfs_fullcell(const struct fesom_mesh *mesh,
                                          struct fesom_aux        *aux);
 
 /*
+ * Z6 — zlevel/zstar PGF: pressure_force_4_zxxxx_shchepetkin
+ * (oce_ale_pressure_bv.F90:2104-2339; which_pgf='shchepetkin' is the module
+ * default and the only zxxxx variant ported — cubicspline/easypgf gate-only).
+ * Density-Jacobian on the LIVE geometry (density_m_rho0, Z_3d_n, helem);
+ * self-contained — no hpressure (which is NOT computed under zstar at all,
+ * matching the Fortran `linfs .or. use_cavity` gate).
+ */
+void fesom_pressure_force_zxxxx_shchepetkin(const struct fesom_mesh *mesh,
+                                            struct fesom_aux        *aux);
+
+/*
  * Compute thermal expansion (sw_alpha) and saline contraction (sw_beta)
  * coefficients per node per level, from McDougall (1987). Mirror of
  * oce_ale_pressure_bv.F90:2751-2846 sw_alpha_beta. Outputs into

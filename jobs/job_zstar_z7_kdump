@@ -1,0 +1,28 @@
+#!/bin/bash
+#SBATCH --job-name=z7_kdump
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/zstar/z7_kdump/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/zstar/z7_kdump/slurm.%j.err
+# C zstar 3 steps (Z7 binary) with the KPP bldepth dump at step 2 + ALE dumps —
+# tests whether the s2 ssh_rhs dipoles co-locate with kbl threshold flips.
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+BIN=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+OUT=/work/ab0995/a270088/port/zstar/z7_kdump
+mkdir -p "$OUT/dump" "$OUT/kdump"
+export FESOM_ALE=zstar
+export FESOM_ALE_DUMP_DIR=$OUT/dump
+export FESOM_ALE_DUMP_STEPS=3
+export FESOM_KPP_DUMP_DIR=$OUT/kdump
+export FESOM_KPP_DUMP_STEP=2
+srun -l "$BIN" "$MESH" "$OUT" 1800 3 -1 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"; ls "$OUT/kdump" | head -3

@@ -549,7 +549,7 @@ int main(int argc, char **argv)
     /* RHS=0 test (and the bump-RHS test below): need parallel CG on multi-rank
      * which is slice 30e. Skip on multi-rank. */
     if (do_sanity) {
-        fesom_compute_ssh_rhs_linfs(&mesh, &dyn);
+        fesom_compute_ssh_rhs_linfs(&mesh, &dyn, NULL);
         real_t rhs_max = 0.0;
         for (int n = 0; n < mesh.myDim_nod2D + mesh.eDim_nod2D; ++n) {
             real_t a = fabs(dyn.ssh_rhs[n]);
@@ -620,7 +620,7 @@ int main(int argc, char **argv)
         printf("[fesom_port] momentum rest-state: max|uv_rhs| after vel_rhs+impl_visc = %.3e m/s "
                "(must be ≈ 0)\n", (double)uvr_max);
     }
-    fesom_compute_ssh_rhs_linfs(&mesh, &dyn);
+    fesom_compute_ssh_rhs_linfs(&mesh, &dyn, NULL);
     int iters_rest = fesom_ssh_solve_cg(&stiff, &solver, &mesh, &dyn);
     {
         real_t deta_max = 0.0, ssh_max = 0.0;
@@ -633,7 +633,7 @@ int main(int argc, char **argv)
                (double)ssh_max, iters_rest, (double)deta_max);
     }
     fesom_update_vel(&mesh, &dyn);
-    fesom_compute_hbar(&mesh, &dyn);
+    fesom_compute_hbar(&mesh, &dyn, NULL);
     {
         real_t uv_max = 0.0;
         size_t te = (size_t)(mesh.myDim_elem2D + mesh.eDim_elem2D + mesh.eXDim_elem2D) * (size_t)mesh.nl * 2;

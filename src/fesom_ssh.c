@@ -16,6 +16,7 @@
  *   - Serial (1 MPI rank): exchange_nod and MPI_Allreduce are no-ops.
  */
 #include "fesom_ssh.h"
+#include "fesom_ale.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
 #include "fesom_mesh.h"
@@ -214,6 +215,87 @@ void fesom_ssh_stiff_free(fesom_ssh_stiff *S)
 }
 
 /*===========================================================================
+ * update_stiff_mat_ale (oce_ale.F90:1892-2001) — Phase Z4.
+ *
+ * Per-step CUMULATIVE increment of the SSH stiffness under zstar:
+ *   factor = g·dt·α·θ
+ *   per owned edge, per row j ∈ {1,2} (skip halo rows), per adjacent
+ *   element i ∈ {1,2}:
+ *     fy(k) = −dhe(elem)·( ∂N_k/∂x·dy_i − ∂N_k/∂y·dx_i ),  k = 1..3
+ *     i==2 → fy = −fy;  j==2 → fy = −fy
+ *     values(npos(k)) += fy(k)·factor
+ * — exactly the base-matrix edge assembly (init_stiff_mat_ale / the builder
+ * above) with the static column depth replaced by the per-step elemental
+ * Δhbar = dhe (filled by the previous step's compute_hbar; dhe = 0 at cold
+ * start → the step-1 update is a no-op). The base matrix is NEVER rebuilt;
+ * Σ dhe over steps ≡ hbar − hbar(init).
+ *
+ * Preconditioner: Fortran builds it ONCE at the first solve
+ * (oce_ale.F90:3306 `if (lfirst) call ssh_solve_preconditioner`) and never
+ * refreshes it as the matrix evolves — the C's once-at-init build in
+ * fesom_main mirrors that exactly (verified; nothing to refresh here).
+ *===========================================================================*/
+void fesom_update_stiff_mat_ale(fesom_ssh_stiff         *S,
+                                const struct fesom_mesh *mesh)
+{
+    const int N = mesh->myDim_nod2D;
+    const int E = mesh->myDim_edge2D;
+    const real_t factor = (real_t)FESOM_G * (real_t)FESOM_PHASE1_DT
+                        * (real_t)FESOM_PHASE1_ALPHA * (real_t)FESOM_PHASE1_THETA;
+
+    /* node-id → sparse-position scatter table (the builder's n_num trick) */
+    int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    int *spos = calloc((size_t)N_alloc, sizeof(int));
+    FESOM_CHECK(spos, "update_stiff_mat_ale: out of memory");
+
+    for (int ed = 0; ed < E; ++ed) {
+        int el[2]  = { mesh->edge_tri[2*ed + 0], mesh->edge_tri[2*ed + 1] };
+        int e_n[2] = { mesh->edges[2*ed + 0],    mesh->edges[2*ed + 1] };
+        for (int i = 0; i < 2; ++i) {
+            /* Fortran: if (elem<1) cycle. Same defensive bound as the
+             * builder: adjacent elements of owned edges are owned. */
+            if (el[i] < 0 || el[i] >= mesh->myDim_elem2D) continue;
+            int en[3] = { mesh->elem_nodes[3*el[i] + 0],
+                          mesh->elem_nodes[3*el[i] + 1],
+                          mesh->elem_nodes[3*el[i] + 2] };
+            const real_t *g = &mesh->gradient_sca[6 * el[i]];
+            real_t dx_i = mesh->edge_cross_dxdy[4*ed + 2*i + 0];
+            real_t dy_i = mesh->edge_cross_dxdy[4*ed + 2*i + 1];
+
+            real_t fy[3];
+            for (int k = 0; k < 3; ++k) {
+                fy[k] = -mesh->dhe[el[i]] * (g[k] * dy_i - g[3 + k] * dx_i);
+            }
+            if (i == 1) {  /* Fortran i==2 */
+                fy[0] = -fy[0]; fy[1] = -fy[1]; fy[2] = -fy[2];
+            }
+
+            /* j = 1 row (+fy) and j = 2 row (−fy); skip halo rows
+             * (Fortran: if (row>myDim_nod2D) cycle). */
+            if (e_n[0] < N) {
+                int row = e_n[0];
+                for (int n = S->rowptr[row]; n < S->rowptr[row + 1]; ++n) {
+                    spos[S->colind[n]] = n;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    S->values[spos[en[k]]] += fy[k] * factor;
+                }
+            }
+            if (e_n[1] < N) {
+                int row = e_n[1];
+                for (int n = S->rowptr[row]; n < S->rowptr[row + 1]; ++n) {
+                    spos[S->colind[n]] = n;
+                }
+                for (int k = 0; k < 3; ++k) {
+                    S->values[spos[en[k]]] -= fy[k] * factor;
+                }
+            }
+        }
+    }
+    free(spos);
+}
+
+/*===========================================================================
  * Preconditioner: ssh_solve_preconditioner (solver.F90:31-95)
  *===========================================================================*/
 
@@ -259,7 +341,8 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
  *===========================================================================*/
 
 void fesom_compute_ssh_rhs_linfs(const struct fesom_mesh *mesh,
-                                 struct fesom_dyn        *dyn)
+                                 struct fesom_dyn        *dyn,
+                                 const real_t            *water_flux)
 {
     const int N  = mesh->myDim_nod2D;
     const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
@@ -319,11 +402,27 @@ void fesom_compute_ssh_rhs_linfs(const struct fesom_mesh *mesh,
         dyn->ssh_rhs[n2] -= (c1 + c2);
     }
 
-    /* linfs branch: ssh_rhs += (1 - alpha) * ssh_rhs_old (lines 1947-1951).
-       For Phase 1 with no surface forcing yet, water_flux is zero so we skip
-       the corresponding term in the non-linfs branch (which we do not exercise). */
-    for (int n = 0; n < N; ++n) {
-        dyn->ssh_rhs[n] += one_minus_alpha * dyn->ssh_rhs_old[n];
+    /* Water-flux tail (oce_ale.F90:2122-2143), Z3.
+     * zstar (non-linfs), no-cavity arm (:2133):
+     *   ssh_rhs(n) -= α·water_flux(n)·areasvol(nzmin,n)
+     *               + (1−α)·ssh_rhs_old(n)
+     * (the cavity arm's use_cavity_fw2press gate is unreachable — no
+     * cavities in our meshes). water_flux==NULL → zero flux (startup
+     * sanity call sites; the step passes forcing->water_flux).
+     * linfs (:2138-2142): ssh_rhs += (1−α)·ssh_rhs_old only — v1.0 path. */
+    if (fesom_ale_zstar) {
+        for (int n = 0; n < N; ++n) {
+            int nzmin_f = mesh->ulevels_nod2D[n];      /* 1-based */
+            if (nzmin_f > 1) continue;                 /* cavity arm: not ported */
+            real_t wf = water_flux ? water_flux[n] : 0.0;
+            dyn->ssh_rhs[n] += -alpha * wf
+                                * mesh->areasvol[FESOM_NODE3D(n, nzmin_f - 1, nl)]
+                             + one_minus_alpha * dyn->ssh_rhs_old[n];
+        }
+    } else {
+        for (int n = 0; n < N; ++n) {
+            dyn->ssh_rhs[n] += one_minus_alpha * dyn->ssh_rhs_old[n];
+        }
     }
 }
 

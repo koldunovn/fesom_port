@@ -11,12 +11,10 @@
  *
  * Fields not yet ported are taken as literal zero with a comment naming the
  * Fortran symbol:
- *   virtual_salt(n)     → 0   (zlevel/zstar only; we are linfs)
- *   relax_salt(n)       → 0   (Phase 3 step 25 will fill from SSS restoring)
- *   real_salt_flux(n)   → 0   (sea-ice; not ported)
- *   is_nonlinfs         → 0   (we are linfs)
  *   do_wimpl            → 0   (Fortran sets false when tra_adv_lim=='FCT')
  *   KPP nonlocal flux   → skipped (use_kpp_nonlclflx=false)
+ * (Z2: is_nonlinfs and real_salt_flux are LIVE now — bc_surface reads the
+ *  fesom_is_nonlinfs global and forcing->real_salt_flux.)
  *
  * Phase G5: Ki(nz,n) and slope_tapered(...) are now read when `gm` is
  * non-NULL. The Ty / Ty1 projection of horizontal-Redi onto the vertical
@@ -25,6 +23,7 @@
  */
 #include "fesom_tracer_diff.h"
 
+#include "fesom_ale.h"
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_forcing.h"
@@ -48,25 +47,29 @@ static real_t bc_surface(int n,
 {
     const real_t dt          = (real_t)FESOM_PHASE1_DT;
     const real_t vcpw        = (real_t)FESOM_VCPW;
-    const real_t is_nonlinfs = 0.0;     /* linfs */
+    /* o_PARAM is_nonlinfs: 0.0 under linfs, 1.0 under zstar (derived from
+     * which_ALE in oce_setup_step.F90:115-125; C: fesom_ale_mode_init). */
+    const real_t is_nonlinfs = fesom_is_nonlinfs;
 
     real_t bc = 0.0;
     if (id == 1) {
-        /*___temperature_____________________________________________________*/
+        /*___temperature_____________________________________________________
+         * Fortran line 1517:
+         *   bc_surface = -dt*(heat_flux(n)/vcpw
+         *                     + sval*water_flux(n)*is_nonlinfs)              */
         bc = -dt * (forcing->heat_flux[n] / vcpw
                    + sval * forcing->water_flux[n] * is_nonlinfs);
     } else if (id == 2) {
         /*___salinity________________________________________________________
-         * Fortran line 1523:
+         * Fortran lines 1523-1524 (positive dt, NO sval·water_flux term):
          *   bc_surface = dt*(virtual_salt(n) + relax_salt(n)
          *                    + real_salt_flux(n)*is_nonlinfs)
-         * For linfs (us): virtual_salt is rsss·water_flux balanced;
-         * relax_salt comes from SSS climatology restoring; real_salt_flux is
-         * a sea-ice contribution (still 0 — sea ice not yet ported). */
-        const real_t real_salt_flux = 0.0;  /* sea ice */
+         * linfs: virtual_salt = rsss·water_flux balanced, real_salt_flux = 0.
+         * zstar: virtual_salt = 0, real_salt_flux = the sea-ice brine/melt
+         * salt flux (live producer wired in Z2, fesom_ice_thermo.c).         */
         bc = dt * (forcing->virtual_salt[n]
                   + forcing->relax_salt[n]
-                  + real_salt_flux * is_nonlinfs);
+                  + forcing->real_salt_flux[n] * is_nonlinfs);
     }
     return bc;
 }

@@ -1,4 +1,5 @@
 #include "fesom_ice_evp.h"
+#include "fesom_ale.h"
 #include "fesom_constants.h"
 #include "fesom_halo.h"
 #include "fesom_mesh.h"
@@ -333,6 +334,28 @@ void fesom_ice_evp_dynamics(fesom_ice            *ice,
         real_t aa = 9.81 * mesh->elem_area[el] / 3.0;
         real_t *gs = &mesh->gradient_sca[6*el];
         real_t e0 = elevation[n0], e1 = elevation[n1], e2 = elevation[n2];
+        if (fesom_ale_zstar) {
+            /* non-linfs branch (ice_EVP.F90:581-653): the elevation gradient
+             * gains the floating-ice pressure  p_ice·use_pice, with
+             * p_ice = min((ρice·m_ice+ρsno·m_snow)/ρwat, max_ice_loading).
+             * use_pice = 1 only when use_floatice && !linfs (ice_EVP.F90:
+             * 579-580); use_floatice=.false. in the reference → use_pice=0
+             * and the term multiplies to zero — ported literally so the C
+             * matches the Fortran flow. max_ice_loading: &ale_def module
+             * default 5.0 (gen_modules_config.F90:78; not in namelist). */
+            const real_t use_pice        = 0.0;
+            const real_t max_ice_loading = 5.0;
+            const real_t inv_rhowat      = ice->thermo.inv_rhowat;
+            real_t p0 = (rhoice*m_ice[n0] + rhosno*m_snow[n0]) * inv_rhowat;
+            real_t p1 = (rhoice*m_ice[n1] + rhosno*m_snow[n1]) * inv_rhowat;
+            real_t p2 = (rhoice*m_ice[n2] + rhosno*m_snow[n2]) * inv_rhowat;
+            if (p0 > max_ice_loading) p0 = max_ice_loading;
+            if (p1 > max_ice_loading) p1 = max_ice_loading;
+            if (p2 > max_ice_loading) p2 = max_ice_loading;
+            e0 += p0 * use_pice;
+            e1 += p1 * use_pice;
+            e2 += p2 * use_pice;
+        }
         real_t edx = gs[0]*e0 + gs[1]*e1 + gs[2]*e2;
         real_t edy = gs[3]*e0 + gs[4]*e1 + gs[5]*e2;
         for (int k = 0; k < 3; ++k) {

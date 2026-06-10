@@ -211,11 +211,13 @@ void fesom_therm_ice(const fesom_ice_thermo *th,
  *   ice->data[0..2].values + values_old (a_ice, m_ice, m_snow)
  *   ice->thermo->t_skin/thdgr/thdgrsn/thdgra/thdgr_old/ustar
  *   ice->flx_fw, ice->flx_h
+ *   forcing->real_salt_flux/evaporation/ice_sublimation (Z2 — mirrors the
+ *   Fortran g_forcing_arrays stores at ice_thermo_oce.F90:324-325,352)
  */
 void fesom_ice_thermodynamics(fesom_ice                     *ice,
                               struct fesom_partit           *partit,
                               struct fesom_mesh             *mesh,
-                              const struct fesom_forcing    *forcing,
+                              struct fesom_forcing          *forcing,
                               const struct fesom_jra55      *jra,
                               const struct fesom_sss_runoff *sr);
 

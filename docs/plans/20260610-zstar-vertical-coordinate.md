@@ -280,86 +280,175 @@ stretching is applied only where `area(nz,n)=area(1,n)`).
 **Files:** Modify `src/fesom_ice_coupling.c`, `src/fesom_ice_thermo.c`, `src/fesom_ice_evp.c`, `src/fesom_tracer_diff.c`, `src/fesom_sss_runoff.c` (if restoring touched)
 *(Moved before the SSH/vert-vel phases — their dump validations consume `water_flux`, which
 must already have the zstar composition; plan-review finding 5.)*
-- [ ] Flip `fesom_ice_coupling.c` to the non-virt-salt arms: virtual_salt=0 (skip computation
+- [x] Flip `fesom_ice_coupling.c` to the non-virt-salt arms: virtual_salt=0 (skip computation
       + balancing); add `flux -= thdgr·ρice/ρwat + thdgrsn·ρsno/ρwat`; relax_salt computation +
       `−net` balancing UNCHANGED. Map line-for-line against ice_oce_coupling.F90:476-660.
-- [ ] **Wire the `real_salt_flux` producer (plan-review BLOCKER fix):** stop discarding `rsf`
+      ➕ DONE 2026-06-10. sr->use_virt_salt now derives from the ALE mode (was hardcoded 1,
+      fesom_sss_runoff.c:310). virtual_salt=0 under zstar via the existing else-arms (both the
+      sss_runoff per-step zeroing and the skipped recompute in the ice path). ⚠️ FINDING +
+      documented deviation: the v1.0 C never applied Fortran's :584-686 global freshwater
+      balancing in the live with-ice path (the sss_runoff copy runs BEFORE the ice overwrite
+      and is shadowed) — invisible under linfs because the balanced water_flux has no
+      non-diagnostic linfs consumer. The Fortran assembly (evap − ice_subli + rain +
+      snow·(1−a_ice_old) + runoff − thdgr·ρice/ρwat − thdgrsn·ρsno/ρwat → net/ocean_area
+      added to water_flux over myDim+eDim) is now implemented INSIDE fesom_ice_oce_fluxes,
+      gated on !use_virt_salt (linfs byte-locked). evaporation/ice_sublimation are now stored
+      per node by the thermo driver (new forcing arrays, mirroring g_forcing_arrays).
+- [x] **Wire the `real_salt_flux` producer (plan-review BLOCKER fix):** stop discarding `rsf`
       at `fesom_ice_thermo.c:616` — assign `real_salt_flux[n] = rsf` exactly as
       `ice_thermo_oce.F90:352` does (unconditional; the value itself is use_virt_salt-branched
       at :617/:646). Flip the `:370`-area fw-flux branches to the `(.not. use_virt_salt)` arms.
-- [ ] Port the EVP non-linfs branch (`use_pice=0`, p_ice×0) in `fesom_ice_evp.c`.
-- [ ] Tracer surface BCs with the CORRECTED formulas: explicit path (tracer:535
+      ➕ DONE — both therm_ice arms were already ported parameterized on use_virt_salt; the
+      driver now stores rsf/evap/subli into forcing (forcing param de-consted).
+- [x] Port the EVP non-linfs branch (`use_pice=0`, p_ice×0) in `fesom_ice_evp.c`.
+      ➕ DONE — inner branch at the elevation gradient: p_ice = min((ρi·m+ρs·ms)/ρw,
+      max_ice_loading=5.0 module default)·use_pice(=0, use_floatice=F), literal.
+- [x] Tracer surface BCs with the CORRECTED formulas: explicit path (tracer:535
       `flux = virtual_salt + relax_salt + real_salt_flux·is_nonlinfs`); implicit `bc_surface`
       T (:1517) `−dt·(heat_flux/vcpw + sval·water_flux·is_nonlinfs)`; S (:1523-1524)
       `+dt·(virtual_salt + relax_salt + real_salt_flux·is_nonlinfs)` — replace the
       `fesom_tracer_diff.c:66` hardcoded zero with the live array.
-- [ ] ⚠️ Audit what C's restoring/runoff currently folds into water_flux vs Fortran's
+      ➕ DONE — bc_surface reads fesom_is_nonlinfs + forcing->real_salt_flux. The explicit
+      vertical-diff path (tracer:535) does NOT EXIST in C (i_vert_diff=.true. only — never
+      exercised by any reference; port-what's-used) → nothing to edit there.
+- [x] ⚠️ Audit what C's restoring/runoff currently folds into water_flux vs Fortran's
       relax_salt/water_flux split (`feedback_runoff_fold_when_ice`, ref_sss_local b8e1d36) —
       the zstar arms must match Fortran's composition exactly, not C's linfs shortcut if any.
-- [ ] **Validate:** step-1 dump-diff vs Fortran zstar of `water_flux`, `virtual_salt`(=0),
+      ➕ AUDITED: runoff is inside flx_fw via therm_ice prec (both codes); relax_salt is a
+      separate array (not folded into wf) in both; the only composition gap was the missing
+      global balancing — fixed above with the literal Fortran assembly.
+- [x] **Validate:** step-1 dump-diff vs Fortran zstar of `water_flux`, `virtual_salt`(=0),
       `relax_salt`, `real_salt_flux`, ice state (a_ice/m_ice/u_ice) — step 1 is clean
       (identical IC; ocean state hasn't diverged); later steps re-checked at Z8 once the full
       chain exists. Global salt-content accounting sanity (virtual_salt path off, real path on).
       linfs byte-gate (all flips gated on ale mode).
+      ➕ PASSED (job 25494078 + analysis): s1 virtual_salt ≡ 0 EXACTLY both codes;
+      relax_salt rel 6.4e-06 (0 sig); water_flux/real_salt_flux diffs at 1828 nodes =
+      100% the active-freezing set, Δrsf/Δwf median −3.83 corr −0.9997 (the analytic
+      rsf=fwice·Sice relation — single mechanism: ice-growth sensitivity to PHC-noise
+      T_oc/S_oc), 26 F-only vs 4 C-only freezing-onset threshold flips, and the global
+      balancing net agrees to 5.5e-12 → 0 unexplained. linfs byte-gate PASSED (25494079
+      + 25494526: snapshots worst |Δ|=0).
 
 ### Phase Z3: SSH plumbing — ssh_rhs + hbar water-flux terms + dhe
 **Files:** Modify `src/fesom_ssh.c`, `src/fesom_momentum.c`
-- [ ] Port the non-linfs `compute_ssh_rhs_ale` tail: `ssh_rhs(n) -= alpha·water_flux·areasvol(1,n)`
+- [x] Port the non-linfs `compute_ssh_rhs_ale` tail: `ssh_rhs(n) -= alpha·water_flux·areasvol(1,n)`
       (+ the existing `(1−alpha)·ssh_rhs_old` term in the same branch shape as Fortran).
-- [ ] Port the non-linfs `compute_hbar_ale` bits: `ssh_rhs_old(n) -= water_flux·areasvol(1,n)`
+      ➕ DONE — fesom_compute_ssh_rhs_linfs gained a water_flux param (NULL → zero at the
+      startup sanity sites); the zstar arm skips cavity nodes entirely incl. the
+      (1−α)·ssh_rhs_old term, exactly as :2122-2135.
+- [x] Port the non-linfs `compute_hbar_ale` bits: `ssh_rhs_old(n) -= water_flux·areasvol(1,n)`
       + **`exchange_nod(ssh_rhs_old)`** (non-linfs only!); `dhe(elem)=mean(hbar−hbar_old)` fill
       after the hbar exchange — the fill is UNCONDITIONAL in Fortran (runs under linfs too,
       unused there): mirror that, byte-gate stays green since dhe is a new array.
-- [ ] **Validate:** dump-diff `ssh_rhs`, `hbar`, `dhe` steps 1–3 vs Fortran zstar (16r) —
+      ➕ DONE — wf term in fesom_compute_hbar (param added); the C's always-on ssh_rhs_old
+      exchange in fesom_step covers the Fortran non-linfs-only :2269 (v1.0 already exchanged
+      it under linfs, harmless); dhe fill UNCONDITIONAL in fesom_step after the hbar exchange.
+- [x] **Validate:** dump-diff `ssh_rhs`, `hbar`, `dhe` steps 1–3 vs Fortran zstar (16r) —
       water_flux already zstar-composed (Z2), so diffs must be at the input-noise floor;
       explained-by-input bar; linfs byte-gate.
+      ➕ s1 PASSED at the noise floor (job 25494525, full Z2-Z6 binary): ssh_rhs_old rel
+      4.0e-06 (was 5.9e-03 pre-Z3 — the wf term lands), ssh_rhs rel 1.5e-05, hbar/eta_n/d_eta
+      rel 5.8e-05, dhe rel 4.2e-05. s2-s3 grow (hbar 1.4e-02) — analyzed at Z8 below:
+      threshold-amplified input noise (ice-onset + KPP kbl flips), not algebra. linfs
+      byte-gate PASSED (25494526).
 
 ### Phase Z4: Per-step stiffness update + solver
 **Files:** Modify `src/fesom_ssh.{c,h}`, `src/fesom_step.c`
-- [ ] Port `update_stiff_mat_ale`: edge loop, `row>myDim cycle`, npos lookup of `elnodes(k)`
+- [x] Port `update_stiff_mat_ale`: edge loop, `row>myDim cycle`, npos lookup of `elnodes(k)`
       in the CSR row, `fy=-dhe·(gradient_sca×edge_cross_dxdy)` with `if(i==2)fy=-fy; if(j==2)fy=-fy`,
       `values(npos) += fy·g·dt·alpha·theta`. Called before ssh_rhs when zstar (gate :3723).
-- [ ] Mirror the solver's preconditioner behavior: if the C Jacobi `pr` is cached from init,
+      ➕ DONE — fesom_update_stiff_mat_ale in fesom_ssh.c, reusing the base-builder's
+      node→sparse-position scatter; verified the ice FCT mass matrix does NOT read
+      stiff->values (own array) so the cumulative increment is safe.
+- [x] Mirror the solver's preconditioner behavior: if the C Jacobi `pr` is cached from init,
       refresh the diagonal after each update (Fortran `solver.F90` reads the live matrix).
       ⚠️ Check first what C does; mirror, don't invent.
-- [ ] Add (debug-gated) the Fortran's commented row-sum sanity: `sum(row values)/area·dt ≈ 1`.
-- [ ] **Validate:** dump-diff `d_eta` steps 1–3 vs Fortran zstar (step 1: dhe=0 → must equal
+      ➕ RESOLVED — Fortran builds the preconditioner ONCE at the first solve
+      (oce_ale.F90:3306 `if (lfirst) call ssh_solve_preconditioner`) and NEVER refreshes it
+      as the matrix evolves; the C's once-at-init build is already the exact mirror.
+      NOTHING TO CHANGE (and at the first solve dhe=0, so both codes precondition on the
+      identical base matrix).
+- [x] Add (debug-gated) the Fortran's commented row-sum sanity: `sum(row values)/area·dt ≈ 1`.
+      ➕ SKIPPED deliberately — the check is COMMENTED OUT in the Fortran (dead code, and its
+      rowptr comment says it only works on 1 rank); porting commented-out debug would add
+      noise. Revisit only if a stiffness bug ever needs it.
+- [x] **Validate:** dump-diff `d_eta` steps 1–3 vs Fortran zstar (step 1: dhe=0 → must equal
       the no-update solve bit-for-bit; steps 2–3 exercise the update); CG iteration counts
       comparable to Fortran log; linfs byte-gate (matrix path untouched when linfs).
+      ➕ s1 d_eta rel 5.8e-05 = the ssh_rhs input-noise floor propagated through the
+      (identical, dhe=0) solve — consistent with no-update bit-equivalence modulo rhs noise.
+      s2-s3 see Z8. linfs byte-gate PASSED (25494526).
 
 ### Phase Z5: Vertical velocity + hnode_new (vert_vel zstar branch)
 **Files:** Modify `src/fesom_ale.c`, `src/fesom_step.c`
-- [ ] Port the zstar branch: dd1/dd/dddt, Wvel integrated correction
+- [x] Port the zstar branch: dd1/dd/dddt, Wvel integrated correction
       `−(zbar_3d_n(nz)−dd1)·dddt` + `hnode_new=hnode+(zbar_3d_n(nz)−zbar_3d_n(nz+1))·dd`
       over nz=1..`nlevels_nod2D_min`−2 (myDim), surface `Wvel(1) −= water_flux`, NaN check.
-- [ ] Port the shared tail: negative-hnode_new fatal check (myDim+eDim) +
+      ➕ DONE — fesom_ale_vert_vel_zstar_distribute runs on top of the shared divergence
+      Wvel (fesom_ale_vert_vel_linfs IS the mode-shared part); NaN check ported as a
+      warn-and-continue (Fortran writes and continues).
+- [x] Port the shared tail: negative-hnode_new fatal check (myDim+eDim) +
       **`exchange_nod(Wvel)` AND `exchange_nod(hnode_new)`** (:2679-2680; the latter feeds
       Z1's commit — write-loops-halo lesson).
-- [ ] **Validate:** dump-diff `Wvel`, `hnode_new` steps 1–3 vs Fortran zstar; exchange-and-
+      ➕ DONE — negative check ported non-fatal (Fortran prints and continues);
+      exchange_nod(hnode_new) added zstar-only in fesom_step (linfs keeps the v1.0
+      memcpy-synced halo, no exchange).
+- [x] **Validate:** dump-diff `Wvel`, `hnode_new` steps 1–3 vs Fortran zstar; exchange-and-
       compare probe on Wvel/hnode_new; the Z1 commit now does real work — re-run the Z1
       geometry dump at step 2–3 (zbar_3d_n/Z_3d_n/helem evolve); linfs byte-gate.
+      ➕ s1 PASSED: Wvel diffs confined to the ~1090-node freezing/wf-noise set (max
+      2.9e-07); the SURFACE interface Wvel closes to machine zero in BOTH codes (max|val|
+      4.9e-19) — the distribute+wf budget is exact; hnode_new/hnode/zbar_3d_n/Z_3d_n/helem
+      s1 ALL ≤1e-12 (the commit reproduces Fortran geometry). Cross-rank probe deferred to
+      Z7's 1/8/16r runs. linfs byte-gate PASSED.
 
 ### Phase Z6: Pressure — zxxxx shchepetkin PGF (+ hpressure gating)
 **Files:** Modify `src/fesom_eos.{c,h}`, `src/fesom_step.c`
-- [ ] Gate the C `hpressure` computation to linfs, mirroring Fortran's
+- [x] Gate the C `hpressure` computation to linfs, mirroring Fortran's
       `if (which_ale=='linfs' .or. use_cavity)` — under zstar NO hpressure is computed
       (plan-review finding 2: there is no "non-linfs hpressure term"; nothing new to port).
-- [ ] Port `pressure_force_4_zxxxx_shchepetkin` (:2104-2339) as
+      ➕ DONE (fesom_eos.c, gated on !fesom_ale_zstar).
+- [x] Port `pressure_force_4_zxxxx_shchepetkin` (:2104-2339) as
       `fesom_pressure_force_zxxxx_shchepetkin` (reads `density_m_rho0` + live
       `Z_3d_n`/`zbar_3d_n`); dispatch linfs→fullcell / zstar→shchepetkin; gate-only aborts
       for cubicspline/easypgf.
-- [ ] **Validate:** dump-diff `pgf_x/pgf_y` steps 1–3 vs Fortran zstar (apples-to-apples:
+      ➕ DONE — literal transcription with 1-based local zbar_n/Z_n stacks built from helem
+      + zbar_e_bot (=zbar(nlevels), full cells, same expression as the stiffness builder);
+      surface one-sided / interior centered / bottom case-split Newton stencils on the
+      per-node Z_3d_n. The zstar dispatch hard-selects shchepetkin (= the module default;
+      no which_pgf env — other variants unreachable).
+- [x] **Validate:** dump-diff `pgf_x/pgf_y` steps 1–3 vs Fortran zstar (apples-to-apples:
       zstar-vs-zstar, NOT vs C linfs — different algorithm); linfs byte-gate (hpressure gating
       must be ale-conditional).
+      ➕ s1 pgf_x/pgf_y **BIT-FAITHFUL: max|Δ| ~1e-18, 0 signal columns** on identical
+      step-1 inputs (same IC density + same init geometry) — the strongest possible
+      algebra validation for the 235-line transcription. s2-s3 diffs (≲6% rel) are carried
+      by Δdensity(s2) from the step-1 threshold noise (see Z8). linfs byte-gate PASSED
+      (25494526 — the hpressure gate + dispatch are ale-conditional).
 
 ### Phase Z7: Geometry-consumer + halo audit
 **Files:** Audit-driven small edits across `src/fesom_gm.c`, `src/fesom_kpp.c`, `src/fesom_pp.c`, `src/fesom_tracer_adv.c`, mo_convect site, sw-pene site, wsplit/CFL site
-- [ ] **Audit method (plan-review finding 4): grep the geometry arrays themselves** —
+- [x] **Audit method (plan-review finding 4): grep the geometry arrays themselves** —
       `mesh->Z\b`, `mesh->zbar\b`, `zbar_3d_n`, `Z_3d_n`, `hnode`, `helem` across `src/*.c` —
       and cross-reference each read against what the Fortran reads there. The `linfs`-comment
       grep is the secondary sweep (catches the annotated shortcuts: gm:486/515/812, eos:67/319,
       mesh:564, main:456/484/503, …).
-- [ ] Explicitly covered consumers (from Fortran cross-check): **mo_convect**
+      ➕ DONE 2026-06-10. RE-POINTED (unconditional — Z_3d_n==Z / zbar_3d_n==zbar bitwise
+      under linfs, byte-gate proves it): EOS z + dbsfc db_max denom + bvfreq zmean/dz_inv
+      (fesom_eos pressure_bv ← Fortran :316-433 all Z_3d_n); sw_alpha_beta p1 (← :~2806,
+      the !!PS line shows abs(Z) was deliberately replaced); PP dz_inv (← pp:49); KPP
+      ri_iwmix dz_inv (← :1040) + blmix delhat (← :1292) + blmix sig (← :1338); QR4C
+      vertical-advection Z-stencil + zbar→zbar_3d_n (← oce_adv_tra_ver:417-422).
+      ALREADY-LIVE (verified, no change): GM fer_solve local zbar_n/Z_n from hnode_new
+      (← oce_fer_gm:75-86) and G7 from hnode (← :1146-1154); tracer-diff TDMA local geom
+      from hnode_new (← oce_ale_tracer:745-749); momentum impl_vert_visc from helem
+      (← oce_dyn:3167-3179); KPP bldepth zbar_3d_n; sw_pene zbar_3d_n (fesom_bulk);
+      CFLz hnode_new; FCT/MFCT hnode/hnode_new duals. INIT-TIME-ONLY (static by
+      construction, no change): fesom_ic, fesom_phc, stiffness base builder
+      (zbar_e_bot — the base matrix encodes unperturbed depth per invariant 1),
+      shchepetkin zbar_e_bot (Fortran reads the static zbar_e_bot too).
+- [x] Explicitly covered consumers (from Fortran cross-check): **mo_convect**
       (`oce_mo_conv.F90:64` reads `zbar_3d_n` for the convection depth test); **vertical
       tracer advection** (`oce_adv_tra_ver.F90:417-422` reads `Z_3d_n`/`zbar_3d_n` directly,
       AND `:137-138` deliberately builds a LOCAL `zbar_n`/`Z_n` from **`hnode_new`**, not
@@ -367,6 +456,10 @@ must already have the zstar composition; plan-review finding 5.)*
       source); **PP `dz_inv`** (`oce_ale_mixing_pp.F90:49` uses `Z_3d_n`); KPP `zbar_3d_n`
       reads (bldepth); sw-pene decay depths; wsplit `CFL_z` from live hnode; GM slopes/bolus;
       MFCT/FCT `hnode_new` divisions.
+      ➕ All covered above. mo_convect: the zbar_3d_n/mixlength read is inside the
+      `use_momix` arm — use_momix=.false. in the reference namelist → the C's
+      instabmix-only port has NO geometry consumer there (port-what's-used). The QR4C
+      dual-geometry subtlety is now explicit in the C comments.
 - [ ] Halo audit of every NEW write loop (`feedback_write_loops_halo`): exchange-and-compare
       probe over Wvel/hnode_new/helem/ssh_rhs_old/hbar at 8r.
 - [ ] **Validate:** 30-day zstar runs at 1/8/16r — cross-rank consistency at the PHC-noise
@@ -377,6 +470,15 @@ must already have the zstar composition; plan-review finding 5.)*
 - [ ] Steps 1–3 FULL dump chain green (every Z1–Z6 field incl. the Z2 forcing fields at
       steps 2–3 now that the full chain exists; 0 unexplained); day-5 dt=1800 16r stable
       (max|uv|, SSH range, SST/SSS sane vs Fortran zstar day-5).
+      ➕ s1 chain GREEN (all tags at the input-noise floor or bit-identical — see Z2-Z6).
+      ➕ s2/s3 EXPLAINED 2026-06-10 (the explained-by-input bar): the s2 ssh_rhs dipoles
+      (adjacent-gid ± pairs, storm-track geography) are threshold-amplified input noise —
+      paired step-2 bldepth dumps (Fortran 25494996, C 25495015) show **10033 kbl flips
+      (7.9% of nodes, hbl differing up to 281 m)**; 87.4% of the big-Δssh_rhs(s2) nodes lie
+      within 300 km (≈3 cells) of a kbl-flip/ice-onset node, median 86 km (≈1 cell); plus
+      21% of |Δ| mass in the active-freezing set (a_ice>0.001 stress-blend onset). Identical
+      mechanism class to the documented KPP K5/K9 noise model (which still delivered 0.005
+      RMS 2yr climate) — NOT a port defect. Binding end-to-end test = Z9 climate.
 - [ ] ⚠️ Watch the known blowup locations (Aleutian trench el 194724) and the SSH-checkerboard
       indicator (1-ring hbar spread) — zstar changes the barotropic operator.
 - [ ] **Validate:** dt=1800 30-day zstar run clean; linfs byte-gate final re-check.

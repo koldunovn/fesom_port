@@ -74,9 +74,16 @@ void fesom_update_vel(const struct fesom_mesh *mesh,
  * Note for linfs: ssh_rhs_old enters the NEXT step's compute_ssh_rhs through
  * the (1-alpha)*ssh_rhs_old term — so even with alpha=1.0 it must be computed
  * correctly each step.
+ *
+ * Z3 (zstar): ssh_rhs_old additionally gets −water_flux·areasvol(nzmin)
+ * (oce_ale.F90:2262-2271) before the hbar update. water_flux may be NULL
+ * (zero flux — startup sanity sites); the step passes forcing->water_flux.
+ * The caller (fesom_step.c) must fill mesh->dhe = mean(hbar−hbar_old) AFTER
+ * exchanging hbar — the fill is UNCONDITIONAL in Fortran (:2298-2305).
  */
 void fesom_compute_hbar(const struct fesom_mesh *mesh,
-                        struct fesom_dyn        *dyn);
+                        struct fesom_dyn        *dyn,
+                        const real_t            *water_flux);
 
 /*
  * Horizontal harmonic viscosity with easy backscatter (opt_visc=5).

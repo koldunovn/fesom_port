@@ -3,6 +3,7 @@
 #include "fesom_dyn.h"
 #include "fesom_forcing.h"
 #include "fesom_halo.h"
+#include "fesom_jra55.h"   /* Z2: prec_rain/prec_snow for the zstar fw balancing */
 #include "fesom_kpp.h"     /* [forcing-diff dig] reuse the KPP dump harness for the iceforce dump */
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -127,6 +128,7 @@ void fesom_ice_oce_fluxes(fesom_ice                     *ice,
                           struct fesom_mesh             *mesh,
                           const struct fesom_tracers    *tracers,
                           struct fesom_forcing          *forcing,
+                          const struct fesom_jra55      *jra,
                           const struct fesom_sss_runoff *sr)
 {
     int N  = mesh->myDim_nod2D + mesh->eDim_nod2D;
@@ -172,6 +174,46 @@ void fesom_ice_oce_fluxes(fesom_ice                     *ice,
         forcing->relax_salt[n] -= net_relax;
     }
     fesom_exchange_nod2D(forcing->relax_salt, partit);
+
+    /* Freshwater-flux global balancing (Fortran ice_oce_coupling.F90:584-686),
+     * Z2: live ONLY under zstar (use_virt_salt=false).
+     *
+     * Fortran runs this assembly under linfs too, but there the balanced
+     * water_flux is physically INVISIBLE (its only non-diagnostic consumers
+     * are the is_nonlinfs-gated terms and the zstar ssh/Wvel plumbing);
+     * the v1.0 C linfs path never applied it and is byte-locked — so the
+     * block is gated, preserving linfs byte-identity. ⚠️ documented deviation.
+     *
+     *   flux(n) = evaporation − ice_sublimation + prec_rain
+     *           + prec_snow·(1 − a_ice_old) + runoff            (:584-604)
+     *   flux(n) −= thdgr·ρice/ρwat + thdgrsn·ρsno/ρwat          (:625-631,
+     *              the !use_virt_salt arm: ice growth = real volume change)
+     *   net = ∫flux / ocean_area;  water_flux(n) += net          (:660-686)
+     */
+    if (!sr->use_virt_salt) {
+        const real_t rhoice     = ice->thermo.rhoice;
+        const real_t rhosno     = ice->thermo.rhosno;
+        const real_t inv_rhowat = ice->thermo.inv_rhowat;
+        const real_t *a_ice_old = ice->data[FESOM_ICE_AICE].values_old;
+        real_t *flux = malloc((size_t)N * sizeof(real_t));
+        FESOM_CHECK(flux, "oce_fluxes: flux alloc");
+        for (int n = 0; n < N; ++n) {
+            real_t pr = jra ? jra->prec_rain[n] : 0.0;
+            real_t ps = jra ? jra->prec_snow[n] : 0.0;
+            flux[n] = forcing->evaporation[n]
+                    - forcing->ice_sublimation[n]
+                    + pr
+                    + ps * (1.0 - a_ice_old[n])
+                    + forcing->runoff[n];
+            flux[n] -= ice->thermo.thdgr[n]   * rhoice * inv_rhowat
+                     + ice->thermo.thdgrsn[n] * rhosno * inv_rhowat;
+        }
+        real_t net = integrate_nod_2D(flux, mesh, partit) / mesh->ocean_area;
+        for (int n = 0; n < N; ++n) {
+            forcing->water_flux[n] += net;
+        }
+        free(flux);
+    }
 
     /* Halo exchange of heat_flux/water_flux — used by tracer diffusion BC. */
     fesom_exchange_nod2D(forcing->heat_flux,  partit);

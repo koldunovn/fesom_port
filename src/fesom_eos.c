@@ -1,4 +1,5 @@
 #include "fesom_eos.h"
+#include "fesom_ale.h"
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_mesh.h"
@@ -118,9 +119,11 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
            db_max accumulates the max buoyancy-gradient over the full column,
            used by MLD1 (Large et al. 1997). Fortran lines 314-335. */
         real_t db_max = 0.0;
-        real_t z_nzmin = mesh->Z[nzmin];
+        /* Z7: Fortran reads the per-node Z_3d_n (oce_ale_pressure_bv.F90:
+         * 316-334) — LIVE under zstar; == mesh->Z under linfs. */
+        real_t z_nzmin = mesh->Z_3d_n[FESOM_NODE3D(n, nzmin, nl)];
         for (int nz = nzmin; nz < nzmax; ++nz) {
-            real_t z = mesh->Z[nz];
+            real_t z = mesh->Z_3d_n[FESOM_NODE3D(n, nz, nl)];
             real_t bulk = bulk_0[nz] + z*(bulk_pz[nz] + z*bulk_pz2[nz]);
             real_t r = bulk * rhopot[nz] / (bulk + 0.1 * z * state_eq_int) - rho_ref;
             rho[nz] = r;
@@ -148,7 +151,8 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
              * non-zero divisor; at that level dbsfc1 is 0 anyway since
              * rho_surf == r_full, so the term contributes nothing. */
             int nz_eff = (nz > nzmin) ? nz : (nzmin + 1);
-            real_t denom = fabs(z_nzmin - mesh->Z[nz_eff]);
+            real_t denom = fabs(z_nzmin
+                                - mesh->Z_3d_n[FESOM_NODE3D(n, nz_eff, nl)]);
             real_t cand = dbsfc1 / denom;
             if (cand > db_max) db_max = cand;
         }
@@ -160,15 +164,21 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
         /* hpressure — linfs branch, no cavity (nzmin == 0 in C).
            Mirror of oce_ale_pressure_bv.F90 lines 369-403. Surface boundary:
              hpressure[nzmin] = -Z[nzmin] * rho[nzmin] * g
-           Then accumulate downward by 0.5 g * (rho_above*h_above + rho*h). */
-        aux->hpressure[FESOM_NODE3D(n, nzmin, nl)] =
-            -mesh->Z[nzmin] * rho[nzmin] * g;
-        for (int nz = nzmin + 1; nz < nzmax; ++nz) {
-            real_t h_up   = mesh->hnode[FESOM_NODE3D(n, nz - 1, nl)];
-            real_t h_this = mesh->hnode[FESOM_NODE3D(n, nz,     nl)];
-            real_t a = 0.5 * g * (rho[nz - 1] * h_up + rho[nz] * h_this);
-            aux->hpressure[FESOM_NODE3D(n, nz, nl)] =
-                aux->hpressure[FESOM_NODE3D(n, nz - 1, nl)] + a;
+           Then accumulate downward by 0.5 g * (rho_above*h_above + rho*h).
+           Z6: the WHOLE block is gated `if (which_ale=='linfs' .or.
+           use_cavity)` in Fortran — under zstar NO hpressure is computed at
+           all (the zxxxx shchepetkin PGF is self-contained on
+           density_m_rho0 + live geometry; zero hpressure references). */
+        if (!fesom_ale_zstar) {
+            aux->hpressure[FESOM_NODE3D(n, nzmin, nl)] =
+                -mesh->Z[nzmin] * rho[nzmin] * g;
+            for (int nz = nzmin + 1; nz < nzmax; ++nz) {
+                real_t h_up   = mesh->hnode[FESOM_NODE3D(n, nz - 1, nl)];
+                real_t h_this = mesh->hnode[FESOM_NODE3D(n, nz,     nl)];
+                real_t a = 0.5 * g * (rho[nz - 1] * h_up + rho[nz] * h_this);
+                aux->hpressure[FESOM_NODE3D(n, nz, nl)] =
+                    aux->hpressure[FESOM_NODE3D(n, nz - 1, nl)] + a;
+            }
         }
 
         /* bvfreq — N² between layers nzmin+1 and nzmax-1, then padded.
@@ -177,12 +187,14 @@ void fesom_pressure_bv(const struct fesom_tracers *tracers,
            (Phase G2a): the shallowest level where N² > db_max. */
         int mld1_done = 0;
         for (int nz = nzmin + 1; nz < nzmax; ++nz) {
-            real_t zmean   = 0.5 * (mesh->Z[nz - 1] + mesh->Z[nz]);
+            real_t zmean   = 0.5 * (mesh->Z_3d_n[FESOM_NODE3D(n, nz - 1, nl)]
+                                  + mesh->Z_3d_n[FESOM_NODE3D(n, nz,     nl)]);
             real_t bulk_up = bulk_0[nz - 1] + zmean*(bulk_pz[nz - 1] + zmean*bulk_pz2[nz - 1]);
             real_t bulk_dn = bulk_0[nz    ] + zmean*(bulk_pz[nz    ] + zmean*bulk_pz2[nz    ]);
             real_t rho_up  = bulk_up * rhopot[nz - 1] / (bulk_up + 0.1 * zmean * state_eq_int);
             real_t rho_dn  = bulk_dn * rhopot[nz    ] / (bulk_dn + 0.1 * zmean * state_eq_int);
-            real_t dz_inv  = 1.0 / (mesh->Z[nz - 1] - mesh->Z[nz]);
+            real_t dz_inv  = 1.0 / (mesh->Z_3d_n[FESOM_NODE3D(n, nz - 1, nl)]
+                                  - mesh->Z_3d_n[FESOM_NODE3D(n, nz,     nl)]);
             real_t bv = -g * dz_inv * (rho_up - rho_dn) / rho_ref;
             aux->bvfreq[FESOM_NODE3D(n, nz, nl)] = bv;
 
@@ -312,6 +324,184 @@ void fesom_pressure_force_linfs_fullcell(const struct fesom_mesh *mesh,
     }
 }
 
+/*--- pressure_force_4_zxxxx_shchepetkin (Z6) --------------------------------
+ * Literal port of oce_ale_pressure_bv.F90:2104-2339 — the zlevel/zstar PGF
+ * (which_pgf='shchepetkin', the MODULE DEFAULT; the namelist does not set it).
+ * Density-Jacobian method (Shchepetkin & McWilliams 2003, JGR 108 C3, eq 1.7)
+ * on the LIVE geometry: reads density_m_rho0 + Z_3d_n (per node) + helem and
+ * builds a local elemental zbar_n/Z_n stack from zbar_e_bot upward. Vertical
+ * density gradients via a quadratic Newton polynomial on the (non-equidistant)
+ * Z_3d_n stencil; one-sided at the surface; at the bottom one-sided when the
+ * vertex column ends with the element, centered when it is deeper. The layer
+ * PGF is the midpoint accumulation int + aux·0.5; the running integral adds
+ * the full aux. Zero hpressure references — self-contained.
+ *
+ * Index convention: local 1-BASED level variables and 1-based scratch
+ * buffers (entry [k] = Fortran (k)) so every line maps verbatim onto the
+ * Fortran; node-array accesses convert with -1.
+ *
+ * Gate-only: cubicspline/easypgf are NOT ported (no reference run); the
+ * zstar dispatch in fesom_step hard-selects this routine.
+ *--------------------------------------------------------------------------*/
+enum { ZXX_NL_MAX = 130 };   /* fits nl=70 NG5 and CORE2 nl=48, like NL_MAX */
+
+void fesom_pressure_force_zxxxx_shchepetkin(const struct fesom_mesh *mesh,
+                                            struct fesom_aux        *aux)
+{
+    const int    nl  = mesh->nl;
+    const real_t g   = (real_t)FESOM_G;
+    const real_t rho0= (real_t)FESOM_DENSITY_0;
+    FESOM_CHECK(nl + 1 < ZXX_NL_MAX, "shchepetkin: nl=%d exceeds scratch", nl);
+
+    /* 1-based scratch: zbar_n[1..nle+1], Z_n[1..nle] */
+    real_t zbar_n[ZXX_NL_MAX + 1], Z_n[ZXX_NL_MAX + 1];
+
+#define RHO_(ni, lvl)  aux->density_m_rho0[FESOM_NODE3D(en[(ni)], (lvl) - 1, nl)]
+#define Z3D_(ni, lvl)  mesh->Z_3d_n       [FESOM_NODE3D(en[(ni)], (lvl) - 1, nl)]
+#define HEL_(lvl)      mesh->helem        [FESOM_ELEM3D(elem, (lvl) - 1, nl)]
+#define GS_(k)         gs[(k) - 1]
+
+    for (int elem = 0; elem < mesh->myDim_elem2D; ++elem) {
+        int nle = mesh->nlevels[elem] - 1;   /* number of mid-depth levels  */
+        int ule = mesh->ulevels[elem];       /* 1-based upper level (=1)    */
+        int en[3] = { mesh->elem_nodes[3*elem + 0],
+                      mesh->elem_nodes[3*elem + 1],
+                      mesh->elem_nodes[3*elem + 2] };
+        const real_t *gs = &mesh->gradient_sca[6*elem];
+
+        /* elemental level stack (:2143-2151); zbar_e_bot = zbar(nlevels)
+         * (full cells — same expression as the stiffness builder). */
+        for (int k = 0; k <= nle + 1; ++k) { zbar_n[k] = 0.0; Z_n[k] = 0.0; }
+        zbar_n[nle + 1] = mesh->zbar[mesh->nlevels[elem] - 1];
+        Z_n[nle]        = zbar_n[nle + 1] + HEL_(nle) * 0.5;
+        for (int nlz = nle; nlz >= ule + 1; --nlz) {
+            zbar_n[nlz]  = zbar_n[nlz + 1] + HEL_(nlz);
+            Z_n[nlz - 1] = zbar_n[nlz]     + HEL_(nlz - 1) * 0.5;
+        }
+        zbar_n[ule] = zbar_n[ule + 1] + HEL_(ule);
+
+        real_t int_dp_dx[2], drho_dz[3], dx10[3], dx20[3], dx21[3], df10[3], df21[3];
+        real_t drho_dx, drho_dy, dz_dx, dz_dy, aux_sum;
+        int    nlz, idx;
+
+        /* ---- surface layer (:2190-2243) ---- */
+        nlz = ule;
+        for (int ni = 0; ni < 3; ++ni) {
+            idx = nlz - mesh->ulevels_nod2D[en[ni]];
+            if (idx == 0) {
+                dx10[ni] = Z3D_(ni, nlz + 1) - Z3D_(ni, nlz);
+                dx21[ni] = Z3D_(ni, nlz + 2) - Z3D_(ni, nlz + 1);
+                dx20[ni] = Z3D_(ni, nlz + 2) - Z3D_(ni, nlz);
+                df10[ni] = RHO_(ni, nlz + 1) - RHO_(ni, nlz);
+                df21[ni] = RHO_(ni, nlz + 2) - RHO_(ni, nlz + 1);
+                drho_dz[ni] = df10[ni]/dx10[ni]
+                    + (dx10[ni]*df21[ni] - dx21[ni]*df10[ni])
+                      / (dx20[ni]*dx21[ni]*dx10[ni])
+                      * ((Z_n[nlz] - Z3D_(ni, nlz + 1))
+                       + (Z_n[nlz] - Z3D_(ni, nlz)));
+            } else {
+                dx10[ni] = Z3D_(ni, nlz)     - Z3D_(ni, nlz - 1);
+                dx21[ni] = Z3D_(ni, nlz + 1) - Z3D_(ni, nlz);
+                dx20[ni] = Z3D_(ni, nlz + 1) - Z3D_(ni, nlz - 1);
+                df10[ni] = RHO_(ni, nlz)     - RHO_(ni, nlz - 1);
+                df21[ni] = RHO_(ni, nlz + 1) - RHO_(ni, nlz);
+                drho_dz[ni] = df10[ni]/dx10[ni]
+                    + (dx10[ni]*df21[ni] - dx21[ni]*df10[ni])
+                      / (dx20[ni]*dx21[ni]*dx10[ni])
+                      * ((Z_n[nlz] - Z3D_(ni, nlz))
+                       + (Z_n[nlz] - Z3D_(ni, nlz - 1)));
+            }
+        }
+        drho_dx = GS_(1)*RHO_(0,nlz) + GS_(2)*RHO_(1,nlz) + GS_(3)*RHO_(2,nlz);
+        dz_dx   = GS_(1)*Z3D_(0,nlz) + GS_(2)*Z3D_(1,nlz) + GS_(3)*Z3D_(2,nlz);
+        aux_sum = (drho_dx - (drho_dz[0]+drho_dz[1]+drho_dz[2])/3.0*dz_dx)
+                  * HEL_(nlz) * g / rho0;
+        aux->pgf_x[FESOM_ELEM3D(elem, nlz - 1, nl)] = aux_sum * 0.5;
+        int_dp_dx[0] = aux_sum;
+
+        drho_dy = GS_(4)*RHO_(0,nlz) + GS_(5)*RHO_(1,nlz) + GS_(6)*RHO_(2,nlz);
+        dz_dy   = GS_(4)*Z3D_(0,nlz) + GS_(5)*Z3D_(1,nlz) + GS_(6)*Z3D_(2,nlz);
+        aux_sum = (drho_dy - (drho_dz[0]+drho_dz[1]+drho_dz[2])/3.0*dz_dy)
+                  * HEL_(nlz) * g / rho0;
+        aux->pgf_y[FESOM_ELEM3D(elem, nlz - 1, nl)] = aux_sum * 0.5;
+        int_dp_dx[1] = aux_sum;
+
+        /* ---- interior layers (:2248-2280) ---- */
+        for (nlz = ule + 1; nlz <= nle - 1; ++nlz) {
+            for (int ni = 0; ni < 3; ++ni) {
+                dx10[ni] = Z3D_(ni, nlz)     - Z3D_(ni, nlz - 1);
+                dx21[ni] = Z3D_(ni, nlz + 1) - Z3D_(ni, nlz);
+                dx20[ni] = Z3D_(ni, nlz + 1) - Z3D_(ni, nlz - 1);
+                df10[ni] = RHO_(ni, nlz)     - RHO_(ni, nlz - 1);
+                df21[ni] = RHO_(ni, nlz + 1) - RHO_(ni, nlz);
+                drho_dz[ni] = df10[ni]/dx10[ni]
+                    + (dx10[ni]*df21[ni] - dx21[ni]*df10[ni])
+                      / (dx20[ni]*dx21[ni]*dx10[ni])
+                      * ((Z_n[nlz] - Z3D_(ni, nlz))
+                       + (Z_n[nlz] - Z3D_(ni, nlz - 1)));
+            }
+            drho_dx = GS_(1)*RHO_(0,nlz) + GS_(2)*RHO_(1,nlz) + GS_(3)*RHO_(2,nlz);
+            dz_dx   = GS_(1)*Z3D_(0,nlz) + GS_(2)*Z3D_(1,nlz) + GS_(3)*Z3D_(2,nlz);
+            aux_sum = (drho_dx - (drho_dz[0]+drho_dz[1]+drho_dz[2])/3.0*dz_dx)
+                      * HEL_(nlz) * g / rho0;
+            aux->pgf_x[FESOM_ELEM3D(elem, nlz - 1, nl)] = int_dp_dx[0] + aux_sum * 0.5;
+            int_dp_dx[0] += aux_sum;
+
+            drho_dy = GS_(4)*RHO_(0,nlz) + GS_(5)*RHO_(1,nlz) + GS_(6)*RHO_(2,nlz);
+            dz_dy   = GS_(4)*Z3D_(0,nlz) + GS_(5)*Z3D_(1,nlz) + GS_(6)*Z3D_(2,nlz);
+            aux_sum = (drho_dy - (drho_dz[0]+drho_dz[1]+drho_dz[2])/3.0*dz_dy)
+                      * HEL_(nlz) * g / rho0;
+            aux->pgf_y[FESOM_ELEM3D(elem, nlz - 1, nl)] = int_dp_dx[1] + aux_sum * 0.5;
+            int_dp_dx[1] += aux_sum;
+        }
+
+        /* ---- bottom layer (:2284-2334) ---- */
+        nlz = nle;
+        for (int ni = 0; ni < 3; ++ni) {
+            idx = mesh->nlevels_nod2D[en[ni]] - 1 - nlz;
+            if (idx == 0) {
+                dx10[ni] = Z3D_(ni, nlz - 1) - Z3D_(ni, nlz - 2);
+                dx21[ni] = Z3D_(ni, nlz)     - Z3D_(ni, nlz - 1);
+                dx20[ni] = Z3D_(ni, nlz)     - Z3D_(ni, nlz - 2);
+                df10[ni] = RHO_(ni, nlz - 1) - RHO_(ni, nlz - 2);
+                df21[ni] = RHO_(ni, nlz)     - RHO_(ni, nlz - 1);
+                drho_dz[ni] = df10[ni]/dx10[ni]
+                    + (dx10[ni]*df21[ni] - dx21[ni]*df10[ni])
+                      / (dx20[ni]*dx21[ni]*dx10[ni])
+                      * ((Z_n[nlz] - Z3D_(ni, nlz - 1))
+                       + (Z_n[nlz] - Z3D_(ni, nlz - 2)));
+            } else {
+                dx10[ni] = Z3D_(ni, nlz)     - Z3D_(ni, nlz - 1);
+                dx21[ni] = Z3D_(ni, nlz + 1) - Z3D_(ni, nlz);
+                dx20[ni] = Z3D_(ni, nlz + 1) - Z3D_(ni, nlz - 1);
+                df10[ni] = RHO_(ni, nlz)     - RHO_(ni, nlz - 1);
+                df21[ni] = RHO_(ni, nlz + 1) - RHO_(ni, nlz);
+                drho_dz[ni] = df10[ni]/dx10[ni]
+                    + (dx10[ni]*df21[ni] - dx21[ni]*df10[ni])
+                      / (dx20[ni]*dx21[ni]*dx10[ni])
+                      * ((Z_n[nlz] - Z3D_(ni, nlz))
+                       + (Z_n[nlz] - Z3D_(ni, nlz - 1)));
+            }
+        }
+        drho_dx = GS_(1)*RHO_(0,nlz) + GS_(2)*RHO_(1,nlz) + GS_(3)*RHO_(2,nlz);
+        dz_dx   = GS_(1)*Z3D_(0,nlz) + GS_(2)*Z3D_(1,nlz) + GS_(3)*Z3D_(2,nlz);
+        aux_sum = (drho_dx - (drho_dz[0]+drho_dz[1]+drho_dz[2])/3.0*dz_dx)
+                  * HEL_(nlz) * g / rho0;
+        aux->pgf_x[FESOM_ELEM3D(elem, nlz - 1, nl)] = int_dp_dx[0] + aux_sum * 0.5;
+
+        drho_dy = GS_(4)*RHO_(0,nlz) + GS_(5)*RHO_(1,nlz) + GS_(6)*RHO_(2,nlz);
+        dz_dy   = GS_(4)*Z3D_(0,nlz) + GS_(5)*Z3D_(1,nlz) + GS_(6)*Z3D_(2,nlz);
+        aux_sum = (drho_dy - (drho_dz[0]+drho_dz[1]+drho_dz[2])/3.0*dz_dy)
+                  * HEL_(nlz) * g / rho0;
+        aux->pgf_y[FESOM_ELEM3D(elem, nlz - 1, nl)] = int_dp_dx[1] + aux_sum * 0.5;
+    }
+
+#undef RHO_
+#undef Z3D_
+#undef HEL_
+#undef GS_
+}
+
 /*--- sw_alpha_beta (oce_ale_pressure_bv.F90:2751-2846) -------------------------
  * McDougall (1987) thermal expansion and saline contraction coefficients per
  * node per level. Inputs: potential T (°C), S (PSU); pressure proxy = |Z[nz]|.
@@ -335,7 +525,9 @@ void fesom_compute_sw_alpha_beta(const struct fesom_tracers *tracers,
         for (int nz = nzmin; nz < nzmax; ++nz) {
             real_t t1 = T[FESOM_NODE3D(n, nz, nl)] * 1.00024;
             real_t s1 = S[FESOM_NODE3D(n, nz, nl)];
-            real_t p1 = fabs(mesh->Z[nz]);
+            /* Z7: Fortran sw_alpha_beta uses p1 = abs(Z_3d_n(nz,n)) — the
+             * !!PS line shows abs(Z(nz)) was deliberately replaced. */
+            real_t p1 = fabs(mesh->Z_3d_n[FESOM_NODE3D(n, nz, nl)]);
 
             real_t t1_2 = t1*t1;
             real_t t1_3 = t1_2*t1;

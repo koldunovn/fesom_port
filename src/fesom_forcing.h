@@ -50,9 +50,17 @@ typedef struct fesom_forcing {
        unconditionally (ice_thermo_oce.F90:352; rsf is use_virt_salt-branched at
        :617/:646). Under zstar (use_virt_salt=.false.) it carries the
        brine-rejection/melt salt flux that REPLACES virtual_salt in the S
-       surface BC. Stays 0 under linfs (Phase Z0: allocated, no producer yet;
-       Z2 wires fesom_ice_thermo's rsf into it). */
+       surface BC. Stays 0 under linfs (the linfs rsf arm is 0). Wired in Z2. */
     real_t *real_salt_flux;  /* [nod2D] */
+
+    /* Per-node open-water evaporation (+subli) and ice sublimation, stored by
+       the thermo driver (ice_thermo_oce.F90:324-325, g_forcing_arrays).
+       Consumed by the oce_fluxes freshwater balancing assembly
+       (ice_oce_coupling.F90:584-604) — live under zstar (Z2); dead stores
+       under linfs (the C linfs path keeps the v1.0 behavior of not applying
+       the physically-inert global water_flux balancing). */
+    real_t *evaporation;     /* [nod2D]  negative up (Fortran convention) */
+    real_t *ice_sublimation; /* [nod2D] */
 } fesom_forcing;
 
 void fesom_forcing_alloc(fesom_forcing *f, const struct fesom_mesh *mesh);

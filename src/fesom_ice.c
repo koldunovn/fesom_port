@@ -349,8 +349,9 @@ void fesom_ice_step(int                            step,
     if (!s_no_ice_thermo && forcing && jra && sr) {
         fesom_ice_thermodynamics(ice, partit, mesh, forcing, jra, sr);
         /* Phase C2/C3: oce_fluxes overwrites heat_flux/water_flux with the
-         * ice-mediated flx_h/flx_fw and computes virtual_salt + relax_salt. */
-        fesom_ice_oce_fluxes(ice, partit, mesh, tracers, forcing, sr);
+         * ice-mediated flx_h/flx_fw and computes virtual_salt + relax_salt
+         * (+ the zstar freshwater balancing, Z2 — needs jra for prec). */
+        fesom_ice_oce_fluxes(ice, partit, mesh, tracers, forcing, jra, sr);
     }
 
     /*

@@ -107,8 +107,13 @@ int fesom_timestep(int                          step_n,
         fesom_fer_gamma2vel        (dyn,           mesh, gm, p);
     }
 
-    /*  2. PGF (linfs + full cells)  */
-    fesom_pressure_force_linfs_fullcell(mesh, aux);
+    /*  2. PGF dispatch (oce_ale.F90:3651-3656): linfs → linfs_fullcell
+     *  (reads hpressure); zstar → zxxxx shchepetkin (Z6; self-contained on
+     *  density_m_rho0 + live Z_3d_n/helem — hpressure is not computed). */
+    if (ctx->ale_zstar)
+        fesom_pressure_force_zxxxx_shchepetkin(mesh, aux);
+    else
+        fesom_pressure_force_linfs_fullcell(mesh, aux);
     fesom_exchange_elem3D(aux->pgf_x, nl, p);
     fesom_exchange_elem3D(aux->pgf_y, nl, p);
     fesom_ale_dump_pgf(step_n, aux, mesh, p);
@@ -151,9 +156,16 @@ int fesom_timestep(int                          step_n,
     fesom_impl_vert_visc(mesh, aux, forcing, dyn);
     fesom_halo_exchange(dyn->uv_rhs, FESOM_HALO_ELEM3D, nl, 2, p);
 
-    /*  7. SSH RHS (linfs)  */
-    fesom_compute_ssh_rhs_linfs(mesh, dyn);
-    fesom_exchange_nod2D(dyn->ssh_rhs, p);   /* Fortran oce_ale.F90:1954 */
+    /*  6b. Z4 (zstar): cumulative stiffness update from the previous step's
+     *  dhe, BEFORE the SSH RHS (Fortran gate oce_ale.F90:3914:
+     *  `if (.not. trim(which_ale)=='linfs') call update_stiff_mat_ale`).
+     *  Step 1 from cold start: dhe=0 → no-op by construction. */
+    if (ctx->ale_zstar)
+        fesom_update_stiff_mat_ale(ctx->stiff, mesh);
+
+    /*  7. SSH RHS (linfs + Z3 zstar water-flux tail)  */
+    fesom_compute_ssh_rhs_linfs(mesh, dyn, forcing->water_flux);
+    fesom_exchange_nod2D(dyn->ssh_rhs, p);   /* Fortran oce_ale.F90:2145 */
 
     /*  8. CG SSH solve  */
     int cg_iters = fesom_ssh_solve_cg(ctx->stiff, ctx->solver, mesh, dyn);
@@ -168,9 +180,28 @@ int fesom_timestep(int                          step_n,
     fesom_halo_exchange(dyn->uv, FESOM_HALO_ELEM3D, nl, 2, p);
 
     /* 10. transport-divergence → ssh_rhs_old, then hbar update  */
-    fesom_compute_hbar(mesh, dyn);
-    fesom_exchange_nod2D(dyn->ssh_rhs_old, p);   /* Fortran oce_ale.F90:2078 */
-    fesom_exchange_nod2D(mesh->hbar,       p);   /* Fortran oce_ale.F90:2102 */
+    fesom_compute_hbar(mesh, dyn, forcing->water_flux);
+    fesom_exchange_nod2D(dyn->ssh_rhs_old, p);   /* Fortran oce_ale.F90:2269 (non-linfs)
+                                                    — kept always-on since v1.0 */
+    fesom_exchange_nod2D(mesh->hbar,       p);   /* Fortran oce_ale.F90:2293 */
+
+    /* dhe fill (oce_ale.F90:2298-2305) — the NEXT step's cumulative
+     * stiffness-matrix increment, mean(hbar − hbar_old) per element.
+     * UNCONDITIONAL in Fortran (runs under linfs too, simply unused there);
+     * mirrored here. Must run AFTER the hbar exchange — elem vertices reach
+     * halo nodes. (Z3) */
+    for (int e = 0; e < mesh->myDim_elem2D; ++e) {
+        if (mesh->ulevels[e] > 1) {                  /* cavity guard */
+            mesh->dhe[e] = 0.0;
+            continue;
+        }
+        int n0 = mesh->elem_nodes[3*e + 0];
+        int n1 = mesh->elem_nodes[3*e + 1];
+        int n2 = mesh->elem_nodes[3*e + 2];
+        mesh->dhe[e] = ((mesh->hbar[n0] - mesh->hbar_old[n0])
+                      + (mesh->hbar[n1] - mesh->hbar_old[n1])
+                      + (mesh->hbar[n2] - mesh->hbar_old[n2])) / 3.0;
+    }
 
     /* DEBUG (FESOM_DIAG_SSHSLV=<gid>): dump ssh_rhs / d_eta / hbar at one node,
        matching the Fortran [FSSH] format, to compare the implicit free-surface
@@ -267,9 +298,20 @@ int fesom_timestep(int                          step_n,
         fesom_ale_thickness_linfs(mesh);
 
     fesom_ale_vert_vel_linfs(mesh, dyn, gm ? 1 : 0);
-    fesom_exchange_nod3D(dyn->w, nl, p);     /* Fortran oce_ale.F90:2679 */
+    /* Z5 (zstar): distribute (hbar − hbar_old) over the stretched column +
+     * the surface water-flux BC, on top of the shared divergence Wvel
+     * (Fortran vert_vel_ale zstar branch, oce_ale.F90:2755-2827). */
+    if (ctx->ale_zstar)
+        fesom_ale_vert_vel_zstar_distribute(mesh, dyn, forcing->water_flux);
+    fesom_exchange_nod3D(dyn->w, nl, p);     /* Fortran oce_ale.F90:2870 */
+    if (ctx->ale_zstar) {
+        /* Fortran oce_ale.F90:2871 — exchange_nod(hnode_new); its halo feeds
+         * the zstar commit (myDim+eDim) at step 14. linfs keeps hnode_new
+         * halo in sync via the step-12 memcpy (v1.0 behavior, no exchange). */
+        fesom_exchange_nod3D(mesh->hnode_new, nl, p);
+    }
     if (gm) {
-        /* Mirror Fortran oce_ale.F90:2681 — exchange_nod(fer_Wvel). */
+        /* Mirror Fortran oce_ale.F90:2872 — exchange_nod(fer_Wvel). */
         fesom_exchange_nod3D(dyn->fer_w, nl, p);
     }
 

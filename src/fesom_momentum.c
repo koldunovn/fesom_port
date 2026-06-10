@@ -4,6 +4,7 @@
  * line-by-line; deferred branches are explicitly listed in fesom_momentum.h.
  */
 #include "fesom_momentum.h"
+#include "fesom_ale.h"
 #include "fesom_aux.h"
 #include "fesom_constants.h"
 #include "fesom_dyn.h"
@@ -777,7 +778,8 @@ void fesom_visc_filt_bidiff(const struct fesom_mesh *mesh,
  *===========================================================================*/
 
 void fesom_compute_hbar(const struct fesom_mesh *mesh,
-                        struct fesom_dyn        *dyn)
+                        struct fesom_dyn        *dyn,
+                        const real_t            *water_flux)
 {
     const int N  = mesh->myDim_nod2D;
     const int N_alloc = mesh->myDim_nod2D + mesh->eDim_nod2D;
@@ -829,8 +831,23 @@ void fesom_compute_hbar(const struct fesom_mesh *mesh,
         dyn->ssh_rhs_old[n2] -= (c1 + c2);
     }
 
-    /* hbar update (lines 2090-2102): linfs skips the water_flux term.
-     * Fortran oce_ale.F90:2092-2096 saves hbar_old over myDim+eDim_nod2D —
+    /* zstar water-flux term (oce_ale.F90:2262-2271), Z3: the freshwater
+     * volume flux enters the elevation equation. myDim only, cavity skip;
+     * the matching exchange_nod(ssh_rhs_old) — which Fortran emits ONLY in
+     * this non-linfs branch — is covered by the (always-on) exchange in
+     * fesom_step.c right after this returns. linfs: term skipped (v1.0). */
+    if (fesom_ale_zstar) {
+        for (int n = 0; n < N; ++n) {
+            int nzmin_f = mesh->ulevels_nod2D[n];      /* 1-based */
+            if (nzmin_f > 1) continue;                 /* cavity guard */
+            real_t wf = water_flux ? water_flux[n] : 0.0;
+            dyn->ssh_rhs_old[n] -= wf
+                * mesh->areasvol[FESOM_NODE3D(n, nzmin_f - 1, nl)];
+        }
+    }
+
+    /* hbar update (lines 2279-2292): linfs skips the water_flux term.
+     * Fortran oce_ale.F90:2282-2284 saves hbar_old over myDim+eDim_nod2D —
      * we must mirror that so halo hbar_old isn't stale across steps. */
     for (int n = 0; n < N_alloc; ++n) {
         mesh->hbar_old[n] = mesh->hbar[n];

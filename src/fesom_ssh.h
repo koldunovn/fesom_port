@@ -54,6 +54,16 @@ void fesom_ssh_stiff_alloc_and_build(fesom_ssh_stiff       *S,
                                      const struct fesom_mesh *mesh);
 void fesom_ssh_stiff_free(fesom_ssh_stiff *S);
 
+/*
+ * Z4 (zstar): per-step CUMULATIVE stiffness increment from mesh->dhe
+ * (update_stiff_mat_ale, oce_ale.F90:1892-2001). Called before the SSH RHS
+ * when which_ALE != linfs (gate at oce_ale.F90:3914). The Jacobi
+ * preconditioner is NOT refreshed — mirroring Fortran's first-solve-only
+ * build (oce_ale.F90:3306).
+ */
+void fesom_update_stiff_mat_ale(fesom_ssh_stiff         *S,
+                                const struct fesom_mesh *mesh);
+
 void fesom_solverinfo_alloc(fesom_solverinfo       *si,
                             const struct fesom_mesh *mesh);
 void fesom_solverinfo_free(fesom_solverinfo *si);
@@ -67,14 +77,17 @@ void fesom_ssh_preconditioner(fesom_ssh_stiff *S, const struct fesom_mesh *mesh,
                               struct fesom_partit *partit);
 
 /*
- * Build the SSH RHS into dyn->ssh_rhs (linfs branch). Mirror of
- * compute_ssh_rhs_ale (oce_ale.F90:1821-1956).
- *
- * For Phase 1: ssh_rhs(n) = -alpha * div_int((U+U_rhs)*helem) + (1-alpha)*ssh_rhs_old
- * (water_flux is zero in Phase 1 — surface forcing comes later.)
+ * Build the SSH RHS into dyn->ssh_rhs. Mirror of compute_ssh_rhs_ale
+ * (oce_ale.F90:2012-2147), both the linfs and (Z3) the zstar water-flux
+ * tails:
+ *   linfs: ssh_rhs = -α·div_int((U+U_rhs)·helem) + (1−α)·ssh_rhs_old
+ *   zstar: additionally  -α·water_flux·areasvol(nzmin)  per owned node.
+ * water_flux may be NULL (treated as zero — startup sanity call sites);
+ * the step passes forcing->water_flux.
  */
 void fesom_compute_ssh_rhs_linfs(const struct fesom_mesh *mesh,
-                                 struct fesom_dyn        *dyn);
+                                 struct fesom_dyn        *dyn,
+                                 const real_t            *water_flux);
 
 /*
  * Conjugate-gradient SSH solve. Mirror of ssh_solve_cg (solver.F90:98-281).

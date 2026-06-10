@@ -145,6 +145,78 @@ void fesom_ale_init_thickness_zstar(struct fesom_mesh   *mesh,
         fesom_exchange_elem3D(mesh->helem, nl, partit);
 }
 
+/* Phase Z5 — zstar branch of vert_vel_ale (oce_ale.F90:2755-2827): distribute
+ * the per-step SSH change (hbar − hbar_old) proportionally over the stretched
+ * part of the column, on top of the shared divergence-built Wvel:
+ *   dd1 = zbar_3d_n(nzmax,n), nzmax = nlevels_nod2D_min−1 (LIVE geometry)
+ *   dd  = (hbar−hbar_old)/(zbar_3d_n(1,n)−dd1);  dddt = dd/dt
+ *   nz = 1..nzmax−1:  Wvel −= (zbar_3d_n(nz,n)−dd1)·dddt   (the bottom→top
+ *        vertically-INTEGRATED Σ dh/dt — not per-layer h·dd/dt)
+ *                     hnode_new = hnode + (zbar_3d_n(nz)−zbar_3d_n(nz+1))·dd
+ *   Wvel(1,n) −= water_flux(n)   (real volume flux as surface BC)
+ * Loop over OWNED nodes only; the caller exchanges Wvel AND hnode_new
+ * (:2870-2871) — hnode_new's halo feeds the Z1 commit (write-loops-halo).
+ * Cavity columns (nzmin>1) are left untouched (treated like linfs).
+ * The negative-hnode_new check (:2830-2868, myDim+eDim) is ported as a
+ * non-fatal warning, matching the Fortran write-and-continue behavior. */
+void fesom_ale_vert_vel_zstar_distribute(const struct fesom_mesh *mesh,
+                                         struct fesom_dyn        *dyn,
+                                         const real_t            *water_flux)
+{
+    const int    nl = mesh->nl;
+    const real_t dt = (real_t)FESOM_PHASE1_DT;
+
+    for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+        int nzmin_f = mesh->ulevels_nod2D[n];            /* 1-based */
+        int nzmax_f = mesh->nlevels_nod2D_min[n] - 1;    /* 1-based */
+        if (nzmin_f != 1) continue;                      /* cavity → linfs-like */
+
+        real_t dd1 = mesh->zbar_3d_n[FESOM_NODE3D(n, nzmax_f - 1, nl)];
+        real_t dd  = mesh->zbar_3d_n[FESOM_NODE3D(n, 0, nl)] - dd1;
+        dd   = (mesh->hbar[n] - mesh->hbar_old[n]) / dd;
+        real_t dddt = dd / dt;
+
+        for (int nzf = nzmin_f; nzf <= nzmax_f - 1; ++nzf) {
+            int    nz = nzf - 1;                         /* 0-based layer */
+            size_t k  = FESOM_NODE3D(n, nz,     nl);
+            size_t k1 = FESOM_NODE3D(n, nz + 1, nl);
+            dyn->w[k]          -= (mesh->zbar_3d_n[k] - dd1) * dddt;
+            mesh->hnode_new[k]  = mesh->hnode[k]
+                                + (mesh->zbar_3d_n[k] - mesh->zbar_3d_n[k1]) * dd;
+        }
+
+        /* surface freshwater flux as the upper continuity BC (:2809) */
+        dyn->w[FESOM_NODE3D(n, nzmin_f - 1, nl)] -=
+            water_flux ? water_flux[n] : 0.0;
+
+        /* NaN check (:2812-2817) — warn and continue like Fortran */
+        for (int nzf = nzmin_f; nzf <= nzmax_f; ++nzf) {
+            real_t wv = dyn->w[FESOM_NODE3D(n, nzf - 1, nl)];
+            if (wv != wv) {
+                fprintf(stderr, "vert_vel_ale zstar: NaN in Wvel at local node "
+                                "%d level %d\n", n, nzf);
+                break;
+            }
+        }
+    }
+
+    /* negative-hnode_new check (:2830-2868), myDim+eDim, non-fatal */
+    int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    for (int n = 0; n < N; ++n) {
+        int nzmax_f = mesh->nlevels_nod2D[n] - 1;
+        for (int nzf = 1; nzf <= nzmax_f; ++nzf) {
+            real_t h = mesh->hnode_new[FESOM_NODE3D(n, nzf - 1, nl)];
+            if (h < 0.0) {
+                fprintf(stderr, "vert_vel_ale zstar: hnode_new < 0 (%.6e) at "
+                                "local node %d layer %d (hbar=%.6e hbar_old=%.6e)\n",
+                        (double)h, n, nzf,
+                        (double)mesh->hbar[n], (double)mesh->hbar_old[n]);
+                break;
+            }
+        }
+    }
+}
+
 void fesom_ale_update_thickness_zstar(struct fesom_mesh   *mesh,
                                       struct fesom_partit *partit)
 {

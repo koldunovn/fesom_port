@@ -94,6 +94,19 @@ void fesom_ale_update_thickness_zstar(struct fesom_mesh   *mesh,
                                       struct fesom_partit *partit);
 
 /*
+ * Phase Z5 — zstar branch of vert_vel_ale (oce_ale.F90:2755-2827): on top of
+ * the shared divergence Wvel (fesom_ale_vert_vel_linfs), distribute
+ * (hbar − hbar_old) over the stretched column: the vertically-integrated Wvel
+ * correction −(zbar_3d_n(nz)−dd1)·(dd/dt) and hnode_new = hnode + Δz·dd for
+ * nz = 1..nlevels_nod2D_min−2 (owned nodes), plus the surface water-flux BC
+ * Wvel(1) −= water_flux. Caller must exchange Wvel AND hnode_new after
+ * (oce_ale.F90:2870-2871). water_flux NULL → zero flux.
+ */
+void fesom_ale_vert_vel_zstar_distribute(const struct fesom_mesh *mesh,
+                                         struct fesom_dyn        *dyn,
+                                         const real_t            *water_flux);
+
+/*
  * Vertical CFL (compute_CFLz, oce_ale.F90:2935-3022):
  *   CFL_z[nz, n] gets contributions from W at the two interfaces above and
  *   below layer nz, scaled by the appropriate layer thickness.

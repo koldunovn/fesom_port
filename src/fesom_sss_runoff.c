@@ -4,6 +4,7 @@
  */
 #include "fesom_sss_runoff.h"
 
+#include "fesom_ale.h"
 #include "fesom_constants.h"
 #include "fesom_forcing.h"
 #include "fesom_mesh.h"
@@ -305,9 +306,10 @@ void fesom_sss_runoff_init(fesom_sss_runoff       *sr,
     sr->surf_relax_S  = 10.0 / (60.0 * 3600.0 * 24.0);   /* surf_relax_S = 1.929e-6 */
     sr->ref_sss       = 34.0;
     sr->ref_sss_local = 1;
-    /* use_virt_salt set by which_ALE in Fortran oce_setup_step.F90:115-125;
-     * for linfs (our case) this is .true. */
-    sr->use_virt_salt = 1;
+    /* use_virt_salt set by which_ALE in Fortran oce_setup_step.F90:115-125:
+     * linfs → .true., zstar → .false. Derived once by fesom_ale_mode_init
+     * (called at the top of main, before this init). Z2: was hardcoded 1. */
+    sr->use_virt_salt = fesom_use_virt_salt;
 
     if (sss_path && sss_path[0]) {
         strncpy(sr->sss_path, sss_path, sizeof(sr->sss_path) - 1);

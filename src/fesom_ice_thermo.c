@@ -421,7 +421,7 @@ void fesom_therm_ice(const fesom_ice_thermo *th,
 void fesom_ice_thermodynamics(fesom_ice                     *ice,
                               struct fesom_partit           *partit,
                               struct fesom_mesh             *mesh,
-                              const struct fesom_forcing    *forcing,
+                              struct fesom_forcing          *forcing,
                               const struct fesom_jra55      *jra,
                               const struct fesom_sss_runoff *sr)
 {
@@ -512,14 +512,24 @@ void fesom_ice_thermodynamics(fesom_ice                     *ice,
         ice->thermo.thdgrsn[n]  = ithdgrsn;
         ice->thermo.thdgra [n]  = ithdgra;
 
-        /* Diagnostics intentionally not stored in this Phase — we have no
-         * arrays for evap/ice_sublimation/real_salt_flux/fw_ice/fw_snw/hf_Q*
-         * yet. They land when oce_fluxes (Phase C) wires them up. */
-        (void)evap; (void)rsf; (void)iflice;
+        /* Per-node flux stores consumed downstream (Z2):
+         *   real_salt_flux — ice_thermo_oce.F90:352, assigned UNCONDITIONALLY
+         *     (the value itself is use_virt_salt-branched inside therm_ice:
+         *     0 under linfs, fwice·Sice − iflice·ρice/ρwat·Sice under zstar).
+         *     Replaces virtual_salt in the S surface BC when zstar.
+         *   evaporation / ice_sublimation — :324-325 (evap = open-water evap
+         *     + subli per therm_ice :651); feed the oce_fluxes freshwater
+         *     balancing assembly (zstar). Dead stores under linfs. */
+        forcing->real_salt_flux [n] = rsf;
+        forcing->evaporation    [n] = evap;
+        forcing->ice_sublimation[n] = subli;
+
+        /* Remaining diagnostics (fw_ice/fw_snw/hf_Q*) still unstored —
+         * no arrays yet; they land if a consumer ever needs them. */
+        (void)iflice;
         (void)fwice; (void)fwsnw;
         (void)hflatow; (void)hfsenow; (void)hflwrdout;
         (void)hfswrow; (void)hflwrow; (void)hfradow;
-        (void)subli;
     }
 
     (void)nl;  /* unused for now; reserved if surface-level extraction is moved here */
