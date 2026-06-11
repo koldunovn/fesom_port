@@ -1,0 +1,39 @@
+#!/bin/bash
+#SBATCH --job-name=mevp_base
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/mevp/baseline_2714071/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/mevp/baseline_2714071/slurm.%j.err
+#
+# mEVP-port M0 byte-gate BASELINE CAPTURE at main==2714071 (HEAD a74aacf is
+# docs-only on top). Pinned gate config: 16 ranks dist_16, 200 steps, dt=500,
+# snapshots every 25, all knobs unset (the Z0/T0 recipe). Every later M-phase
+# byte-gate re-runs this exact config and byte-compares against this capture.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+BIN=/home/a/a270088/port2/fesom2_port_zstar/frozen_mevp_baseline/fesom_port_head2714071
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+OUT=/work/ab0995/a270088/port/mevp/baseline_2714071
+mkdir -p "$OUT"
+
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+unset FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_TKE_DUMP_STEPS
+unset FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR FESOM_EVP_DUMP_DIR
+unset FESOM_IO_CONFIG
+
+echo "=== baseline capture: binary=$BIN ==="
+md5sum "$BIN"
+srun -l "$BIN" "$MESH" "$OUT" 500 200 25 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+ls -la "$OUT" | head -30
+md5sum "$OUT"/*.nc "$OUT/run.log" 2>/dev/null | tee "$OUT/MD5SUMS"
