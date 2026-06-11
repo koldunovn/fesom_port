@@ -17,6 +17,7 @@ Reference provenance: `docs/tke_reference_namelists/PROVENANCE.md` (Fortran
 | Cross-rank at PHC-noise scale, halo probe clean | ✓ day-5 ≤ IC spread; 3200/3200 zero |
 | 30-day dt=1800 stability | ✓ clean, max uv 1.64 |
 | Combined zstar+TKE 2yr (run matrix) | ✓ RMS 0.0037/0.0015 → 0.0078/0.0041 |
+| 5yr zstar+TKE stability (run matrix) | ✓ clean, peak uv 2.93 (margin 2.07) |
 
 ## T0 — scaffolding gates
 
@@ -138,7 +139,10 @@ verified, 730 days) vs C `FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE` 2yr 864r
 Headline at/below the per-feature legs; the contrast vs F-linfs+TKE is 2–5×
 larger → the comparison resolves the coordinate with TKE active. **The 2yr
 matrix is closed: zstar+KPP ✓ (Z9), linfs+TKE ✓ (T5), zstar+TKE ✓.**
-5yr zstar+TKE stability: <fill from job 25504001>
+5yr zstar+TKE stability (job 25504001): **PASS** — full 87600 steps
+(1958-1962), exit 0, zero blowup/uv>5/NaN; peak max|uv| over the run **2.93**
+(autumn transient) → margin 2.07 to the uv>5 trip, far inside the linfs+KPP
+lore (peak 4.65, margin 0.35). The approved run matrix is FULLY closed.
 
 ## T5 — 2yr climate vs work_linfs_tke — **PASS**
 
