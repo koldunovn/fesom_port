@@ -79,14 +79,32 @@ per step → output diff = pure algebra; bar ≤1e-12):**
   written ONLY when an `FESOM_IO_CONFIG` entry names them; default streams
   untouched.
 - Diag-flag invariance gate (FESOM_TKE_DIAG=0 vs 1, 16r/200/dt=500 snapshot
-  byte-compare): <fill from job_tke_t3_diaggate>
-- Halo probe (exchange-and-compare on aux->Kv): <fill from diaggate run A>
+  byte-compare, job 25503533): **BYTE-IDENTICAL across all snapshots. PASS.**
+- Halo probe (exchange-and-compare on aux->Kv, run A, FESOM_TKE_HALO_PROBE=1):
+  **3200/3200 probe lines report worst |d| = 0.000e+00** (200 steps × 16
+  ranks) — no stale halo anywhere in the TKE wiring.
 
 ## T4 — cross-rank + stability
 
 - 1/8/16r 5-day final-snapshot spread: <fill from job_tke_t4_crossrank>
 - 30-day 16r dt=1800: <fill>
 
-## T5 — 2yr climate vs work_linfs_tke
+## T5 — 2yr climate vs work_linfs_tke — **PASS**
 
-- <fill from scripts/tke_climate_compare.py>
+C linfs+TKE 2yr dt=1800 864r (job 25503535, exit 0, 35040 steps, max uv 1.67)
+vs Fortran `fortran_linfs_tke` (25500644). Full table:
+`climate_compare_output.txt`. Area-weighted annual means:
+
+| year | dSST bias | dSST RMS | dSSS bias | dSSS RMS |
+|---|---|---|---|---|
+| 1958 | −0.0003 | **0.0049** | −0.0001 | **0.0028** |
+| 1959 | +0.0001 | **0.0088** | −0.0004 | **0.0040** |
+
+- At the KPP-class bar (~0.005/0.002; zstar Z9 was 0.0038/0.0014 →
+  0.0050/0.0021). Biases ≈0 both years → no drift; only the chaotic-noise
+  RMS grows year-to-year (the accepted signature).
+- **Scheme contrast resolves the scheme decisively:** C-TKE vs F-KPP global
+  SST RMS 0.088/0.093 (1958/1959) = **18×/11× the headline**; N-high SSS
+  contrast 0.246/0.200 vs headline 0.0017/0.0013 (>100×). (The Fortran's own
+  TKE-vs-KPP signal is SST RMS 0.115 — the C-vs-F headline sits 20× below
+  the physics signal it must not confuse.)

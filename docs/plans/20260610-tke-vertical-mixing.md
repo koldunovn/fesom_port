@@ -227,26 +227,26 @@ copy), module-level `tke_Av_old/tke_Kv_old/tke_old` 1D allocatables (shadowed de
 
 ### Phase T0: Scaffolding — dispatch, state struct, dump harness, reference runs (NO behavior change)
 **Files:** Create `src/fesom_tke.{c,h}`, `scripts/tke_dump_diff.py`, `jobs/job_tke_*`; Modify `src/fesom_step.c`, `src/fesom_main.c`, `CMakeLists.txt`; Fortran `gen_modules_cvmix_tke.F90` (dump gate, uncommitted)
-- [ ] `struct fesom_tke` (tke/tke_Av/tke_Kv slabs + 2D forc arrays + nullable diag pointers +
+- [x] `struct fesom_tke` (tke/tke_Av/tke_Kv slabs + 2D forc arrays + nullable diag pointers +
       param struct), threaded via step ctx like `fesom_kpp`; `FESOM_MIX_SCHEME=TKE` third
       branch (abort stub), `FESOM_TKE_DIAG` parse.
-- [ ] **Launch the Fortran reference runs NOW** (queue time): (a) `work_tke_dump` 16r dt=1800
+- [x] **Launch the Fortran reference runs NOW** (queue time): (a) `work_tke_dump` 16r dt=1800
       3 steps with the dump gate; (b) `work_linfs_tke` 2yr dt=1800 (copy work_linfs_2yr; flip
       `mix_scheme='cvmix_TKE'`; copy namelist.cvmix in). Same Intel binary (CVMIX=ON ✓).
       Unique OUT_DIRs. Archive namelists → `docs/tke_reference_namelists/` + PROVENANCE.md.
-- [ ] **Provenance hardening (plan-review finding 6):** grep both reference run logs for the
+- [x] **Provenance hardening (plan-review finding 6):** grep both reference run logs for the
       `init_cvmix_tke` echo (`tke_cd = 3.75`, `tke_only = T`, gen:228-241) — proves the
       namelist was consumed (else silent cd=1.0 fallback) AND `__cvmix` is compiled in (else
       nmb=5 silently computes NO mixing — a plausible-looking broken reference).
-- [ ] Add `FESOM_TKE_DUMP_DIR` C writer skeleton + Fortran dump gate + `scripts/tke_dump_diff.py`.
-- [ ] **Validate:** TKE off → byte-identical to baseline HEAD (16r/200/dt=500). Fortran TKE
+- [x] Add `FESOM_TKE_DUMP_DIR` C writer skeleton + Fortran dump gate + `scripts/tke_dump_diff.py`.
+- [x] **Validate:** TKE off → byte-identical to baseline HEAD (16r/200/dt=500). Fortran TKE
       dump run sane (tke fields finite, Kv profiles plausible, echo block confirmed).
 
 ### Phase T1: `integrate_tke` — the column core (literal port)
 **Files:** Create `src/fesom_cvmix_tke.{c,h}`; `scripts/tke_column_reference.py` (optional independent check)
-- [ ] Port `init_tke` as struct initialization (all params incl. cd=3.75 namelist value).
+- [x] Port `init_tke` as struct initialization (all params incl. cd=3.75 namelist value).
       `handle_old_vals` is NOT ported (dead — see "Dropped as dead").
-- [ ] Port `integrate_tke` (:415-987) literally: mixing length (mxl_choice=2: sqrt(2e)/N
+- [x] Port `integrate_tke` (:415-987) literally: mixing length (mxl_choice=2: sqrt(2e)/N
       bound with alpha=30, mxl_min floor, wall-bounded growth), Pr(Ri), production terms,
       dissipation, the implicit tridiagonal TKE solve (tke_old :668), floors
       (tke_min/tke_surf_min), **Neumann** surface BC with cd (:791-796), kappaM clamps,
@@ -258,23 +258,23 @@ copy), module-level `tke_Av_old/tke_Kv_old/tke_old` 1D allocatables (shadowed de
       (`#if`+abort); IDEMIX/Langmuir inputs as zero columns — `E_iw`/`alpha_c`/`tke_plc` are
       branch-gated (verified), `iw_diss` is a REAL zero array (read unconditionally at :898
       into tke_Tiwf).
-- [ ] **Validate:** offline column harness: feed BOTH codes identical synthetic columns
+- [x] **Validate:** offline column harness: feed BOTH codes identical synthetic columns
       (stable/unstable/sheared/shallow/deep, incl. nlev edge cases) via the dump/replay gates;
       C-vs-Fortran outputs (tke_new, KappaM, KappaH + all 10 budget terms) ≤1e-12 (KPP K1/K2
       precedent). Byte-gate: TKE still not callable live — baseline unchanged.
 
 ### Phase T2: `calc_cvmix_tke` driver — column assembly + Av/Kv wiring
 **Files:** Modify `src/fesom_tke.{c,h}`, `src/fesom_step.c`
-- [ ] Port the per-node loop **over owned nodes only** (invariant 2): normstress, vshear2
+- [x] Port the per-node loop **over owned nodes only** (invariant 2): normstress, vshear2
       (UVnode/Z_3d_n), bvfreq2, dz_trr, per-column `tke_old` copy (local), the cvmix call with
       exact slicing (nun:nln+1, nlev), post-call zeroing (invariant 5), forc arrays zeroed
       each call. Confirm timerelax_tke/relne/relax never reach the cvmix call — gate-only note.
-- [ ] Wire outputs: `exchange_nod(tke_Kv)` → `aux->Kv` full copy; `exchange_nod(tke_Av)` →
+- [x] Wire outputs: `exchange_nod(tke_Kv)` → `aux->Kv` full copy; `exchange_nod(tke_Av)` →
       node→elem mean over interior levels into `aux->Av` (**owned elements only**; halo Av
       comes from the shared post-`mo_convect` exchange at fesom_step.c:266 — no new exchange);
       `mo_convect` after (dispatch slot).
-- [ ] Remove the T0 abort stub → TKE is LIVE.
-- [ ] **Validate (dump-diff step 1, 16r dt=1800 vs `work_tke_dump`):** inputs first
+- [x] Remove the T0 abort stub → TKE is LIVE.
+- [x] **Validate (dump-diff step 1, 16r dt=1800 vs `work_tke_dump`):** inputs first
       (normstress/vshear2/bvfreq2/dz_trr — expect bit-identical or PHC-floor), then outputs
       (tke/Av/Kv + budget terms) — 0 unexplained, input-cross-check for floor/clamp flips;
       controlled replay if amplified. Steps 2–3 dumps exercise shear production. Byte-gates:
@@ -282,10 +282,10 @@ copy), module-level `tke_Av_old/tke_Kv_old/tke_old` 1D allocatables (shadowed de
 
 ### Phase T3: Diagnostics storage + IO
 **Files:** Modify `src/fesom_tke.c`, `src/fesom_io_stream_dispatch.c` (+ io config)
-- [ ] FESOM_TKE_DIAG=1: allocate the 13 arrays, end-of-column copy-out; register `tke` +
+- [x] FESOM_TKE_DIAG=1: allocate the 13 arrays, end-of-column copy-out; register `tke` +
       budget fields in the stream catalog (selectable via FESOM_IO_CONFIG; default streams
       unchanged).
-- [ ] **Validate:** diag-on vs diag-off runs byte-identical in ALL model state (snapshots);
+- [x] **Validate:** diag-on vs diag-off runs byte-identical in ALL model state (snapshots);
       diag outputs finite + budget closes (`tke_Ttot ≈ Σ terms` — the scheme's own
       consistency); memory delta measured and recorded (the point of the flag).
 
@@ -298,11 +298,11 @@ copy), module-level `tke_Av_old/tke_Kv_old/tke_old` 1D allocatables (shadowed de
 
 ### Phase T5: 2yr climate validation vs work_linfs_tke
 **Files:** `scripts/tke_climate_compare.py`, `jobs/job_tke_2yr`
-- [ ] Run C linfs+TKE 2yr dt=1800 864r (unique OUT_DIR).
-- [ ] Compare vs Fortran `work_linfs_tke`: SST/SSS RMS + bias maps + seasonal cycle + MLD.
+- [x] Run C linfs+TKE 2yr dt=1800 864r (unique OUT_DIR).
+- [x] Compare vs Fortran `work_linfs_tke`: SST/SSS RMS + bias maps + seasonal cycle + MLD.
       Bar: KPP-class (RMS ~0.005/0.002, biases ~0, non-drifting).
-- [ ] Scheme contrast: C+TKE vs Fortran-KPP ≫ C+TKE vs Fortran-TKE (resolves schemes).
-- [ ] **Validate:** acceptance numbers in `docs/validation_tke_2yr/`.
+- [x] Scheme contrast: C+TKE vs Fortran-KPP ≫ C+TKE vs Fortran-TKE (resolves schemes).
+- [x] **Validate:** acceptance numbers in `docs/validation_tke_2yr/`.
 
 ### Phase T6: Acceptance + handoff
 - [ ] Overview requirements met: TKE selectable; KPP/PP byte-identical when off; column core

@@ -1,58 +1,52 @@
-# Next-session prompt — start the TKE port (Phase T0)
+# Next-session prompt — run-matrix close-out (zstar+TKE combined legs)
 
 Copy the block below as the next session's opening prompt.
-(The previous prompt's task — zstar Z7/Z8/Z9 verdicts → Z10 — was COMPLETED 2026-06-11:
-**the zstar port is DONE, Z0–Z10**, tag `zstar-validated-2026-06-10`, plan moved to
-`docs/plans/completed/`. User kept **linfs as the default**; `FESOM_ALE=zstar` opts in.)
+(The previous prompt's task — the CVMix classical-TKE port, T0–T6 of
+`docs/plans/20260610-tke-vertical-mixing.md` — was COMPLETED 2026-06-11:
+**the TKE port is DONE**; see `docs/validation_tke_2yr/RESULTS.md` and
+auto-memory `project_tke_port_state`. KPP stays the default;
+`FESOM_MIX_SCHEME=TKE` opts in.)
 
 ---
 
 > Continue the FESOM2→C port in the worktree **`/home/a/a270088/port2/fesom2_port_zstar`**
-> (branch `zstar`; the main `fesom2_port/` checkout still holds jax-mesh-export WIP — don't
-> disturb it). **This session: start the CVMix classical-TKE port — Phase T0 of
-> `docs/plans/20260610-tke-vertical-mixing.md`** (plan-reviewed 2026-06-10; the second of
-> the two approved plans, zstar-first order ✓ done).
+> (branch `zstar`). **This session: close the approved run matrix** (2026-06-10
+> decisions, shared by the zstar and TKE plans — both features are now
+> individually validated; the COMBINED zstar+TKE legs remain):
 >
-> 1. **Read the plan first**, then auto-memories `project_zstar_tke_plans` (approved
->    decisions: two C files mirroring Fortran — `fesom_cvmix_tke.c` = cvmix_tke.F90 column
->    core, `fesom_tke.c` = gen_modules_cvmix_tke.F90 driver; `FESOM_MIX_SCHEME=TKE` third
->    option, KPP stays default; diagnostics computed per-column but stored only under
->    `FESOM_TKE_DIAG=1`; `tke_cd=3.75` from namelist.cvmix NOT the 1.0 module default;
->    `handle_old_vals`/old_KappaM/H are DEAD; driver loops OWNED-ONLY; `iw_diss` read
->    unconditionally → pass a real zero column) and `project_zstar_port_state`.
-> 2. **T0 first moves:** `struct fesom_tke` + `FESOM_MIX_SCHEME=TKE` abort-stub dispatch +
->    `FESOM_TKE_DIAG` parse; **launch the Fortran reference runs immediately** (queue
->    time): `work_tke_dump` (16r, dt=1800, 3 steps, dump gate) and `work_linfs_tke`
->    (2yr; copy work_linfs_2yr, flip `mix_scheme='cvmix_TKE'`, copy namelist.cvmix in;
->    same Intel binary — CVMIX=ON already). Unique OUT_DIRs, purge-safe /work, archive
->    namelists + PROVENANCE (the zstar Z0 pattern; consider a frozen binary copy like
->    `frozen_zstar_refs/`).
-> 3. **Provenance hardening (plan finding 6):** grep BOTH reference logs for the
->    `init_cvmix_tke` echo (`tke_cd = 3.75`, `tke_only = T`) — proves the namelist was
->    consumed AND `__cvmix` is compiled (else a plausible-looking broken reference).
-> 4. **Gate:** TKE off → byte-identical to the current HEAD (16r/200/dt=500;
->    `jobs/job_zstar_z0_byteident` is the recipe — point run A at a HEAD-built binary).
+> 1. Check the Fortran combined reference `work_zstar_tke` (job 25503765,
+>    two knobs: which_ALE='zstar' + mix_scheme='cvmix_TKE', frozen binary,
+>    output `/work/ab0995/a270088/port/tke/fortran_zstar_tke/`) — if it was
+>    still queued/running at session end, verify exit 0 + the init_cvmix_tke
+>    echo (cd=3.75) + 730 days.
+> 2. Submit `jobs/job_tke_m1_zstar_tke_2yr` (C zstar+TKE 2yr 864r) and
+>    compare vs the Fortran combined reference (adapt
+>    `scripts/tke_climate_compare.py` paths; bar: the same KPP-class RMS).
+> 3. Submit `jobs/job_tke_m2_zstar_tke_5yr` (5yr stability; re-measure the
+>    autumn uv-transient margin — linfs lore: peak 4.65, margin 0.35).
+> 4. Record results in `docs/validation_tke_2yr/RESULTS.md` (matrix section)
+>    + auto-memory; the matrix is then CLOSED:
+>    zstar+KPP ✓ (Z9), linfs+TKE ✓ (T5), zstar+TKE ✓ (this session).
 >
-> GUIDING PRINCIPLE unchanged: strict faithful port; namelist values over module defaults;
-> port what the reference exercises (Langmuir/IDEMIX/Dirichlet gate-only); every phase ends
-> with its Validate gate.
+> OPEN DECISIONS for the user (don't decide unilaterally): merging branch
+> `zstar` (zstar + TKE, both validated, both opt-in) into main; whether TKE
+> or zstar ever become defaults; IDEMIX port (gate-only seams staged).
 
 ---
 
 ## Quick reference
 
-- **zstar (DONE):** tag `zstar-validated-2026-06-10`; results
-  `docs/validation_zstar_2yr/RESULTS.md`; references under
-  `/work/ab0995/a270088/port/zstar/` (fortran_zstar_2yr, fortran_linfs_2yr_b, fdump/dump);
-  switch `FESOM_ALE=linfs|zstar` (default linfs). One leftover formality: the
-  linfs-baseline cross-rank job 25499700 (`z7_xrank_linfs/`) — paste its day-5 spread
-  next to the zstar one in RESULTS.md if it looks as expected (same IC-noise scale).
-- **Run matrix remainder (approved):** after TKE validates per-feature →
-  Fortran `work_zstar_tke` 2yr (both knobs) + C zstar+TKE 2yr compare + 5yr C
-  zstar+TKE stability (re-measure the autumn uv margin; linfs was 0.35).
+- **TKE (DONE 2026-06-11):** commit `45afc01`+, tag `tke-validated-2026-06-11`;
+  results `docs/validation_tke_2yr/RESULTS.md`; references under
+  `/work/ab0995/a270088/port/tke/` (fortran_linfs_tke, fdump/dump, replay);
+  switch `FESOM_MIX_SCHEME=KPP(default)|PP|TKE`; `FESOM_TKE_DIAG=1` stores
+  the 13 budget slabs; `FESOM_TKE_DUMP_DIR`/`FESOM_TKE_REPLAY_DIR`/
+  `FESOM_TKE_HALO_PROBE` for diagnostics.
+- **zstar (DONE 2026-06-10):** tag `zstar-validated-2026-06-10`;
+  `FESOM_ALE=linfs(default)|zstar`.
 - Build C: `source /sw/etc/profile.levante && source env.sh && make -C build fesom_port`
-  (worktree). Fortran: `make -C build fesom.x -j8 && make -C build install` (install
-  mandatory). Python: `/work/ab0995/a270088/mambaforge/envs/nereus/bin/python`.
-- Byte/dump tooling to clone: `jobs/job_zstar_z0_byteident`, `scripts/ale_dump_diff.py`
-  → `scripts/tke_dump_diff.py`; Fortran dump-gate pattern = `ale_dump_mod` (uncommitted,
-  top of `fesom2/src/oce_ale.F90`) / the KPP gates in `oce_ale_mixing_kpp.F90`.
+  (worktree). Fortran: `make -C build fesom.x -j8 && make -C build install`.
+  Python: `/work/ab0995/a270088/mambaforge/envs/nereus/bin/python`.
+- Lessons learned this port: `-r8` makes ALL default-real Fortran literals
+  double (`feedback_r8_literals_double`); job outputs self-clean inside the
+  job scripts — never manual `rm` against submitted jobs' dirs.

@@ -1,0 +1,36 @@
+====================================================================================
+YEAR 1958   dSST/dSSS (C-TKE − Fortran), area-weighted
+   TKE = C-TKE vs F-TKE (headline) | KPP = C-TKE vs F-KPP (scheme contrast)
+====================================================================================
+  dSST [degC]  region              TKE bias  TKE rms |  KPP bias  KPP rms
+               GLOBAL               -0.0003   0.0049 |   +0.0500   0.0882
+               Tropics |lat|<23     -0.0001   0.0055 |   +0.0660   0.1048
+               Midlat 40-60         -0.0006   0.0057 |   +0.0305   0.0819
+               N high >60           -0.0002   0.0021 |   +0.0316   0.0853
+               S high <-60          +0.0003   0.0033 |   +0.0267   0.0555
+
+  dSSS [PSU]  region              TKE bias  TKE rms |  KPP bias  KPP rms
+               GLOBAL               -0.0001   0.0028 |   -0.0261   0.0782
+               Tropics |lat|<23     +0.0001   0.0032 |   -0.0325   0.0568
+               Midlat 40-60         -0.0004   0.0023 |   -0.0086   0.0871
+               N high >60           +0.0001   0.0017 |   -0.1531   0.2458
+               S high <-60          -0.0035   0.0041 |   -0.0130   0.0304
+
+====================================================================================
+YEAR 1959   dSST/dSSS (C-TKE − Fortran), area-weighted
+   TKE = C-TKE vs F-TKE (headline) | KPP = C-TKE vs F-KPP (scheme contrast)
+====================================================================================
+  dSST [degC]  region              TKE bias  TKE rms |  KPP bias  KPP rms
+               GLOBAL               +0.0001   0.0088 |   +0.0421   0.0933
+               Tropics |lat|<23     +0.0010   0.0117 |   +0.0630   0.1151
+               Midlat 40-60         -0.0009   0.0079 |   +0.0244   0.0857
+               N high >60           -0.0001   0.0027 |   +0.0068   0.0838
+               S high <-60          -0.0008   0.0072 |   +0.0366   0.0997
+
+  dSSS [PSU]  region              TKE bias  TKE rms |  KPP bias  KPP rms
+               GLOBAL               -0.0004   0.0040 |   -0.0255   0.0745
+               Tropics |lat|<23     -0.0003   0.0057 |   -0.0309   0.0622
+               Midlat 40-60         -0.0006   0.0025 |   -0.0076   0.0874
+               N high >60           -0.0003   0.0013 |   -0.1292   0.2003
+               S high <-60          -0.0020   0.0027 |   -0.0081   0.0429
+
