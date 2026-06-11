@@ -16,13 +16,19 @@ a74aacf → d4ac9c5 + this close-out).
 
 ## Notable findings logged during validation
 
-1. **C IO vector-frame convention** (M5 Gate 3): C streams write u/v-type
+1. **C IO vector-frame convention** (M5 Gate 3): C streams wrote u/v-type
    vectors in the native ROTATED frame; Fortran io_meandata rotates to
    geographic (`do_rotation`). Model physics unaffected (M3 at 1e-14).
-   Decision deferred to the user: rotate at C output (breaks byte-gate
-   lineage → own re-baseline) vs keep + document. Analyses must rotate
-   meanwhile (`scripts/mevp_climate_compare.py` Gate 3 has the ported
-   `vector_r2g`).
+   **RESOLVED 2026-06-11 (user decision): commit 75406d3 makes the C stream
+   writer rotate vector pairs to geographic BY DEFAULT
+   (`FESOM_IO_VECTOR_FRAME=geo|rotated`). Gated (job 25524763): opt-out
+   bit-identical to the old outputs; snapshots native in both modes (the
+   snap-based byte-gate lineage survives); in-model rotation == offline r2g
+   at 7e-15. 2yr legs + 5yr rerun at 75406d3: Gates 1/2/4 digit-identical,
+   Gate 3 re-verified by direct comparison. Side lesson:
+   auxiliary code must not enter physics TUs (`feedback_tu_codegen_bitgate`
+   — a function added to fesom_mesh.c shifted -O3/-ffp-contract codegen →
+   last-ULP pgf at step 0 → bitwise gates broke via chaos).**
 2. **mEVP damps the autumn ocean-velocity transient**: 5yr peak |uv| 2.56
    (mEVP) vs 4.65 (std-EVP baseline) — the >5yr watch-item from
    `project_5yr_milestone` is much more comfortable under mEVP.

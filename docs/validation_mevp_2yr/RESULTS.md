@@ -64,11 +64,16 @@ No systematic rotation: the port's drag/Coriolis/stress algebra is
 angle-faithful. (Residual vecRMS/spdRMS ≈ 0.10–0.15 is the same year-2
 two-run chaotic divergence as Gate 1, angle-unstructured.)
 
-**Open decision (user):** make the C IO rotate vector pairs r2g at output
-(matching Fortran convention + standard analysis expectations)? Touching it
-changes every C vector output ⇒ breaks byte-gate lineage; needs its own
-re-baseline. Until then: C vector outputs are rotated-frame; analyses must
-rotate (the compare script does).
+**RESOLVED (user decision, 2026-06-11, commit 75406d3):** the C IO now
+rotates vector pairs to GEOGRAPHIC components at output by default
+(`FESOM_IO_VECTOR_FRAME=geo`; `rotated` opts out bit-exactly — gate job
+25524763 proved the opt-out BIT-IDENTICAL to the old behaviour, snapshots
+unchanged in both modes, and the in-model rotation equal to the offline
+r2g at 7e-15). The 2yr legs were RERUN at 75406d3 (jobs 25525049/25525050):
+Gates 1/2/4 reproduce every digit (trajectory bitwise-unchanged) and the
+Gate-3 table below was re-verified by DIRECT comparison (no analysis-side
+rotation) — identical values. Byte-gate lineage survives because the gate
+compares snap_*.nc, which stay native-frame by design.
 
 ## Gate 4 — diff-of-diffs (option live & faithful): PASS
 

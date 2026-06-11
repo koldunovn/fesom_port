@@ -21,25 +21,25 @@ gate. Branch **`mevp`** in THIS worktree (`fesom2_port_zstar`), tag
   the EVPdynamics_m dump patch stays UNCOMMITTED in `port2/fesom2` (KPP/TKE
   convention).
 
-## Open decisions (USER — do not decide unilaterally)
+## Decisions taken 2026-06-11 (same day, user-approved)
 
-1. **Merge `mevp` → `main`?** (zstar/TKE precedent: user calls the timing.
-   Fast-forward expected: main==2714071, mevp is linear on top.)
-2. **C IO vector-frame convention** (M5 Gate-3 finding): C streams write
-   u/v-class vectors (uice/vice, u/v, …) in the NATIVE ROTATED frame;
-   Fortran io_meandata rotates to geographic (`do_rotation`,
-   io_meandata.F90:2972-2979). Not a model bug (M3 at 1e-14) — but every C
-   vector output needs r2g before analysis (`scripts/mevp_climate_compare.py`
-   has the ported `vector_r2g`). Options: (a) make the C IO rotate vector
-   pairs at output like Fortran — breaks byte-gate lineage ⇒ needs its own
-   re-baseline commit + capture; (b) keep + document the convention.
-3. aEVP (whichEVP=2) later? mEVP as default ever? (std EVP stays default.)
+1. **MERGED**: `main` fast-forwarded to the mEVP close-out, then to the
+   IO-frame commit (`git fetch . mevp:main`; main == mevp).
+2. **C IO vector-frame: DONE** (75406d3): stream vector pairs ((u,v),
+   (uice,vice) + the io_meandata pair list) are written in GEOGRAPHIC
+   components by default; `FESOM_IO_VECTOR_FRAME=rotated` opts out
+   bit-exactly (gate job 25524763). Snapshots/debug dumps stay
+   native-frame — the snap-based byte-gate lineage vs baseline_2714071
+   REMAINS VALID. 2yr legs + 5yr rerun at 75406d3: all M5/M6 numbers
+   reproduced digit-for-digit; Gate 3 re-verified by DIRECT comparison.
+   ⚠️ Implementation lesson: never add code to physics TUs —
+   `feedback_tu_codegen_bitgate` (fesom_mesh.c edit shifted
+   -O3/-ffp-contract codegen → last-ULP pgf at step 0 → bitwise gates
+   broke via chaos; the transform is a private copy in fesom_io_stream.c).
 
-## If merging (after the user says go)
+## Still open (USER)
 
-`cd fesom2_port_zstar && git checkout main && git merge --ff-only mevp` —
-then re-point `main`'s NEXT_SESSION_PROMPT, and consider re-capturing the
-byte-gate baseline at the new HEAD for the next port.
+- aEVP (whichEVP=2) later? mEVP as default ever? (std EVP stays default.)
 
 ## Quick reference
 
@@ -48,7 +48,7 @@ byte-gate baseline at the new HEAD for the next port.
   c_mevp_2yr + c_evp_2yr (the matched C 2×2 legs), c_mevp_5yr,
   fortran_mevp_2yr.
 - Switches: `FESOM_MIX_SCHEME=KPP(default)|PP|TKE`, `FESOM_ALE=linfs(default)|zstar`,
-  `FESOM_WHICH_EVP=0(default)|1`, `FESOM_EVP_DUMP_DIR` (mEVP dumps: Q/U0/F, P,
+  `FESOM_WHICH_EVP=0(default)|1`, `FESOM_IO_VECTOR_FRAME=geo(default)|rotated`, `FESOM_EVP_DUMP_DIR` (mEVP dumps: Q/U0/F, P,
   it1/2/60/120, UF — diff with `scripts/maevp_dump_diff.py`).
 - Build C: `source /sw/etc/profile.levante && source env.sh && make -C build
   fesom_port` (fresh: `bash -l configure.sh`).
