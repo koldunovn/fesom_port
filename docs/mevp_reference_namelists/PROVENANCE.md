@@ -56,6 +56,22 @@ NOTE: fesom.x is a thin launcher; the model code lives in `libfesom.so`
 resolved via RPATH. Never point a reference run at `build/bin/fesom.x` —
 it would silently track later rebuilds.
 
+## Run completion (M0 close-out, 2026-06-11)
+
+Job 25514027 **COMPLETED** clean: runtime 1573 s for 35040 steps, no error
+strings, full 1958+1959 output set (62 files incl. uice/vice + a_ice/m_ice).
+Option-liveness check vs the F-EVP leg (1959): m_ice max|diff| = 2.51 m,
+mean|diff| = 0.006 m (visibly nonzero, near-identical global means 0.4274 vs
+0.4280 m); Sept p99 |uice| 0.346 (mEVP) vs 0.161 m/s (EVP) — the rheology
+flip is live and physically plausible. These are also the F-legs of the M5
+diff-of-diffs.
+
+The 16r dump run (job 25514438, instrumented build) COMPLETED with 448 dump
+files (2 steps × 14 points × 16 ranks) at
+`/work/ab0995/a270088/port/mevp/fdump_16r/dump/`; validated finite + plausible
+(pressure_fac max 32.35 ≈ det2·pstar·msum·exp(·); u_aux 6 mm/s @substep 1 →
+0.33 m/s @120; UF ≡ it120; initial-state NH/SH ice values exact).
+
 ## ⚠️ Stale `work_core_evp1` — do NOT use
 
 `/home/a/a270088/fesom27/fesom2/work_core_evp1/` is a January experiment:
