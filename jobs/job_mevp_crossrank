@@ -1,0 +1,80 @@
+#!/bin/bash
+#SBATCH --job-name=mevp_xrank
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=08:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/mevp/m4_xrank/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/mevp/m4_xrank/slurm.%j.err
+#
+# Phase M4 cross-rank: FESOM_WHICH_EVP=1 30-day (1440 steps, dt=1800) at
+# 1, 8, 16 ranks; pairwise compare of the January monthly outputs.
+# Expectation: agreement at the PHC-IC rank-noise scale (NOT bit-identity —
+# feedback_phc_rank_dependent; sea-ice Phase E precedent ~1e-4 rel).
+# A seam-concentrated uice divergence here would point at bc_index_nod2D
+# (the M1 rebuild) — dump it from both codes and diff directly (step-constant).
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+BIN=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port/mevp/m4_xrank
+export FESOM_WHICH_EVP=1
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_IO_CONFIG
+unset FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR FESOM_EVP_DUMP_DIR
+
+for NP in 16 8 1; do
+    OUT=$BASE/np$NP; mkdir -p "$OUT"
+    echo "=== np=$NP ==="
+    srun -l -n $NP "$BIN" "$MESH" "$OUT" 1800 1440 1440 "$PHC" 1958 \
+        > "$OUT/run.log" 2> "$OUT/run.err"
+    echo "exit np$NP: $?"
+    grep -iE "nan|uv>5" "$OUT/run.log" | head -3
+    tail -2 "$OUT/run.log" | head -1
+done
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+echo "=== pairwise monthly-mean compare (a_ice/m_ice/uice at PHC-noise scale) ==="
+$PY - << 'PYEOF'
+import netCDF4, numpy as np, os
+base = "/work/ab0995/a270088/port/mevp/m4_xrank"
+VARS = ["a_ice", "m_ice", "uice", "vice", "sst"]
+data = {}
+for np_ in (1, 8, 16):
+    d = {}
+    for v in VARS:
+        p = f"{base}/np{np_}/{v}.fesom.1958.monthly.nc"
+        if not os.path.exists(p):
+            # snapshot-style fallback name
+            cand = [f for f in os.listdir(f"{base}/np{np_}") if f.startswith(v)]
+            p = f"{base}/np{np_}/{cand[0]}" if cand else None
+        if p:
+            ds = netCDF4.Dataset(p)
+            d[v] = np.nan_to_num(np.ma.filled(ds.variables[v][:], np.nan), nan=0.0)
+    data[np_] = d
+for a, b in [(1, 8), (8, 16), (1, 16)]:
+    print(f"--- np{a} vs np{b} ---")
+    for v in VARS:
+        if v in data[a] and v in data[b]:
+            x, y = data[a][v], data[b][v]
+            mad = np.abs(x - y).max()
+            mav = max(np.abs(x).max(), np.abs(y).max(), 1e-30)
+            print(f"  {v:8s} max|d|={mad:.3e}  max|v|={mav:.3e}  rel={mad/mav:.3e}")
+PYEOF
+echo "=== ice/ocean speed ratio sanity (np16) ==="
+$PY - << 'PYEOF'
+import netCDF4, numpy as np
+base = "/work/ab0995/a270088/port/mevp/m4_xrank/np16"
+try:
+    u  = np.nan_to_num(np.ma.filled(netCDF4.Dataset(f"{base}/uice.fesom.1958.monthly.nc").variables["uice"][:], np.nan), nan=0.0)
+    v  = np.nan_to_num(np.ma.filled(netCDF4.Dataset(f"{base}/vice.fesom.1958.monthly.nc").variables["vice"][:], np.nan), nan=0.0)
+    sp = np.sqrt(u*u + v*v)
+    print(f"ice speed Jan-mean: p50={np.percentile(sp[sp>0],50):.4f} p99={np.percentile(sp[sp>0],99):.4f} max={sp.max():.4f} m/s")
+except Exception as e:
+    print("ice-speed check skipped:", e)
+PYEOF
