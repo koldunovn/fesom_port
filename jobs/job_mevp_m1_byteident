@@ -1,0 +1,71 @@
+#!/bin/bash
+#SBATCH --job-name=mevp_m1
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/mevp/m1_byteident/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/mevp/m1_byteident/slurm.%j.err
+#
+# mEVP-port M1 gate:
+#  (1) byte-gate — the mevp-branch binary with the knob UNSET must be
+#      bit-identical to the M0 baseline_2714071 capture (snapshots; run.log
+#      modulo the OUT_DIR banner paths, T0 precedent);
+#  (2) FESOM_WHICH_EVP=1 must abort "mEVP port pending (M2)";
+#  (3) FESOM_WHICH_EVP=2 must abort at init (not ported).
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+BIN=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASELINE=/work/ab0995/a270088/port/mevp/baseline_2714071
+
+BASE=/work/ab0995/a270088/port/mevp/m1_byteident
+OUT=$BASE/run
+mkdir -p "$OUT" "$BASE/knob1" "$BASE/knob2"
+
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP
+unset FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_TKE_DUMP_STEPS
+unset FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR FESOM_EVP_DUMP_DIR
+unset FESOM_IO_CONFIG
+
+echo "=== (1) byte-gate run: knob unset ==="
+md5sum "$BIN"
+srun -l "$BIN" "$MESH" "$OUT" 500 200 25 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit: $?"
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+CHECK=/home/a/a270088/port2/fesom2_port_zstar/scripts/kpp_byteident_check.py
+PYTHONPATH=/home/a/a270088/PYTHON $PY "$CHECK" "$BASELINE" "$OUT"
+echo "byteident exit: $?"
+if diff <(grep -v "snapshots →" "$BASELINE/run.log") \
+        <(grep -v "snapshots →" "$OUT/run.log") > /dev/null; then
+    echo "run.log (banner-filtered): IDENTICAL"
+else
+    echo "run.log (banner-filtered): DIFFERS"
+    diff <(grep -v "snapshots →" "$BASELINE/run.log") \
+         <(grep -v "snapshots →" "$OUT/run.log") | head -20
+fi
+
+echo "=== (2) FESOM_WHICH_EVP=1 -> expect M2-pending abort ==="
+export FESOM_WHICH_EVP=1
+srun -l "$BIN" "$MESH" "$BASE/knob1" 500 5 5 "$PHC" 1958 \
+    > "$BASE/knob1/run.log" 2> "$BASE/knob1/run.err" || true
+echo "knob1 srun rc=$? (nonzero expected)"
+grep -m1 "mEVP port pending" "$BASE/knob1/run.err" \
+    && echo "knob1 abort message: OK" || echo "knob1 abort message: MISSING (FAIL)"
+
+echo "=== (3) FESOM_WHICH_EVP=2 -> expect not-ported abort ==="
+export FESOM_WHICH_EVP=2
+srun -l "$BIN" "$MESH" "$BASE/knob2" 500 5 5 "$PHC" 1958 \
+    > "$BASE/knob2/run.log" 2> "$BASE/knob2/run.err" || true
+echo "knob2 srun rc=$? (nonzero expected)"
+grep -m1 "not ported" "$BASE/knob2/run.err" \
+    && echo "knob2 abort message: OK" || echo "knob2 abort message: MISSING (FAIL)"
+unset FESOM_WHICH_EVP

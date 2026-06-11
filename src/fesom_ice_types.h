@@ -7,8 +7,10 @@
  * Mirror of Fortran T_ICE / T_ICE_DATA / T_ICE_WORK / T_ICE_THERMO from
  * MOD_ICE.F90. Scope cut for the C port (per docs/plans/20260425-sea-ice-port.md):
  *
- *   - whichEVP = 0 only (standard EVP). uice_aux/vice_aux/alpha_evp_array/
- *     beta_evp_array NOT mirrored — Fortran allocates them only when whichEVP != 0.
+ *   - whichEVP = 0 (standard EVP, the default) or 1 (mEVP; FESOM_WHICH_EVP=1).
+ *     uice_aux/vice_aux + the mEVP work scratch are allocated only when
+ *     whichEVP != 0 (mirrors MOD_ICE.F90:743-748). aEVP (whichEVP=2) is NOT
+ *     ported: no alpha_evp_array/beta_evp_array; init aborts on 2.
  *   - non-ICEPACK build. No __oasis/__oifs/__yac/__ifsinterface fields.
  *   - num_itracers = 3 (a_ice, m_ice, m_snow). No ice_temp tracer (oifs only).
  *   - No icebergs (uice_ib/vice_ib).
@@ -56,6 +58,18 @@ typedef struct fesom_ice_work {
     real_t *ice_strength;
     real_t *inv_areamass;
     real_t *inv_mass;
+
+    /* --- mEVP (whichEVP=1) per-call scratch — NULL unless whichEVP != 0.
+       Mirrors the Fortran AUTOMATIC arrays of EVPdynamics_m (ice_maEVP.F90:
+       449-461), persistent on the heap (inv_areamass/inv_mass precedent).
+       Sized to their reader's loop bound (feedback_array_size_vs_reader_loop):
+       node arrays myDim_nod2D, element arrays myDim_elem2D — every reader
+       loops owned entries only. Fully rewritten every call before use. */
+    real_t *mevp_inv_thickness;   /* [myDim_nod2D]  */
+    real_t *mevp_mass;            /* [myDim_nod2D]  */
+    int    *mevp_ice_nod;         /* [myDim_nod2D]  Fortran logical ice_nod */
+    real_t *mevp_pressure_fac;    /* [myDim_elem2D] */
+    int    *mevp_ice_el;          /* [myDim_elem2D] Fortran logical ice_el  */
 } fesom_ice_work;
 
 /*
@@ -132,6 +146,10 @@ typedef struct fesom_ice {
     real_t *uice, *uice_rhs, *uice_old;
     real_t *vice, *vice_rhs, *vice_old;
 
+    /* mEVP pseudo-iteration aux velocity (nodes, zero-init; alloc'd ONLY when
+       whichEVP != 0 — MOD_ICE.F90:743-748). NULL on the default path. */
+    real_t *uice_aux, *vice_aux;
+
     /* surface stresses atm<->ice and oce<->ice (nodes) */
     real_t *stress_atmice_x, *stress_iceoce_x;
     real_t *stress_atmice_y, *stress_iceoce_y;
@@ -168,8 +186,11 @@ typedef struct fesom_ice {
     real_t cd_oce_ice;       /* 5.5e-3 ocean-ice drag coefficient   */
     int    ice_free_slip;    /* 0     */
 
-    /* --- whichEVP locked at 0; aux/alpha_evp/beta_evp arrays not allocated --- */
-    int    whichEVP;         /* MUST be 0; dispatcher aborts otherwise */
+    /* --- EVP flavor (FESOM_WHICH_EVP env, parsed at init): 0 = standard EVP
+           (default), 1 = mEVP. Anything else aborts at init (aEVP unported). --- */
+    int    whichEVP;
+    real_t alpha_evp;        /* 250.0 mEVP stability constant (namelist.ice == module default) */
+    real_t beta_evp;         /* 250.0 mEVP stability constant (namelist.ice == module default) */
 
     /* --- timestep --- */
     int    ice_ave_steps;    /* 1 — ice timestep = ice_ave_steps * ocean step */

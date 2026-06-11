@@ -77,6 +77,7 @@ add_executable(fesom_port
   src/fesom_ice_coupling.c
   src/fesom_ice_evp.c
   src/fesom_ice_fct.c
+  src/fesom_ice_maevp.c
   src/fesom_gm.c
   src/fesom_kpp.c
   src/fesom_cvmix_tke.c

@@ -4,6 +4,7 @@
 #include "fesom_ice_coupling.h"
 #include "fesom_ice_evp.h"
 #include "fesom_ice_fct.h"
+#include "fesom_ice_maevp.h"
 #include "fesom_ice_thermo.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -27,7 +28,9 @@
  *   elem_size = myDim_elem2D + eDim_elem2D + eXDim_elem2D
  *
  * Skipped (per docs/plans/20260425-sea-ice-port.md Out-of-scope):
- *   - whichEVP != 0 aux arrays (uice_aux/vice_aux/alpha_evp/beta_evp).
+ *   - aEVP (whichEVP=2) alpha_evp_array/beta_evp_array — init aborts on 2.
+ *     (mEVP whichEVP=1 IS supported since the 20260611 plan: FESOM_WHICH_EVP
+ *     env knob; uice_aux/vice_aux + mevp work scratch alloc'd when != 0.)
  *   - data[].values_old etc. for tracer index 4 (oifs/coupled only).
  *   - dyngr/dyngrsn/dyngra (CMIP6 output-only).
  *   - atmcoupl substruct.
@@ -46,7 +49,7 @@ void fesom_ice_init(fesom_ice           *ice,
                     struct fesom_partit *partit,
                     struct fesom_mesh   *mesh)
 {
-    (void)partit; /* sizes come from mesh; partit kept in signature to mirror Fortran */
+    /* partit: myList_edge2D for the bc_index_nod2D build (sizes come from mesh) */
 
     memset(ice, 0, sizeof(*ice));
 
@@ -65,7 +68,28 @@ void fesom_ice_init(fesom_ice           *ice,
     ice->theta_io        = 0.0;
     ice->cd_oce_ice      = 5.5e-3;
     ice->ice_free_slip   = 0;
-    ice->whichEVP        = 0;       /* hard 0; dispatcher (Phase D4) aborts otherwise */
+    /* EVP flavor knob (numeric env, FESOM_DIAG_GID atoi precedent; parsed at
+     * init because it gates the conditional allocations below):
+     * unset/"0" -> standard EVP (default), "1" -> mEVP (fesom_ice_maevp.c),
+     * anything else -> abort: aEVP (2) and garbage are not ported. */
+    {
+        const char *we = getenv("FESOM_WHICH_EVP");
+        int which = 0;
+        if (we && *we) {
+            char *end = NULL;
+            long v = strtol(we, &end, 10);
+            int ok = (end != we && *end == '\0' && (v == 0 || v == 1));
+            if (!ok) {
+                fprintf(stderr, "fesom_ice: FESOM_WHICH_EVP='%s' -> whichEVP not ported "
+                                "(0=EVP default, 1=mEVP; aEVP/2 unported)\n", we);
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
+            which = (int)v;
+        }
+        ice->whichEVP = which;
+    }
+    ice->alpha_evp       = 250.0;   /* mEVP stability constants — set unconditionally  */
+    ice->beta_evp        = 250.0;   /* (namelist.ice == MOD_ICE.F90:198 module default) */
     ice->ice_ave_steps   = 1;
     ice->ice_dt          = 0.0;     /* set in fesom_ice_setup */
     ice->Tevp_inv        = 0.0;     /* set in fesom_ice_setup */
@@ -135,7 +159,12 @@ void fesom_ice_init(fesom_ice           *ice,
     ice->h_ice           = xcalloc(n);
     ice->h_snow          = xcalloc(n);
 
-    /* whichEVP != 0 aux fields intentionally NOT allocated (see header). */
+    /* mEVP aux velocity — node_size, zero-init, ONLY when whichEVP != 0
+     * (mirror of MOD_ICE.F90:743-748). NULL on the default path. */
+    if (ice->whichEVP != 0) {
+        ice->uice_aux = xcalloc(n);
+        ice->vice_aux = xcalloc(n);
+    }
 
     /* --- surface ocean state (T_ICE:140-142, ice_init:758-767) --- */
     ice->srfoce_u    = xcalloc(n);
@@ -178,6 +207,21 @@ void fesom_ice_init(fesom_ice           *ice,
     w->inv_areamass    = xcalloc(n);             /* populated by EVPdynamics each step */
     w->inv_mass        = xcalloc(n);             /* populated by EVPdynamics each step */
 
+    /* mEVP per-call scratch (Fortran automatic arrays of EVPdynamics_m,
+     * ice_maEVP.F90:449-461, kept on the heap) — ONLY when whichEVP != 0.
+     * Owned-extent sizes match every reader's loop bound. */
+    if (ice->whichEVP != 0) {
+        size_t no = (size_t)mesh->myDim_nod2D;
+        size_t eo = (size_t)mesh->myDim_elem2D;
+        w->mevp_inv_thickness = xcalloc(no);
+        w->mevp_mass          = xcalloc(no);
+        w->mevp_pressure_fac  = xcalloc(eo);
+        w->mevp_ice_nod       = calloc(no, sizeof(int));
+        w->mevp_ice_el        = calloc(eo, sizeof(int));
+        FESOM_CHECK(w->mevp_ice_nod && w->mevp_ice_el,
+                    "fesom_ice: out of memory (mEVP masks)");
+    }
+
     /* --- thermo per-node arrays (ice_init:834-853) --- */
     th->ustar          = xcalloc(n);
     th->t_skin         = xcalloc(n);
@@ -191,16 +235,22 @@ void fesom_ice_init(fesom_ice           *ice,
 
     /*
      * --- Mesh boundary mask (mirrors MOD_ICE.F90:889-895) ---
-     * Fortran loops local edges, looks up global edge id in myList_edge2D and
-     * compares to mesh%edge2D_in. C port uses the equivalent boundary marker
-     * already in the mesh: edge_tri[edge*2 + 1] == -1 marks a boundary edge.
-     * Both schemes produce the same set of boundary endpoints.
+     * Fortran loops OWNED edges (do n=1,myDim_edge2D), looks up the global
+     * edge id in myList_edge2D and marks both endpoints of boundary edges
+     * (gid > edge2D_in) with 0. Same convention as the std-EVP BC loop
+     * (fesom_ice_evp.c) — do NOT use edge_tri[2nd] < 0 here: at multi-rank
+     * that misclassifies interior edges whose halo element is missing
+     * (fesom_mesh.h doc) and would hard-zero mEVP velocity at inter-rank
+     * seam nodes. Owned-edge loop only (Fortran does the same): some eDim
+     * boundary endpoints keep 1, which is harmless — mEVP reads bc_index at
+     * owned nodes only. Kept real_t (Fortran declares INTEGER but uses it
+     * multiplicatively in the velocity solve).
      */
     if (mesh->bc_index_nod2D == NULL) {
         mesh->bc_index_nod2D = xcalloc(n);
         for (size_t i = 0; i < n; ++i) mesh->bc_index_nod2D[i] = 1.0;
         for (int ed = 0; ed < mesh->myDim_edge2D; ++ed) {
-            if (mesh->edge_tri[ed * 2 + 1] >= 0) continue;   /* interior edge */
+            if (partit->myList_edge2D[ed] <= mesh->edge2D_in) continue; /* interior edge */
             int n1 = mesh->edges[ed * 2 + 0];
             int n2 = mesh->edges[ed * 2 + 1];
             mesh->bc_index_nod2D[n1] = 0.0;
@@ -323,11 +373,14 @@ void fesom_ice_step(int                            step,
     }
 
     if (!s_no_ice_dyn) {
-        /* whichEVP=0 (standard EVP) only; mEVP/aEVP are out of scope. */
+        /* Mirror of the whichEVP SELECT CASE (ice_setup_step.F90:209-226).
+         * 0 = standard EVP (default), 1 = mEVP; aEVP (2) rejected at init. */
         if (ice->whichEVP == 0) {
             fesom_ice_evp_dynamics(ice, partit, mesh);
+        } else if (ice->whichEVP == 1) {
+            fesom_ice_evp_dynamics_m(ice, partit, mesh);
         } else {
-            fprintf(stderr, "fesom_ice: whichEVP=%d not supported (only standard EVP=0)\n",
+            fprintf(stderr, "fesom_ice: whichEVP=%d not supported (0=EVP, 1=mEVP)\n",
                     ice->whichEVP);
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
@@ -461,6 +514,7 @@ void fesom_ice_free(fesom_ice *ice)
 {
     free(ice->uice);            free(ice->uice_rhs);  free(ice->uice_old);
     free(ice->vice);            free(ice->vice_rhs);  free(ice->vice_old);
+    free(ice->uice_aux);        free(ice->vice_aux);   /* NULL unless whichEVP != 0 */
     free(ice->stress_atmice_x); free(ice->stress_iceoce_x);
     free(ice->stress_atmice_y); free(ice->stress_iceoce_y);
     free(ice->h_ice);           free(ice->h_snow);
@@ -483,6 +537,8 @@ void fesom_ice_free(fesom_ice *ice)
     free(w->eps11);       free(w->eps12);     free(w->eps22);
     free(w->ice_strength);
     free(w->inv_areamass); free(w->inv_mass);
+    free(w->mevp_inv_thickness); free(w->mevp_mass); free(w->mevp_ice_nod);
+    free(w->mevp_pressure_fac);  free(w->mevp_ice_el);   /* NULL unless whichEVP != 0 */
 
     fesom_ice_thermo *th = &ice->thermo;
     free(th->ustar);      free(th->t_skin);
