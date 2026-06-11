@@ -1,0 +1,53 @@
+#!/bin/bash
+#SBATCH --job-name=tke_diaggate
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:45:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/tke/t3_diaggate/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/tke/t3_diaggate/slurm.%j.err
+#
+# Phase T3 diag-flag invariance gate: FESOM_TKE_DIAG=0 vs =1 runs must be
+# byte-identical in ALL model state (the flag gates only diag STORAGE; the
+# column core always computes the terms in local scratch). 16r, 200 steps,
+# dt=500, snapshots every 25. Plus the halo probe on the diag=0 leg.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+BIN=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port/tke/t3_diaggate
+rm -rf "$BASE/diag0" "$BASE/diag1"      # self-clean (never rm manually — races the queue)
+mkdir -p "$BASE/diag0" "$BASE/diag1"
+
+export FESOM_MIX_SCHEME=TKE
+unset FESOM_ALE FESOM_TKE_DUMP_DIR FESOM_TKE_REPLAY_DIR FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR
+
+echo "=== run A: FESOM_TKE_DIAG=0 (+ halo probe) ==="
+export FESOM_TKE_DIAG=0
+export FESOM_TKE_HALO_PROBE=1
+srun -l "$BIN" "$MESH" "$BASE/diag0" 500 200 25 "$PHC" 1958 \
+    > "$BASE/diag0/run.log" 2> "$BASE/diag0/run.err"
+echo "exit A: $?"
+echo "--- halo probe (every step; must all be 0) ---"
+grep -c "worst |d| = 0.000e+00" "$BASE/diag0/run.err"
+grep "STALE HALO" "$BASE/diag0/run.err" | head -3
+
+echo "=== run B: FESOM_TKE_DIAG=1 ==="
+export FESOM_TKE_DIAG=1
+unset FESOM_TKE_HALO_PROBE
+srun -l "$BIN" "$MESH" "$BASE/diag1" 500 200 25 "$PHC" 1958 \
+    > "$BASE/diag1/run.log" 2> "$BASE/diag1/run.err"
+echo "exit B: $?"
+
+echo "=== snapshot byte-compare (must be IDENTICAL) ==="
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+PYTHONPATH=/home/a/a270088/PYTHON $PY \
+    /home/a/a270088/port2/fesom2_port_zstar/scripts/kpp_byteident_check.py \
+    "$BASE/diag0" "$BASE/diag1"
+echo "byteident exit: $?"

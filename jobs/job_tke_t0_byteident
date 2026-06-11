@@ -1,0 +1,59 @@
+#!/bin/bash
+#SBATCH --job-name=tke_byteident
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=01:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/tke/t0_byteident/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/tke/t0_byteident/slurm.%j.err
+#
+# TKE-port byte-gate (plan T0+T2): the tke-enabled binary with TKE OFF must
+# be bit-identical to the zstar-validated HEAD (8260dea) baseline — for BOTH
+# the KPP default and the PP opt-out. 16 ranks, 200 steps, dt=500, snapshots
+# every 25 (the K0/Z0 gate recipe). Four runs, two comparisons.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+BIN_BASE=/home/a/a270088/port2/fesom2_port_zstar/frozen_tke_baseline/fesom_port_head8260dea
+BIN_TKE=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+BASE=/work/ab0995/a270088/port/tke/t0_byteident
+mkdir -p "$BASE"
+
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_TKE_DUMP_STEPS
+unset FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+CHECK=/home/a/a270088/port2/fesom2_port_zstar/scripts/kpp_byteident_check.py
+
+run_pair () {  # $1 = scheme label for env (KPP→unset, PP→PP), $2 = subdir
+    local scheme=$1 sub=$2
+    local OUT_A=$BASE/$sub/base OUT_B=$BASE/$sub/tkebranch
+    mkdir -p "$OUT_A" "$OUT_B"
+    if [ "$scheme" = "KPP" ]; then unset FESOM_MIX_SCHEME; else export FESOM_MIX_SCHEME=$scheme; fi
+    echo "=== [$sub] run A: baseline binary ==="
+    srun -l "$BIN_BASE" "$MESH" "$OUT_A" 500 200 25 "$PHC" 1958 \
+        > "$OUT_A/run.log" 2> "$OUT_A/run.err"
+    echo "exit A: $?"
+    echo "=== [$sub] run B: tke-branch binary ==="
+    srun -l "$BIN_TKE" "$MESH" "$OUT_B" 500 200 25 "$PHC" 1958 \
+        > "$OUT_B/run.log" 2> "$OUT_B/run.err"
+    echo "exit B: $?"
+    if cmp -s "$OUT_A/run.log" "$OUT_B/run.log"; then
+        echo "[$sub] run.log: IDENTICAL"
+    else
+        echo "[$sub] run.log: DIFFERS"
+        diff "$OUT_A/run.log" "$OUT_B/run.log" | head -20
+    fi
+    PYTHONPATH=/home/a/a270088/PYTHON $PY "$CHECK" "$OUT_A" "$OUT_B"
+    echo "[$sub] byteident exit: $?"
+}
+
+run_pair KPP kpp_default
+run_pair PP  pp_optout

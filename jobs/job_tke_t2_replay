@@ -1,0 +1,48 @@
+#!/bin/bash
+#SBATCH --job-name=tke_replay
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:20:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/tke/replay/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/tke/replay/slurm.%j.err
+#
+# Phase T2 controlled replay (feedback_controlled_replay_validation): the C
+# runs 3 steps with FESOM_TKE_REPLAY_DIR pointing at the FORTRAN dumps — every
+# per-column input (normstress/vshear2/bvfreq2/dztrr/tkeold) is overridden by
+# the Fortran's, so the output dumps (tke/tkeav/tkekv/kv/av + 10 budget terms)
+# differ from the Fortran's by PURE COLUMN ALGEBRA only. Bar: <=1e-12 (K6/K7
+# precedent; expected ~1e-18 + isolated 1-ulp libm pow differences).
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port_zstar
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+FDUMP=/work/ab0995/a270088/port/tke/fdump/dump
+
+OUT=/work/ab0995/a270088/port/tke/replay
+export FESOM_MIX_SCHEME=TKE
+export FESOM_TKE_REPLAY_DIR=$FDUMP
+export FESOM_TKE_DUMP_DIR=$OUT/dump
+export FESOM_TKE_DUMP_STEPS=3
+unset FESOM_ALE FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR FESOM_TKE_DIAG
+mkdir -p "$OUT" "$FESOM_TKE_DUMP_DIR"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt"
+( cd "$REPO" && git status --short ) > "$OUT/status.txt"
+
+srun -l "$BIN" "$MESH" "$OUT" 1800 3 -1 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+EXITCODE=$?
+echo "exit: $EXITCODE"
+grep tke_replay "$OUT/run.err" | head -4
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+echo "=== replay output diff vs Fortran (bar: <=1e-12 on outputs) ==="
+$PY /home/a/a270088/port2/fesom2_port_zstar/scripts/tke_dump_diff.py \
+    "$FDUMP" "$OUT/dump" 2>&1 | tail -70
+exit $EXITCODE

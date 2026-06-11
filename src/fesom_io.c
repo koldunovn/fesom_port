@@ -15,11 +15,13 @@
 #include "fesom_io_config.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
+#include "fesom_tke.h"
 #include "fesom_tracers.h"
 
 #include <math.h>
 #include <mpi.h>
 #include <netcdf.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -714,6 +716,41 @@ static void resolve_vice(const fesom_state *s, real_t *out, size_t n)
     for (size_t i = 0; i < n; ++i) out[i] += src[i];
 }
 
+/* --- TKE optional outputs (FESOM_MIX_SCHEME=TKE) ----------------------- */
+/* All interface quantities on the node grid, like Kv/w. The prognostic
+ * `tke` is stored whenever TKE runs; the budget terms live in the diag
+ * slabs that exist only under FESOM_TKE_DIAG=1 — requesting one without
+ * the flag dies loudly at the first write. */
+static const real_t *tke_field_or_die(const fesom_state *s, size_t member_off,
+                                      const char *name, int need_diag)
+{
+    if (!s->tke)
+        FESOM_DIE("io: output var '%s' requested but TKE mixing is not "
+                  "active (FESOM_MIX_SCHEME=TKE)", name);
+    const struct fesom_tke *t = s->tke;
+    if (need_diag && !t->diag_on)
+        FESOM_DIE("io: output var '%s' needs FESOM_TKE_DIAG=1", name);
+    return *(const real_t *const *)((const char *)t + member_off);
+}
+#define TKE_RESOLVER(fn_name, member, var_name, need_diag)                   \
+    static void fn_name(const fesom_state *s, real_t *out, size_t n)        \
+    {                                                                        \
+        const real_t *src = tke_field_or_die(                                \
+            s, offsetof(struct fesom_tke, member), var_name, need_diag);     \
+        for (size_t i = 0; i < n; ++i) out[i] += src[i];                     \
+    }
+TKE_RESOLVER(resolve_tke,      tke,  "tke",      0)
+TKE_RESOLVER(resolve_tke_Tbpr, Tbpr, "tke_Tbpr", 1)
+TKE_RESOLVER(resolve_tke_Tspr, Tspr, "tke_Tspr", 1)
+TKE_RESOLVER(resolve_tke_Tdif, Tdif, "tke_Tdif", 1)
+TKE_RESOLVER(resolve_tke_Tdis, Tdis, "tke_Tdis", 1)
+TKE_RESOLVER(resolve_tke_Twin, Twin, "tke_Twin", 1)
+TKE_RESOLVER(resolve_tke_Tiwf, Tiwf, "tke_Tiwf", 1)
+TKE_RESOLVER(resolve_tke_Tbck, Tbck, "tke_Tbck", 1)
+TKE_RESOLVER(resolve_tke_Ttot, Ttot, "tke_Ttot", 1)
+TKE_RESOLVER(resolve_tke_Lmix, Lmix, "tke_Lmix", 1)
+TKE_RESOLVER(resolve_tke_Pr,   Pr,   "tke_Pr",   1)
+
 /* Default monthly variable table. Lifetime = run.
  * If sea ice isn't initialised, callers should pass nvars = 12 instead
  * of FESOM_DEFAULT_MONTHLY_NVARS to skip the trailing 5 ice entries. */
@@ -744,6 +781,24 @@ static const fesom_var_desc_t fesom_default_monthly_table[FESOM_DEFAULT_MONTHLY_
     { "m_snow",  "snow volume per area",           "m",      FESOM_VAR_2D_NODE,       resolve_m_snow  },
     { "uice",    "ice zonal velocity",             "m/s",    FESOM_VAR_2D_NODE,       resolve_uice    },
     { "vice",    "ice meridional velocity",        "m/s",    FESOM_VAR_2D_NODE,       resolve_vice    },
+};
+
+/* Optional variables: NEVER in a default stream — written only when an
+ * FESOM_IO_CONFIG entry names them explicitly. The default streams stay
+ * byte-identical whether or not this table exists (T3 gate). */
+#define FESOM_OPTIONAL_NVARS 11
+static const fesom_var_desc_t fesom_optional_var_table[FESOM_OPTIONAL_NVARS] = {
+    { "tke",      "turbulent kinetic energy",            "m^2/s^2", FESOM_VAR_3D_NODE_IFACE, resolve_tke      },
+    { "tke_Tbpr", "TKE buoyancy production",             "m^2/s^3", FESOM_VAR_3D_NODE_IFACE, resolve_tke_Tbpr },
+    { "tke_Tspr", "TKE shear production",                "m^2/s^3", FESOM_VAR_3D_NODE_IFACE, resolve_tke_Tspr },
+    { "tke_Tdif", "TKE vertical diffusion",              "m^2/s^3", FESOM_VAR_3D_NODE_IFACE, resolve_tke_Tdif },
+    { "tke_Tdis", "TKE dissipation",                     "m^2/s^3", FESOM_VAR_3D_NODE_IFACE, resolve_tke_Tdis },
+    { "tke_Twin", "TKE wind forcing",                    "m^2/s^3", FESOM_VAR_3D_NODE_IFACE, resolve_tke_Twin },
+    { "tke_Tiwf", "TKE internal-wave forcing",           "m^2/s^3", FESOM_VAR_3D_NODE_IFACE, resolve_tke_Tiwf },
+    { "tke_Tbck", "TKE background restoring",            "m^2/s^3", FESOM_VAR_3D_NODE_IFACE, resolve_tke_Tbck },
+    { "tke_Ttot", "TKE total tendency",                  "m^2/s^3", FESOM_VAR_3D_NODE_IFACE, resolve_tke_Ttot },
+    { "tke_Lmix", "TKE mixing length",                   "m",       FESOM_VAR_3D_NODE_IFACE, resolve_tke_Lmix },
+    { "tke_Pr",   "TKE Prandtl number",                  "1",       FESOM_VAR_3D_NODE_IFACE, resolve_tke_Pr   },
 };
 
 /* ====================================================================== */
@@ -808,6 +863,13 @@ void fesom_io_init(fesom_io_t                  *io,
             per_cad_count[FESOM_PERIOD_MONTHLY] += 1;
         }
     }
+    /* Optional vars: counted ONLY when the config names them (no default). */
+    for (int v = 0; v < FESOM_OPTIONAL_NVARS; ++v) {
+        const fesom_io_config_entry_t *e =
+            have_cfg ? fesom_io_config_lookup(&cfg, fesom_optional_var_table[v].name) : NULL;
+        if (e)
+            for (int c = 0; c < e->n_cadences; ++c) per_cad_count[e->cadences[c]] += 1;
+    }
     /* Allocate the per-cadence var arrays. */
     int per_cad_idx[5] = {0};
     for (int p = 0; p < 5; ++p) {
@@ -830,6 +892,16 @@ void fesom_io_init(fesom_io_t                  *io,
         } else {
             fesom_period_kind_t p = FESOM_PERIOD_MONTHLY;
             io->owned_vars[p][per_cad_idx[p]++] = fesom_default_monthly_table[v];
+        }
+    }
+    for (int v = 0; v < FESOM_OPTIONAL_NVARS; ++v) {
+        const fesom_io_config_entry_t *e =
+            have_cfg ? fesom_io_config_lookup(&cfg, fesom_optional_var_table[v].name) : NULL;
+        if (e) {
+            for (int c = 0; c < e->n_cadences; ++c) {
+                fesom_period_kind_t p = e->cadences[c];
+                io->owned_vars[p][per_cad_idx[p]++] = fesom_optional_var_table[v];
+            }
         }
     }
     if (have_cfg) fesom_io_config_free(&cfg);

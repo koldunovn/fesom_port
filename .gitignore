@@ -16,3 +16,4 @@ tests/regression_reference/
 *.nc
 slurm.*.out
 slurm.*.err
+frozen_tke_baseline/

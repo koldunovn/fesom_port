@@ -9,6 +9,7 @@
 #include "fesom_forcing_analytical.h"
 #include "fesom_gm.h"
 #include "fesom_kpp.h"
+#include "fesom_tke.h"
 #include "fesom_ic.h"
 #include "fesom_ice.h"
 #include "fesom_ice_coupling.h"
@@ -352,6 +353,27 @@ int main(int argc, char **argv)
     fesom_kpp_init(&kpp);
     fesom_kpp_dump_init(&kpp, mpi.mype);          /* K1 validation dump (gated) */
     fesom_kpp_dump_wscale_sweep(&kpp, mpi.mype);  /* K2 validation dump (gated) */
+
+    /* CVMix-TKE mixing state (mirrors g_cvmix_tke; the third FESOM_MIX_SCHEME
+     * option). Allocated ONLY when selected (oce_setup_step.F90:185-187: the
+     * Fortran init runs only for mix_scheme_nmb==5). Diag slabs (13×[N*nl])
+     * additionally need FESOM_TKE_DIAG=1 — or an active FESOM_TKE_DUMP_DIR,
+     * whose dump reads the stored diag fields. Model state is byte-identical
+     * either way (T3 gate). */
+    fesom_tke tke;
+    int use_tke = 0;
+    {
+        const char *e = getenv("FESOM_MIX_SCHEME");
+        use_tke = (e && (strcmp(e, "TKE") == 0 || strcmp(e, "cvmix_TKE") == 0));
+        if (use_tke) {
+            const char *d  = getenv("FESOM_TKE_DIAG");
+            int diag_on = (d && atoi(d)) || (fesom_tke_dump_dir() != NULL);
+            fesom_tke_alloc(&tke, &mesh, diag_on);
+            if (mpi.mype == 0)
+                printf("TKE mixing selected (FESOM_MIX_SCHEME=%s): cvmix_TKE "
+                       "port, cd=3.75, diag %s\n", e, diag_on ? "ON" : "off");
+        }
+    }
 
     /* Sea-ice state (Phase A: allocator + no-op driver only).
      * fesom_ice_setup needs the ocean dt to compute Tevp_inv, so it runs
@@ -846,6 +868,7 @@ skip_rest_state:
                                .ice    = &ice,
                                .gm     = &gm,
                                .kpp    = &kpp,
+                               .tke    = use_tke ? &tke : NULL,
                                .jra    = use_jra ? &jra : NULL,
                                .sr     = use_sr  ? &sr  : NULL,
                                .ale_zstar     = fesom_ale_zstar,
@@ -1044,7 +1067,8 @@ skip_rest_state:
              * a local-only sum into accumulators (no MPI on hot path);
              * gather + write happens only on calendar boundaries. */
             {
-                fesom_state st = { &mesh, &dyn, &tracers, &aux, &ice, &forcing };
+                fesom_state st = { &mesh, &dyn, &tracers, &aux, &ice, &forcing,
+                                   use_tke ? &tke : NULL };
                 fesom_io_step(&io, (double)FESOM_PHASE1_DT, &st, &mpi);
             }
             if (n == 1 || n % print_every == 0 || n == nsteps) {
@@ -1197,6 +1221,7 @@ skip_rest_state:
     fesom_ice_free    (&ice);
     fesom_gm_free     (&gm);
     fesom_kpp_free    (&kpp);
+    if (use_tke) fesom_tke_free(&tke);
     fesom_aux_free    (&aux);
     fesom_tracers_free(&tracers);
     fesom_dyn_free    (&dyn);

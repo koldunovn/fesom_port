@@ -13,6 +13,7 @@ struct fesom_aux;
 struct fesom_partit;
 struct fesom_ice;
 struct fesom_forcing;
+struct fesom_tke;
 
 /* ------------------------------------------------------------------ */
 /* fesom_state — POD bundle of pointers into the model's per-step    */
@@ -28,6 +29,9 @@ typedef struct fesom_state {
     const struct fesom_aux     *aux;
     const struct fesom_ice     *ice;       /* may be NULL (no sea ice) */
     const struct fesom_forcing *forcing;
+    const struct fesom_tke     *tke;       /* may be NULL (TKE mixing off);
+                                              read only by the optional tke*
+                                              output variables */
 } fesom_state;
 
 /* gather_plan API lives in fesom_io_gather.h (included above).      */

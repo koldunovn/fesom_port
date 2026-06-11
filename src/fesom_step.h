@@ -43,6 +43,7 @@ struct fesom_jra55;
 struct fesom_sss_runoff;
 struct fesom_gm;
 struct fesom_kpp;
+struct fesom_tke;
 
 typedef struct fesom_step_ctx {
     fesom_ssh_stiff           *stiff;
@@ -52,6 +53,8 @@ typedef struct fesom_step_ctx {
     struct fesom_ice          *ice;        /* sea-ice state; NULL = no ice */
     struct fesom_gm           *gm;         /* GM/Redi state; NULL = stub-only path */
     struct fesom_kpp          *kpp;        /* KPP mixing state; used when FESOM_MIX_SCHEME=KPP */
+    struct fesom_tke          *tke;        /* CVMix-TKE mixing state; non-NULL only when
+                                              FESOM_MIX_SCHEME=TKE|cvmix_TKE (allocated in main) */
     /* Optional pointers for the sea-ice thermodynamics path. NULL is fine
      * if the FESOM_NO_ICE_THERMO env knob is set. */
     const struct fesom_jra55      *jra;

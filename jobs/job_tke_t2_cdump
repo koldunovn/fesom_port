@@ -1,0 +1,44 @@
+#!/bin/bash
+#SBATCH --job-name=tke_cdump
+#SBATCH -p compute
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:20:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/tke/cdump/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/tke/cdump/slurm.%j.err
+#
+# Phase T2 validation: C TKE dump run — linfs + cvmix_TKE, 16 ranks, 3 steps,
+# dt=1800, FESOM_TKE_DUMP_DIR-gated per-call dumps. Paired against the Fortran
+# work_tke_dump reference (/work/ab0995/a270088/port/tke/fdump/dump);
+# compared by scripts/tke_dump_diff.py.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+REPO=/home/a/a270088/port2/fesom2_port_zstar
+BIN=$REPO/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+
+OUT=/work/ab0995/a270088/port/tke/cdump
+export FESOM_MIX_SCHEME=TKE
+export FESOM_TKE_DUMP_DIR=$OUT/dump
+export FESOM_TKE_DUMP_STEPS=3
+unset FESOM_ALE FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR FESOM_TKE_DIAG
+mkdir -p "$OUT" "$FESOM_TKE_DUMP_DIR"
+( cd "$REPO" && git rev-parse HEAD ) > "$OUT/SHA.txt"
+( cd "$REPO" && git status --short ) > "$OUT/status.txt"
+
+srun -l "$BIN" "$MESH" "$OUT" 1800 3 -1 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+EXITCODE=$?
+echo "exit: $EXITCODE"
+echo "=== TKE dump files written ==="
+ls "$FESOM_TKE_DUMP_DIR" | wc -l
+echo "=== tail run.log ==="
+tail -5 "$OUT/run.log"
+echo "=== run.err warnings ==="
+grep -iE "tke|abort|nan" "$OUT/run.err" | head -10
+exit $EXITCODE

@@ -79,6 +79,8 @@ add_executable(fesom_port
   src/fesom_ice_fct.c
   src/fesom_gm.c
   src/fesom_kpp.c
+  src/fesom_cvmix_tke.c
+  src/fesom_tke.c
   src/fesom_calendar.c
   src/fesom_io_stream.c
   src/fesom_io_stream_dispatch.c

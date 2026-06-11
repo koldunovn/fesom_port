@@ -1,0 +1,57 @@
+#!/bin/bash
+#SBATCH --job-name=tke_xrank
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=04:00:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/tke/t4_xrank/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/tke/t4_xrank/slurm.%j.err
+#
+# Phase T4 cross-rank: FESOM_MIX_SCHEME=TKE 5-day (240 steps, dt=1800) at 1,
+# 8, 16 ranks; final-snapshot pairwise compare. Expectation: agreement at the
+# PHC-IC rank-noise scale (NOT bit-identity — feedback_phc_rank_dependent),
+# the Z7/GM/sea-ice precedent. Catches halo bugs in the TKE write loops.
+# Then a 30-day 16r stability leg (1440 steps): clean exit, no uv>5/NaN.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+BIN=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASE=/work/ab0995/a270088/port/tke/t4_xrank
+rm -rf "$BASE"/np1 "$BASE"/np8 "$BASE"/np16 "$BASE"/month16   # self-clean
+export FESOM_MIX_SCHEME=TKE
+unset FESOM_ALE FESOM_TKE_DUMP_DIR FESOM_TKE_REPLAY_DIR FESOM_TKE_DIAG
+unset FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR FESOM_TKE_HALO_PROBE
+
+for NP in 1 8 16; do
+    OUT=$BASE/np$NP; mkdir -p "$OUT"
+    echo "=== np=$NP (5 days) ==="
+    srun -l -n $NP "$BIN" "$MESH" "$OUT" 1800 240 240 "$PHC" 1958 \
+        > "$OUT/run.log" 2> "$OUT/run.err"
+    echo "exit np$NP: $?"
+done
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+for pair in "np1 np8" "np8 np16" "np1 np16"; do
+    set -- $pair
+    echo "=== compare $1 vs $2 (final snapshot; PHC-noise scale expected) ==="
+    PYTHONPATH=/home/a/a270088/PYTHON $PY \
+        /home/a/a270088/port2/fesom2_port_zstar/scripts/kpp_byteident_check.py \
+        "$BASE/$1" "$BASE/$2" 2>&1 | tail -6
+done
+
+echo "=== 30-day 16r stability (1440 steps, dt=1800) ==="
+OUT=$BASE/month16; mkdir -p "$OUT"
+export FESOM_PRINT_EVERY=100
+srun -l -n 16 "$BIN" "$MESH" "$OUT" 1800 1440 -1 "$PHC" 1958 \
+    > "$OUT/run.log" 2> "$OUT/run.err"
+echo "exit month16: $?"
+echo "--- blowup / uv>5 / NaN? ---"
+grep -icE "blowup|uv>5|nan" "$OUT/run.err" || true
+echo "--- last status lines (max uv etc.) ---"
+tail -4 "$OUT/run.log"

@@ -20,11 +20,15 @@
 #include "fesom_partit.h"
 #include "fesom_pp.h"
 #include "fesom_ssh.h"
+#include "fesom_tke.h"
 #include "fesom_tracer_adv.h"
 #include "fesom_tracer_diff.h"
 #include "fesom_tracers.h"
 
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 int fesom_timestep(int                          step_n,
                    const fesom_step_ctx        *ctx,
@@ -60,18 +64,26 @@ int fesom_timestep(int                          step_n,
      * FESOM_ALE_DUMP_DIR is set. */
     fesom_ale_dump_forcing(step_n, forcing, mesh, p);
 
-    /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3515 mix_scheme_nmb).
-     *   FESOM_MIX_SCHEME=KPP (DEFAULT) → fesom_kpp_mixing (K-Profile) — the CORE2
-     *                                    production scheme (mix_scheme='KPP'),
-     *                                    validated end-to-end (K0-K10).
-     *   FESOM_MIX_SCHEME=PP            → fesom_pp_mixing (Pacanowski-Philander), opt-out
-     * Env knob mirroring the FESOM_NO_GMREDI pattern. mo_convect runs after either
-     * scheme (Fortran calls it in both branches, :3524 / :3531). */
+    /* Vertical-mixing scheme dispatch (mirror oce_ale.F90:3713-3752 mix_scheme_nmb).
+     *   FESOM_MIX_SCHEME=KPP (DEFAULT)  → fesom_kpp_mixing (K-Profile) — the CORE2
+     *                                     production scheme (mix_scheme='KPP'),
+     *                                     validated end-to-end (K0-K10).
+     *   FESOM_MIX_SCHEME=PP             → fesom_pp_mixing (Pacanowski-Philander)
+     *   FESOM_MIX_SCHEME=TKE|cvmix_TKE  → fesom_tke_mixing (CVMix classical TKE,
+     *                                     mix_scheme_nmb==5, oce_ale.F90:3749-52)
+     * Env knob mirroring the FESOM_NO_GMREDI pattern. mo_convect runs after every
+     * scheme (Fortran calls it in each branch, :3722/:3729/:3752). */
+    enum { FESOM_MIX_KPP, FESOM_MIX_PP, FESOM_MIX_TKE };
     static int s_mix_env_loaded = 0;
-    static int s_use_kpp        = 1;
+    static int s_mix            = FESOM_MIX_KPP;
     if (!s_mix_env_loaded) {
         const char *e = getenv("FESOM_MIX_SCHEME");
-        s_use_kpp = !(e && (e[0] == 'P' || e[0] == 'p'));   /* default KPP; =PP to opt out */
+        if (e && (e[0] == 'P' || e[0] == 'p'))
+            s_mix = FESOM_MIX_PP;
+        else if (e && (strcmp(e, "TKE") == 0 || strcmp(e, "cvmix_TKE") == 0))
+            s_mix = FESOM_MIX_TKE;
+        else
+            s_mix = FESOM_MIX_KPP;                  /* default */
         s_mix_env_loaded = 1;
     }
 
@@ -124,10 +136,21 @@ int fesom_timestep(int                          step_n,
     fesom_compute_vel_nodes(mesh, dyn);
     fesom_halo_exchange(dyn->uvnode, FESOM_HALO_NOD3D, nl, 2, p);
 
-    if (s_use_kpp) {
+    if (s_mix == FESOM_MIX_KPP) {
         /* KPP writes aux->Av (elements) + the single aux->Kv (T-channel,
          * oce_ale.F90:3518-3522) and does its own internal halo exchanges. */
         fesom_kpp_mixing(ctx->kpp, aux, tracers, forcing, dyn, mesh, p);
+    } else if (s_mix == FESOM_MIX_TKE) {
+        /* TKE (oce_ale.F90:3749-52): the driver exchanges its node fields
+         * (tke_Kv/tke_Av) internally before wiring aux->Kv/aux->Av; the
+         * element-Av halo comes from the SHARED post-mo_convect exchange
+         * below — the Fortran driver has no element exchange either. */
+        if (!ctx->tke) {
+            fprintf(stderr, "FESOM_MIX_SCHEME=TKE but ctx->tke is NULL "
+                    "(fesom_main did not allocate the TKE state)\n");
+            abort();
+        }
+        fesom_tke_mixing(ctx->tke, aux, forcing, dyn, mesh, p);
     } else {
         fesom_pp_mixing(mesh, dyn, aux);
         fesom_exchange_nod3D (aux->Kv, nl, p);
