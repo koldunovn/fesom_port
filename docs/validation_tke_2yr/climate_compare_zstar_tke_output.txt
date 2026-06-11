@@ -1,0 +1,6 @@
+== YEAR 1958  C-zstar+TKE vs F-zstar+TKE (headline) | vs F-linfs+TKE (coord contrast) ==
+  dSST: bias  -0.0003 rms  0.0037 | contrast bias  +0.0006 rms  0.0132
+  dSSS: bias  -0.0000 rms  0.0015 | contrast bias  +0.0035 rms  0.0142
+== YEAR 1959  C-zstar+TKE vs F-zstar+TKE (headline) | vs F-linfs+TKE (coord contrast) ==
+  dSST: bias  -0.0006 rms  0.0078 | contrast bias  +0.0004 rms  0.0212
+  dSSS: bias  -0.0001 rms  0.0041 | contrast bias  +0.0053 rms  0.0195

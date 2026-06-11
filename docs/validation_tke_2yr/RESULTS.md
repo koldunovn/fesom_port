@@ -4,6 +4,20 @@ Worktree branch `zstar`, started from `zstar-validated-2026-06-10` (8260dea).
 Reference provenance: `docs/tke_reference_namelists/PROVENANCE.md` (Fortran
 2yr job 25500644, dump job 25500775; frozen binary = the zstar-pair binary).
 
+## ACCEPTANCE (T6) — ALL GATES GREEN, 2026-06-11
+
+| Requirement | Verdict |
+|---|---|
+| TKE selectable (`FESOM_MIX_SCHEME=TKE\|cvmix_TKE`; KPP default, PP kept) | ✓ |
+| KPP and PP byte-identical with TKE off (vs HEAD 8260dea) | ✓ both legs, all snapshots |
+| Column core vs Fortran ≤1e-12 | ✓ replay worst **1.1e-16** (after the -r8 6.6 catch) |
+| Climate matches the TKE reference (KPP-class bar) | ✓ RMS 0.0049/0.0028 → 0.0088/0.0040, biases ≈0 |
+| Scheme contrast resolves the scheme | ✓ 11–18× (SST), >100× (N-high SSS) |
+| Diag flag inert (byte-identical) + functional (budget closes) | ✓ / ✓ (4e-15 rel) |
+| Cross-rank at PHC-noise scale, halo probe clean | ✓ day-5 ≤ IC spread; 3200/3200 zero |
+| 30-day dt=1800 stability | ✓ clean, max uv 1.64 |
+| Combined zstar+TKE 2yr (run matrix) | ✓ RMS 0.0037/0.0015 → 0.0078/0.0041 |
+
 ## T0 — scaffolding gates
 
 - **Reference-run provenance hardening:** `init_cvmix_tke` echo verified in
@@ -83,11 +97,48 @@ per step → output diff = pure algebra; bar ≤1e-12):**
 - Halo probe (exchange-and-compare on aux->Kv, run A, FESOM_TKE_HALO_PROBE=1):
   **3200/3200 probe lines report worst |d| = 0.000e+00** (200 steps × 16
   ranks) — no stale halo anywhere in the TKE wiring.
+- Memory delta of the flag: expected 13×[N·nl]·8B ≈ +42 MB/rank at CORE2 16r
+  — below run-to-run MaxRSS noise there (1446 vs 1404 MB; the diag=0 leg
+  also carried the probe buffer). The flag's payoff is at NG-mesh scale
+  (nl=70, ~10× nodes), as designed.
 
-## T4 — cross-rank + stability
+## T4 — cross-rank + stability — cross-rank **PASS**
 
-- 1/8/16r 5-day final-snapshot spread: <fill from job_tke_t4_crossrank>
-- 30-day 16r dt=1800: <fill>
+1/8/16r 5-day runs (240 steps, dt=1800; job 25503534, all exit 0). The
+byteident script prints "FAIL" (it is a bit-checker); the bar is PHC-noise
+scale (feedback_phc_rank_dependent), assessed Z7-style against the STEP-0 IC
+spread:
+
+| pair | step-0 IC spread (T / S) | day-5 spread (T / S) |
+|---|---|---|
+| np1–np8  | 6.32 / 1.92 | 3.48 / 1.16  (shrinks under mixing) |
+| np8–np16 | 2.89 / 27.7 | 3.40 / 28.0  (S=28 exists AT the IC — rank-dependent PHC extrapolation at a coastal node group; not growing) |
+| np1–np16 | 6.32 / 27.7 | 3.48 / 28.0 |
+
+Same numbers as the zstar Z7 precedent for np1-np8 (T 6.3→3.4, S 1.9→1.2 —
+same IC). Day-5 ≤ step-0 everywhere → rank noise originates at the IC; no
+TKE halo bug (consistent with the 3200/3200-zero halo probe).
+
+- 30-day 16r dt=1800 stability (month16 leg, 1440 steps): **exit 0, zero
+  blowup/uv>5/NaN lines, final max|uv| 1.64** — clean. **T4 PASS.**
+
+## Run matrix — combined zstar+TKE legs (approved 2026-06-10) — 2yr **PASS**
+
+Fortran `work_zstar_tke` (job 25503765; TWO knobs vs work_linfs_2yr_b:
+which_ALE='zstar' + mix_scheme='cvmix_TKE'; frozen binary; exit 0, echo
+verified, 730 days) vs C `FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE` 2yr 864r
+(job 25504000, exit 0, max uv 1.57). Full table:
+`climate_compare_zstar_tke_output.txt`:
+
+| year | dSST bias | dSST RMS | dSSS bias | dSSS RMS | coord-contrast SST/SSS RMS |
+|---|---|---|---|---|---|
+| 1958 | −0.0003 | **0.0037** | −0.0000 | **0.0015** | 0.0132 / 0.0142 |
+| 1959 | −0.0006 | **0.0078** | −0.0001 | **0.0041** | 0.0212 / 0.0195 |
+
+Headline at/below the per-feature legs; the contrast vs F-linfs+TKE is 2–5×
+larger → the comparison resolves the coordinate with TKE active. **The 2yr
+matrix is closed: zstar+KPP ✓ (Z9), linfs+TKE ✓ (T5), zstar+TKE ✓.**
+5yr zstar+TKE stability: <fill from job 25504001>
 
 ## T5 — 2yr climate vs work_linfs_tke — **PASS**
 

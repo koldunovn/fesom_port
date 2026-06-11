@@ -290,11 +290,11 @@ copy), module-level `tke_Av_old/tke_Kv_old/tke_old` 1D allocatables (shadowed de
       consistency); memory delta measured and recorded (the point of the flag).
 
 ### Phase T4: Multi-rank + short stability
-- [ ] 1/8/16r TKE 30-day runs — cross-rank consistency at PHC-noise scale; exchange-and-
+- [x] 1/8/16r TKE 30-day runs — cross-rank consistency at PHC-noise scale; exchange-and-
       compare probe on tke_Kv/tke_Av halos (and confirm NO probe signal on `tke` — it must
       not need an exchange).
-- [ ] 30-day dt=1800 stability smoke (max|uv|, MLD sanity in convection regions vs Fortran TKE).
-- [ ] **Validate:** clean runs, no NaN/uv>5; byte-gates re-checked.
+- [x] 30-day dt=1800 stability smoke (max|uv|, MLD sanity in convection regions vs Fortran TKE).
+- [x] **Validate:** clean runs, no NaN/uv>5; byte-gates re-checked.
 
 ### Phase T5: 2yr climate validation vs work_linfs_tke
 **Files:** `scripts/tke_climate_compare.py`, `jobs/job_tke_2yr`
@@ -305,9 +305,9 @@ copy), module-level `tke_Av_old/tke_Kv_old/tke_old` 1D allocatables (shadowed de
 - [x] **Validate:** acceptance numbers in `docs/validation_tke_2yr/`.
 
 ### Phase T6: Acceptance + handoff
-- [ ] Overview requirements met: TKE selectable; KPP/PP byte-identical when off; column core
+- [x] Overview requirements met: TKE selectable; KPP/PP byte-identical when off; column core
       ≤1e-12 vs Fortran; climate matches the TKE reference; diag flag inert + functional.
-- [ ] Update docs + auto-memory (`project_tke_port_state`); commit per-phase; tag suggestion
+- [x] Update docs + auto-memory (`project_tke_port_state`); commit per-phase; tag suggestion
       `tke-validated-<date>`; move this plan to `docs/plans/completed/`.
 
 ## Technical Details
