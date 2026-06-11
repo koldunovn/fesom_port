@@ -1,0 +1,136 @@
+#!/bin/bash
+#SBATCH --job-name=iovec_gate
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=16
+#SBATCH --ntasks=16
+#SBATCH --time=00:40:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port/mevp/iovec_gate/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port/mevp/iovec_gate/slurm.%j.err
+#
+# Gates for the FESOM_IO_VECTOR_FRAME change (streams write vector pairs in
+# geographic components by default; 'rotated' opts out to the old behaviour):
+#  (A) rotated-mode regression: knob=rotated -> EVERY output (snap + monthly,
+#      all vars) bit-identical to the M0 baseline_2714071 capture;
+#  (B) geo-mode byte-gate lineage: knob unset (geo default) -> snap_*.nc
+#      STILL bit-identical to the capture (snapshots stay native-frame);
+#      monthly scalars identical; monthly u/v/uice/vice differ (rotated);
+#  (C) algebra cross-check: geo-mode uice/vice == offline vector_r2g of
+#      rotated-mode uice/vice (independent numpy implementation);
+#  (D) knob=garbage aborts.
+
+source /sw/etc/profile.levante
+source /home/a/a270088/port2/fesom2_port_zstar/env.sh
+ulimit -s 204800
+
+BIN=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+MESH=/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+BASELINE=/work/ab0995/a270088/port/mevp/baseline_2714071
+BASE=/work/ab0995/a270088/port/mevp/iovec_gate
+mkdir -p "$BASE/rotated" "$BASE/geo" "$BASE/garbage"
+
+unset FESOM_ALE FESOM_MIX_SCHEME FESOM_WHICH_EVP FESOM_IO_CONFIG
+unset FESOM_TKE_DIAG FESOM_TKE_DUMP_DIR FESOM_ALE_DUMP_DIR FESOM_KPP_DUMP_DIR FESOM_EVP_DUMP_DIR
+
+PY=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+echo "=== (A) rotated mode: full bitwise regression vs baseline ==="
+export FESOM_IO_VECTOR_FRAME=rotated
+srun -l "$BIN" "$MESH" "$BASE/rotated" 500 200 25 "$PHC" 1958 \
+    > "$BASE/rotated/run.log" 2> "$BASE/rotated/run.err"
+echo "exit: $?"
+$PY - "$BASELINE" "$BASE/rotated" << 'PYEOF'
+import sys, glob, os
+import numpy as np, netCDF4 as nc
+A, B = sys.argv[1], sys.argv[2]
+worst = 0.0; nfiles = 0
+for pa in sorted(glob.glob(f"{A}/*.nc")):
+    pb = f"{B}/{os.path.basename(pa)}"
+    if not os.path.exists(pb): print(f"MISSING in B: {os.path.basename(pa)}"); worst = np.inf; continue
+    da, db = nc.Dataset(pa), nc.Dataset(pb)
+    nfiles += 1
+    for v in set(da.variables) & set(db.variables):
+        a = np.ma.filled(da.variables[v][:], np.nan); b = np.ma.filled(db.variables[v][:], np.nan)
+        d = np.nanmax(np.abs(a - b)) if a.size else 0.0
+        if np.isnan(d): d = 0.0
+        worst = max(worst, d)
+        if d != 0.0: print(f"  {os.path.basename(pa)}:{v} max|d|={d:.3e}")
+print(f"(A) files={nfiles} worst|d|={worst:.3e} -> " + ("BIT-IDENTICAL PASS" if worst == 0.0 else "FAIL"))
+PYEOF
+
+echo "=== (B) geo mode (default): snapshots identical, monthly vectors rotated ==="
+unset FESOM_IO_VECTOR_FRAME
+srun -l "$BIN" "$MESH" "$BASE/geo" 500 200 25 "$PHC" 1958 \
+    > "$BASE/geo/run.log" 2> "$BASE/geo/run.err"
+echo "exit: $?"
+grep -m2 "rotated to geographic" "$BASE/geo/run.err" || echo "NOTE MISSING (expected on stderr)"
+CHECK=/home/a/a270088/port2/fesom2_port_zstar/scripts/kpp_byteident_check.py
+PYTHONPATH=/home/a/a270088/PYTHON $PY "$CHECK" "$BASELINE" "$BASE/geo"
+echo "snap byteident exit: $? (0 = snapshots still bit-identical)"
+$PY - "$BASELINE" "$BASE/geo" << 'PYEOF'
+import sys, glob, os
+import numpy as np, netCDF4 as nc
+A, B = sys.argv[1], sys.argv[2]
+VEC = {"u", "v", "uice", "vice"}
+ok = True
+for pa in sorted(glob.glob(f"{A}/*.monthly.nc")):
+    name = os.path.basename(pa); var = name.split(".")[0]
+    pb = f"{B}/{name}"
+    if not os.path.exists(pb): print(f"MISSING: {name}"); ok = False; continue
+    a = np.ma.filled(nc.Dataset(pa).variables[var][:], np.nan)
+    b = np.ma.filled(nc.Dataset(pb).variables[var][:], np.nan)
+    d = np.nanmax(np.abs(a - b)) if a.size else 0.0
+    if np.isnan(d): d = 0.0
+    if var in VEC:
+        print(f"  vector {var:5s}: max|geo-baseline|={d:.3e} (MUST be >0: rotated)")
+        if d == 0.0: ok = False
+    else:
+        if d != 0.0: print(f"  scalar {var:8s}: max|d|={d:.3e} <-- MUST BE 0, FAIL"); ok = False
+print("(B) monthly check:", "PASS" if ok else "FAIL")
+PYEOF
+
+echo "=== (C) geo == offline r2g(rotated) ==="
+$PY - "$BASE" << 'PYEOF'
+import sys
+import numpy as np, netCDF4 as nc
+base = sys.argv[1]
+MESHD = "/work/ab0995/a270088/port/mevp/fortran_mevp_2yr/fesom.mesh.diag.nc"
+md = nc.Dataset(MESHD)
+glon = np.radians(np.asarray(md.variables["lon"][:])); glat = np.radians(np.asarray(md.variables["lat"][:]))
+al,be,ga = np.radians([50.0,15.0,-90.0])
+M = np.array([
+ [np.cos(ga)*np.cos(al)-np.sin(ga)*np.cos(be)*np.sin(al), np.cos(ga)*np.sin(al)+np.sin(ga)*np.cos(be)*np.cos(al), np.sin(ga)*np.sin(be)],
+ [-np.sin(ga)*np.cos(al)-np.cos(ga)*np.cos(be)*np.sin(al), -np.sin(ga)*np.sin(al)+np.cos(ga)*np.cos(be)*np.cos(al), np.cos(ga)*np.sin(be)],
+ [np.sin(be)*np.sin(al), -np.sin(be)*np.cos(al), np.cos(be)]])
+xg=np.cos(glat)*np.cos(glon); yg=np.cos(glat)*np.sin(glon); zg=np.sin(glat)
+xr=M[0,0]*xg+M[0,1]*yg+M[0,2]*zg; yr=M[1,0]*xg+M[1,1]*yg+M[1,2]*zg; zr=M[2,0]*xg+M[2,1]*yg+M[2,2]*zg
+rlat=np.arcsin(np.clip(zr,-1,1)); rlon=np.arctan2(yr,xr)
+def vec_r2g(tlon,tlat):
+    txg=-tlat*np.sin(rlat)*np.cos(rlon)-tlon*np.sin(rlon)
+    tyg=-tlat*np.sin(rlat)*np.sin(rlon)+tlon*np.cos(rlon)
+    tzg= tlat*np.cos(rlat)
+    txr=M[0,0]*txg+M[1,0]*tyg+M[2,0]*tzg
+    tyr=M[0,1]*txg+M[1,1]*tyg+M[2,1]*tzg
+    tzr=M[0,2]*txg+M[1,2]*tyg+M[2,2]*tzg
+    vlat=-np.sin(glat)*np.cos(glon)*txr-np.sin(glat)*np.sin(glon)*tyr+np.cos(glat)*tzr
+    vlon=-np.sin(glon)*txr+np.cos(glon)*tyr
+    return vlon,vlat
+def rd(d,v): return np.nan_to_num(np.ma.filled(nc.Dataset(f"{base}/{d}/{v}.fesom.1958.monthly.nc").variables[v][:],np.nan),nan=0.0)
+uR,vR = rd("rotated","uice"), rd("rotated","vice")
+uG,vG = rd("geo","uice"),     rd("geo","vice")
+ug,vg = vec_r2g(uR[0],vR[0])
+du = np.abs(ug-uG[0]).max(); dv = np.abs(vg-vG[0]).max()
+sc = max(np.abs(uG).max(), 1e-30)
+print(f"(C) uice: max|geo - r2g(rotated)|={du:.3e}  vice: {dv:.3e}  scale={sc:.3e}  rel={max(du,dv)/sc:.3e}")
+print("(C)", "PASS" if max(du,dv)/sc < 1e-12 else "CHECK")
+PYEOF
+
+echo "=== (D) garbage knob aborts ==="
+export FESOM_IO_VECTOR_FRAME=banana
+srun -l -n 16 "$BIN" "$MESH" "$BASE/garbage" 500 5 5 "$PHC" 1958 \
+    > "$BASE/garbage/run.log" 2> "$BASE/garbage/run.err" || true
+grep -m1 "FESOM_IO_VECTOR_FRAME" "$BASE/garbage/run.err" \
+    && echo "(D) abort message: OK" || echo "(D) abort message: MISSING (FAIL)"
+unset FESOM_IO_VECTOR_FRAME

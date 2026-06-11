@@ -452,6 +452,191 @@ static void flush_one_var(fesom_io_stream_t *s, int v,
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Geographic-frame vector output (FESOM_IO_VECTOR_FRAME)             */
+/*                                                                    */
+/* The model holds horizontal vectors in the ROTATED mesh frame.      */
+/* Fortran io_meandata rotates recognised (x,y) pairs to geographic   */
+/* components before writing (do_rotation, io_meandata.F90:2972-3004) */
+/* — analyses expect geographic east/north. Mirror that here: at      */
+/* flush time, rotate the accumulation buffers of paired vars with    */
+/* vector_r2g. Linear op => rotating the sums (or instant values)     */
+/* before the mean division equals accumulating rotated fields.       */
+/*                                                                    */
+/* Knob: FESOM_IO_VECTOR_FRAME = "geo" (default; rotate) | "rotated"  */
+/* (write raw model-frame components — the pre-2026-06-11 behaviour,  */
+/* kept for debugging and bitwise comparison against old runs).       */
+/*                                                                    */
+/* Scope: STREAM outputs only. The debug snapshot writer (fesom_io.c) */
+/* and the env-gated reference dumps stay NATIVE-frame on purpose —   */
+/* they are model-state debug media (Fortran-parallel: io_meandata    */
+/* rotates, restarts stay native). This also keeps the pinned         */
+/* byte-gate (snap_*.nc) lineage valid across this change.            */
+/* ------------------------------------------------------------------ */
+static const struct { const char *x, *y; } io_vec_pairs[] = {
+    /* the Fortran do_rotation pair list, io_meandata.F90:2972-2979 */
+    { "u",        "v"        },
+    { "uice",     "vice"     },
+    { "unod",     "vnod"     },
+    { "tau_x",    "tau_y"    },
+    { "atmice_x", "atmice_y" },
+    { "atmoce_x", "atmoce_y" },
+    { "iceoce_x", "iceoce_y" },
+    { "utemp",    "vtemp"    },
+};
+
+static int io_vec_frame_geo(void)
+{
+    static int loaded = 0, geo = 1;
+    if (!loaded) {
+        const char *f = getenv("FESOM_IO_VECTOR_FRAME");
+        if (!f || !*f || strcmp(f, "geo") == 0)      geo = 1;
+        else if (strcmp(f, "rotated") == 0)          geo = 0;
+        else
+            FESOM_DIE("io_stream: FESOM_IO_VECTOR_FRAME='%s' "
+                      "(expected 'geo' or 'rotated')", f);
+        loaded = 1;
+    }
+    return geo;
+}
+
+/* Self-contained rotated->geographic vector transform — a deliberate
+ * DUPLICATE of the static rotation helpers in fesom_mesh.c (mirrors Fortran
+ * gen_modules_rotate_grid.F90: r2g_matrix / r2g / vector_r2g, flag_coord=0).
+ *
+ * WHY duplicated instead of exporting from fesom_mesh.c: adding ANY code to
+ * fesom_mesh.c perturbs that TU's -O3/-ffp-contract code generation (inline
+ * heuristics for its static helpers shift) -> last-ULP changes in the mesh
+ * geometry (observed: pgf_y 3e-18 at step 0) -> bitwise byte-gate lineage vs
+ * the pinned baseline breaks for ALL fields via chaos. The IO subsystem is
+ * the documented redesign exception; it keeps a private copy so the mesh TU
+ * stays bit-identical. Do NOT "clean this up" by moving it back. */
+static void io_vector_r2g(real_t *u, real_t *v, real_t rlon, real_t rlat)
+{
+#if FESOM_FORCE_ROTATION
+    static real_t M[9];
+    static int built = 0;
+    if (!built) {
+        const real_t al = FESOM_ALPHA_EULER_DEG * FESOM_RAD;
+        const real_t be = FESOM_BETA_EULER_DEG  * FESOM_RAD;
+        const real_t ga = FESOM_GAMMA_EULER_DEG * FESOM_RAD;
+        /* row-major flat 3x3 — same numeric layout as Fortran r2g_matrix(i,j) */
+        M[0] = cos(ga)*cos(al) - sin(ga)*cos(be)*sin(al);
+        M[1] = cos(ga)*sin(al) + sin(ga)*cos(be)*cos(al);
+        M[2] = sin(ga)*sin(be);
+        M[3] = -sin(ga)*cos(al) - cos(ga)*cos(be)*sin(al);
+        M[4] = -sin(ga)*sin(al) + cos(ga)*cos(be)*cos(al);
+        M[5] = cos(ga)*sin(be);
+        M[6] = sin(be)*sin(al);
+        M[7] = -sin(be)*cos(al);
+        M[8] = cos(be);
+        built = 1;
+    }
+
+    /* rotated coords -> geographic coords (Fortran r2g: M^T on Cartesian) */
+    real_t xr = cos(rlat) * cos(rlon);
+    real_t yr = cos(rlat) * sin(rlon);
+    real_t zr = sin(rlat);
+    real_t xg = M[0]*xr + M[3]*yr + M[6]*zr;
+    real_t yg = M[1]*xr + M[4]*yr + M[7]*zr;
+    real_t zg = M[2]*xr + M[5]*yr + M[8]*zr;
+    real_t glat = asin(zg);
+    real_t glon = (yg == 0.0 && xg == 0.0) ? 0.0 : atan2(yg, xg);
+
+    real_t tlon = *u, tlat = *v;              /* rotated east/north comps */
+    /* rotated vector -> Cartesian rotated */
+    real_t txg = -tlat*sin(rlat)*cos(rlon) - tlon*sin(rlon);
+    real_t tyg = -tlat*sin(rlat)*sin(rlon) + tlon*cos(rlon);
+    real_t tzg =  tlat*cos(rlat);
+    /* Cartesian rotated -> Cartesian geographic (M^T) */
+    real_t txr = M[0]*txg + M[3]*tyg + M[6]*tzg;
+    real_t tyr = M[1]*txg + M[4]*tyg + M[7]*tzg;
+    real_t tzr = M[2]*txg + M[5]*tyg + M[8]*tzg;
+    /* Cartesian geographic -> geographic east/north components */
+    *v = -sin(glat)*cos(glon)*txr - sin(glat)*sin(glon)*tyr + cos(glat)*tzr;
+    *u = -sin(glon)*txr + cos(glon)*tyr;
+#else
+    (void)u; (void)v; (void)rlon; (void)rlat;
+#endif
+}
+
+/* Rotate one (x,y) buffer pair in place, all owned columns, all levels.
+ * Per-column position: node vars use the node's rotated coords; element
+ * vars use the PLAIN MEAN of the 3 vertex rotated coords — a literal
+ * mirror of io_meandata.F90:2993-2994 (NOT cyclic-aware across the
+ * rotated dateline; same convention as Fortran, kept deliberately). */
+static void rotate_pair_buffers(real_t *bx, real_t *by,
+                                fesom_var_kind_t kind,
+                                const struct fesom_mesh *mesh)
+{
+    const int nl = mesh->nl;
+    switch (kind) {
+    case FESOM_VAR_2D_NODE:
+    case FESOM_VAR_3D_NODE_MID:
+    case FESOM_VAR_3D_NODE_IFACE: {
+        const int lev = (kind == FESOM_VAR_2D_NODE) ? 1 : nl;
+        for (int n = 0; n < mesh->myDim_nod2D; ++n) {
+            const real_t rlon = mesh->coord_nod2D[2*n + 0];
+            const real_t rlat = mesh->coord_nod2D[2*n + 1];
+            for (int k = 0; k < lev; ++k)
+                io_vector_r2g(&bx[(size_t)n*lev + k],
+                              &by[(size_t)n*lev + k], rlon, rlat);
+        }
+        break;
+    }
+    case FESOM_VAR_2D_ELEM:
+    case FESOM_VAR_3D_ELEM_MID:
+    case FESOM_VAR_3D_ELEM_IFACE: {
+        const int lev = (kind == FESOM_VAR_2D_ELEM) ? 1 : nl;
+        for (int e = 0; e < mesh->myDim_elem2D; ++e) {
+            const int n0 = mesh->elem_nodes[3*e + 0];
+            const int n1 = mesh->elem_nodes[3*e + 1];
+            const int n2 = mesh->elem_nodes[3*e + 2];
+            const real_t rlon = (mesh->coord_nod2D[2*n0]   + mesh->coord_nod2D[2*n1]
+                               + mesh->coord_nod2D[2*n2])   / 3.0;
+            const real_t rlat = (mesh->coord_nod2D[2*n0+1] + mesh->coord_nod2D[2*n1+1]
+                               + mesh->coord_nod2D[2*n2+1]) / 3.0;
+            for (int k = 0; k < lev; ++k)
+                io_vector_r2g(&bx[(size_t)e*lev + k],
+                              &by[(size_t)e*lev + k], rlon, rlat);
+        }
+        break;
+    }
+    default:
+        FESOM_DIE("io_stream: vector rotation unsupported for var kind %d",
+                  (int)kind);
+    }
+}
+
+static void rotate_vector_pairs(fesom_io_stream_t *s,
+                                const struct fesom_mesh *mesh)
+{
+    if (!io_vec_frame_geo()) return;
+    static int note_done = 0;
+    for (size_t p = 0; p < sizeof(io_vec_pairs)/sizeof(io_vec_pairs[0]); ++p) {
+        int ix = -1, iy = -1;
+        for (int v = 0; v < s->nvars; ++v) {
+            if (strcmp(s->vars[v].name, io_vec_pairs[p].x) == 0) ix = v;
+            if (strcmp(s->vars[v].name, io_vec_pairs[p].y) == 0) iy = v;
+        }
+        if (ix < 0 && iy < 0) continue;
+        FESOM_CHECK(ix >= 0 && iy >= 0,
+            "io_stream: vector component '%s' in a stream without its partner "
+            "'%s' — add the partner or set FESOM_IO_VECTOR_FRAME=rotated",
+            ix >= 0 ? io_vec_pairs[p].x : io_vec_pairs[p].y,
+            ix >= 0 ? io_vec_pairs[p].y : io_vec_pairs[p].x);
+        FESOM_CHECK(s->vars[ix].kind == s->vars[iy].kind,
+            "io_stream: vector pair (%s,%s) has mismatched var kinds",
+            io_vec_pairs[p].x, io_vec_pairs[p].y);
+        if (s->mype == 0 && !note_done)
+            fprintf(stderr, "[fesom_io] %s and %s rotated to geographic "
+                    "components at output (FESOM_IO_VECTOR_FRAME=geo)\n",
+                    io_vec_pairs[p].x, io_vec_pairs[p].y);
+        rotate_pair_buffers(s->accum[ix], s->accum[iy], s->vars[ix].kind, mesh);
+    }
+    if (s->mype == 0) note_done = 1;
+}
+
 static void flush_all(fesom_io_stream_t *s,
                       const fesom_calendar_t *flush_anchor,
                       const struct fesom_mesh *mesh)
@@ -464,6 +649,12 @@ static void flush_all(fesom_io_stream_t *s,
     if (!window_matches(s, flush_anchor)) {
         close_open_files(s);
     }
+
+    /* Geo-frame vector output (default): rotate paired vector buffers
+     * BEFORE the per-var flush — both MEAN sums and INSTANT captures are
+     * fully written by this point, and buffers reset after the flush, so
+     * the rotation applies exactly once per window. */
+    rotate_vector_pairs(s, mesh);
 
     for (int v = 0; v < s->nvars; ++v) {
         flush_one_var(s, v, flush_anchor, mesh);
@@ -493,6 +684,7 @@ void fesom_io_stream_init(fesom_io_stream_t       *s,
                           struct fesom_partit     *partit,
                           const char              *out_dir)
 {
+    io_vec_frame_geo();   /* validate FESOM_IO_VECTOR_FRAME at init (fail fast) */
     memset(s, 0, sizeof(*s));
     s->period      = period;
     s->output_kind = kind;

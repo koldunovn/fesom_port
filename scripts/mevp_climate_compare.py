@@ -107,14 +107,16 @@ print()
 print("#" * 84)
 print("# GATE 3 — ice-velocity VECTOR check Cm vs Fm (magnitude ratio + angle)")
 print("#" * 84)
-# FRAME ALIGNMENT (found 2026-06-11): the C IO writes uice/vice in the NATIVE
-# ROTATED frame (fesom_io_stream.c resolve_uice accumulates ice->uice raw);
-# the Fortran io_meandata sets do_rotation=.TRUE. for (uice,vice) and writes
-# GEOGRAPHIC components. Comparing raw C vs F shows ratio==1 (rotation is an
-# isometry) but position-dependent angles up to +-40deg — the exact
+# FRAME NOTE (2026-06-11): the C IO now writes vector pairs in GEOGRAPHIC
+# components by default (FESOM_IO_VECTOR_FRAME=geo, matching Fortran
+# io_meandata's do_rotation) — C and Fortran vectors compare DIRECTLY.
+# For LEGACY C runs made before that change (or runs with
+# FESOM_IO_VECTOR_FRAME=rotated), pass `--c-frame=rotated` to apply the
+# r2g rotation here. Raw rotated-vs-geo comparison shows ratio==1
+# (isometry) with position-dependent angles to +-40deg — the
 # magnitude-invariant signature feedback_magnitude_invariant_masks_rotation
-# warns about. Rotate the C vectors r2g (gen_modules_rotate_grid.F90 port)
-# before comparing.
+# warns about.
+C_FRAME = "rotated" if "--c-frame=rotated" in sys.argv else "geo"
 al_e, be_e, ga_e = np.radians([50.0, 15.0, -90.0])   # alphaEuler/betaEuler/gammaEuler
 RM = np.array([
  [np.cos(ga_e)*np.cos(al_e)-np.sin(ga_e)*np.cos(be_e)*np.sin(al_e),
@@ -143,8 +145,13 @@ def vec_r2g(tlon, tlat):
     vlon = -np.sin(_glon)*txr + np.cos(_glon)*tyr
     return vlon, vlat
 
+print(f"  (C vector frame: {C_FRAME}"
+      + (" — applying r2g here)" if C_FRAME == "rotated" else " — direct compare)"))
 for mo, label in [(2, "Mar"), (8, "Sep")]:
-    uCg, vCg = vec_r2g(uC[mo], vC[mo])
+    if C_FRAME == "rotated":
+        uCg, vCg = vec_r2g(uC[mo], vC[mo])
+    else:
+        uCg, vCg = uC[mo], vC[mo]
     spCg = np.sqrt(uCg**2 + vCg**2)
     for hemi, hm in [("NH", lat > 0), ("SH", lat < 0)]:
         m = hm & (aF[mo] > 0.15) & (spF[mo] > 0.005) & (spCg > 0.005)
