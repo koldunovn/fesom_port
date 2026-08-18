@@ -403,14 +403,41 @@ Four legs, four comparisons, one job — the first two make a failure of the las
 8 ranks and `OMPI_MCA_btl_vader_single_copy_mechanism=none` to match the established Kokkos-Serial
 certification (`jobs/job_m14_gate_serial`), physics the paper's rather than that gate's default.
 
-### CUDA: `jobs/job_restart_gate_cuda`
+### CUDA: `jobs/job_restart_gate_cuda`, 4 GPUs, N = M = 10 — green
 
-CUDA is not run-to-run reproducible on Levante A100, so a restart round trip cannot be gated on byte
-identity there. The project's standing convention applies instead: the change is accepted when it
-moves the answer no more than the binary moves against itself, with the noise floor measured from
-two control legs **in the same allocation**. The job also reads a Serial-written restart with the
-CUDA build and the reverse; those two legs are pass/fail on the reader's own guards, not on numbers,
-because a CUDA trajectory and a Serial one are not the same trajectory.
+CUDA is not run-to-run reproducible on Levante A100, so "the restart is exact" is not a testable
+statement there. What is testable: **the restarted legs are not distinguishable from the continuous
+ones.** Four continuous legs and four restarted legs, six pairwise differences each — the same
+statistic and the same count on both sides, so neither arm is favoured by taking a maximum.
+
+| field | continuous vs continuous | restarted vs restarted |
+|---|---|---|
+| `temp` | 2.345e-04 | 1.815e-04 |
+| `ssh`  | 5.479e-06 | 4.372e-06 |
+| `u`    | 9.585e-05 | 8.248e-05 |
+
+The restarted arm spreads *less* than the continuous arm in all three. Cross-backend: a
+Serial-written restart is read by the CUDA build and a CUDA-written one by the Serial build, both
+clean through the reader's own guards — format version, field list, node/element/level counts, mesh
+signature. Those two legs are pass/fail on the guards and not on numbers, because a CUDA trajectory
+and a Serial one are not the same trajectory and comparing them would be the sort of claim this
+paper is about not making.
+
+⚠️ **The first version of this job failed, and the failure was in the job.** Two errors, both worth
+keeping because both are easy to repeat:
+
+1. It estimated the noise floor from **one pair** of control legs. A single sample of a noisy
+   quantity is not a floor — and the corrected six-pair floor for `temp` (2.35e-04) turns out to sit
+   *above* the 2.01e-04 the one-pair version had flagged as a failure. The plan's "≥ 3 control legs"
+   exists for exactly this.
+2. Worse: the two arms did not share a checkpoint schedule. The round-trip legs checkpointed at N and
+   at N+M, the controls only at N+M — so the round-trip legs took the §2c one-ulp canonicalisation
+   kick at step N that the controls never took. An extra divergence source in one arm and not the
+   other, compared as though the arms were alike.
+
+**Task 2 is complete.** Both ports have restart I/O; the C round trip is exact at five (N, M) pairs;
+Kokkos-Serial restarted is byte-identical to C restarted; the CUDA restart is indistinguishable from
+continuous integration; and a restart file crosses backends in both directions.
 
 ## 9. Still open
 
