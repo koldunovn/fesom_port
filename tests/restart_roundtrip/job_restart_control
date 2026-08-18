@@ -1,0 +1,38 @@
+#!/bin/bash
+#SBATCH --job-name=c_rst_ctl
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/restart_control.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/restart_control.%j.err
+#
+# The control for job_restart_roundtrip: the SAME run twice, no restart
+# anywhere. Whatever these two differ by is the floor for any comparison of two
+# separate executions, restart or not. Without it a round-trip difference of
+# 1e-14 cannot be attributed to the restart.
+set -eu
+REPO=/home/a/a270088/port2/fesom2_port_zstar
+source /sw/etc/profile.levante
+source $REPO/env.sh
+ulimit -s 204800
+BIN=$REPO/build/fesom_port
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/restart_control}
+STEPS=${STEPS:-21}
+DT=1800
+export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
+export FESOM_PRINT_EVERY=1000
+rm -rf "$ROOT"; mkdir -p "$ROOT"/{C1,C2}
+for L in C1 C2; do
+  echo "=== $L: $STEPS steps ==="
+  env FESOM_RESTART_OUT="$ROOT/$L" FESOM_RESTART_EVERY=0 \
+      srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/$L" $DT $STEPS -1 "$PHC" 1958 \
+      > "$ROOT/$L/run.log" 2> "$ROOT/$L/run.err"
+done
+/work/ab0995/a270088/mambaforge/envs/nereus/bin/python \
+    "$REPO/tests/restart_roundtrip/compare_restart.py" \
+    $(ls "$ROOT"/C1/*.restart.nc) $(ls "$ROOT"/C2/*.restart.nc) | tee "$ROOT/compare.txt"
+exit ${PIPESTATUS[0]}

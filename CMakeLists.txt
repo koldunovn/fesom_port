@@ -64,6 +64,8 @@ add_executable(fesom_port
   src/fesom_step.c
   src/fesom_forcing_analytical.c
   src/fesom_io.c
+  src/fesom_io_gather.c
+  src/fesom_io_restart.c
   src/fesom_constants.c
   src/fesom_phc.c
   src/fesom_jra55.c
@@ -121,3 +123,16 @@ target_include_directories(test_io_config PRIVATE src)
 target_compile_definitions(test_io_config PRIVATE _POSIX_C_SOURCE=200809L)
 target_link_libraries(test_io_config PRIVATE m)
 add_test(NAME io_config COMMAND test_io_config)
+
+# Restart file-format test: the real write/read path on a toy six-node mesh.
+# Needs the gather/scatter TU and the halo exchange, not the whole IO stack.
+add_executable(test_restart_format
+  tests/test_restart_format.c
+  src/fesom_io_restart.c
+  src/fesom_io_gather.c
+  src/fesom_halo.c
+)
+target_include_directories(test_restart_format PRIVATE src ${NC_INCDIR})
+target_compile_definitions(test_restart_format PRIVATE _POSIX_C_SOURCE=200809L)
+target_link_libraries(test_restart_format PRIVATE m MPI::MPI_C ${NC_LIBS})
+add_test(NAME restart_format COMMAND test_restart_format)

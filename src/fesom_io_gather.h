@@ -60,4 +60,21 @@ void gather_elem(const real_t *local, int stride,
                  real_t *global,
                  MPI_Comm comm);
 
+/* The inverse of gather_node: take rank 0's [total_n × stride] buffer indexed
+ * by global node id and distribute it into each rank's [myDim_n × stride]
+ * interior block. `global` is read on rank 0 only. Halo entries are NOT filled
+ * — the caller exchanges afterwards. Used by the restart reader, which is why
+ * a restart written on N ranks can be read on M. */
+void scatter_node(const real_t *global, int stride,
+                  const gather_plan *gp,
+                  real_t *local,
+                  MPI_Comm comm);
+
+/* Same for elements. Elements are replicated across rank boundaries, so a
+ * global entry may be sent to several ranks; every copy is identical. */
+void scatter_elem(const real_t *global, int stride,
+                  const gather_plan *gp,
+                  real_t *local,
+                  MPI_Comm comm);
+
 #endif /* FESOM_IO_GATHER_H */

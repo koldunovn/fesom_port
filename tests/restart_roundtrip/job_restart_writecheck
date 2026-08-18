@@ -1,0 +1,47 @@
+#!/bin/bash
+#SBATCH --job-name=c_rst_wc
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --time=00:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/restart_writecheck.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/restart_writecheck.%j.err
+#
+# Does the WRITE reproduce, independently of the read? Leg A runs N+M steps and
+# writes at N and at N+M; leg B1 runs N steps and writes at N. A@N and B1@N come
+# from two executions of the identical trajectory, so they must agree; if they
+# do not, the round-trip comparison is measuring the writer, not the restart.
+set -eu
+REPO=/home/a/a270088/port2/fesom2_port_zstar
+source /sw/etc/profile.levante
+source $REPO/env.sh
+ulimit -s 204800
+BIN=$REPO/build/fesom_port
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/restart_writecheck}
+N=${N:-20}; M=${M:-1}; DT=1800
+export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
+export FESOM_PRINT_EVERY=1000
+rm -rf "$ROOT"; mkdir -p "$ROOT"/{A,B1,B2}
+
+env FESOM_RESTART_OUT="$ROOT/A" FESOM_RESTART_EVERY=$N \
+    srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/A" $DT $((N+M)) -1 "$PHC" 1958 \
+    > "$ROOT/A/run.log" 2> "$ROOT/A/run.err"
+env FESOM_RESTART_OUT="$ROOT/B1" FESOM_RESTART_EVERY=0 \
+    srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/B1" $DT $N -1 "$PHC" 1958 \
+    > "$ROOT/B1/run.log" 2> "$ROOT/B1/run.err"
+
+MIDA=$(ls "$ROOT"/A/*.restart.nc | head -1)
+MIDB=$(ls "$ROOT"/B1/*.restart.nc)
+CMP=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+echo "=== A@N vs B1@N (same trajectory, two executions) ==="
+$CMP "$REPO/tests/restart_roundtrip/compare_restart.py" "$MIDA" "$MIDB" | tail -4
+
+env FESOM_RESTART_IN="$MIDB" FESOM_RESTART_OUT="$ROOT/B2" FESOM_RESTART_EVERY=0 \
+    srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/B2" $DT $M -1 "$PHC" 1958 \
+    > "$ROOT/B2/run.log" 2> "$ROOT/B2/run.err"
+echo "=== A@N+M vs B2@N+M (the round trip) ==="
+$CMP "$REPO/tests/restart_roundtrip/compare_restart.py" \
+    "$(ls "$ROOT"/A/*.restart.nc | tail -1)" "$(ls "$ROOT"/B2/*.restart.nc)" | tail -4

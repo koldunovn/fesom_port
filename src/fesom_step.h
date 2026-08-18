@@ -64,10 +64,32 @@ typedef struct fesom_step_ctx {
      * (fesom_ale_zstar / fesom_use_virt_salt / fesom_is_nonlinfs), set by
      * main after fesom_ale_mode_init. linfs defaults keep every consumer on
      * the v1.0 code path. */
+    /* Set when the run resumed from a restart. Mirrors Fortran's
+     * `if (lfirst .and. (.not. r_restart))` guards: step 1 of a resumed run is
+     * not the first step of the integration, so the Adams-Bashforth
+     * cold-start treatment must not fire again. Without this the resumed leg
+     * uses ff_step = 1 where the uninterrupted run uses ab2. */
+    int    restarted;
+
     int    ale_zstar;       /* 0 = linfs (default), 1 = zstar */
     int    use_virt_salt;   /* 1 under linfs, 0 under zstar   */
     real_t is_nonlinfs;     /* 0.0 under linfs, 1.0 under zstar */
 } fesom_step_ctx;
+
+/* Bitwise state dump used by the restart round-trip diagnosis; see
+ * restart_probe in fesom_step.c. Gated by FESOM_RESTART_PROBE=<step> for the
+ * in-step call and FESOM_RESTART_PROBE_TOP=<step> for the call the driver makes
+ * at the top of the iteration, before the forcing and the ice step. */
+struct fesom_aux;
+struct fesom_forcing;
+void fesom_restart_probe_state(const char *gate_env, int step_n,
+                               const struct fesom_step_ctx *ctx,
+                               const struct fesom_mesh *mesh,
+                               struct fesom_dyn *dyn,
+                               struct fesom_tracers *tracers,
+                               const struct fesom_forcing *forcing,
+                               const struct fesom_aux *aux);
+
 
 /*
  * step_n: the current step index, 1-based to mirror Fortran. The very first

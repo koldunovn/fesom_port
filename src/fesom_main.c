@@ -21,6 +21,7 @@
 #include "fesom_sss_runoff.h"
 #include "fesom_momentum.h"
 #include "fesom_mpi.h"
+#include "fesom_io_restart.h"
 #include "fesom_phc.h"
 #include "fesom_pp.h"
 #include "fesom_ssh.h"
@@ -781,6 +782,40 @@ skip_rest_state:
      * Mirrors Fortran ice_initial_state at ice_setup_step.F90:500-521. */
     fesom_ice_initial_state(&ice, &tracers, &mpi, &mesh);
 
+    /* ------------------------------------------------------------------
+     * Restart (docs/plans/20260818-restart-io-port.md).
+     *
+     * Read here, after every array exists and has been cold-started, and
+     * before the forcing readers are opened — they are positioned from the
+     * restart's calendar rather than from the command line. Everything the
+     * restart carries is overwritten; everything else was just initialised.
+     * ------------------------------------------------------------------ */
+    fesom_restart_cfg rst;
+    fesom_restart_config(&rst);
+    int              rst_active = 0;
+    int              rst_step   = 0;
+    double           rst_dt     = 0.0;
+    fesom_calendar_t rst_cal;
+    memset(&rst_cal, 0, sizeof(rst_cal));
+    if (rst.in_path) {
+        fesom_restart_read(rst.in_path, &rst_step, &rst_dt, &rst_cal,
+                           &mesh, &dyn, &tracers, &ice,
+                           use_tke ? &tke : NULL, &stiff, &mpi);
+        rst_active = 1;
+        if (mpi.mype == 0) {
+            printf("[fesom_port] restart: read %s\n", rst.in_path);
+            printf("[fesom_port] restart: resuming at step %d, %04d-%02d-%02d %02d:%02d:%05.2f, "
+                   "dt=%.1f s\n", rst_step, rst_cal.year, rst_cal.month, rst_cal.day,
+                   rst_cal.hour, rst_cal.minute, rst_cal.second, rst_dt);
+            if (rst_dt != (double)FESOM_PHASE1_DT)
+                printf("[fesom_port] restart: WARNING dt changed %.1f -> %.1f s\n",
+                       rst_dt, (double)FESOM_PHASE1_DT);
+        }
+    }
+    if (rst.out_dir && mpi.mype == 0)
+        printf("[fesom_port] restart: writing to %s every %d steps (0 = last step only)\n",
+               rst.out_dir, rst.every);
+
     /* Phase 3 step 24: JRA55-do daily forcing.
        If jra55_year > 0, init JRA55 reader + bulk formulae + SSS restoring +
        CORE2 runoff; the timestep loop below calls fesom_jra55_step,
@@ -788,9 +823,12 @@ skip_rest_state:
        Otherwise fall back to Phase 2 analytical wind. */
     fesom_jra55 jra; int use_jra = 0;
     fesom_sss_runoff sr; int use_sr = 0;
+    /* On a restart the forcing year comes from the restart clock; the command
+     * line only decides WHETHER JRA55 is used. */
+    const int jra_year0 = rst_active ? rst_cal.year : jra55_year;
     if (jra55_year > 0) {
         fesom_jra55_init(&jra, &mesh);
-        fesom_jra55_open_year(&jra, &mesh, jra55_year);
+        fesom_jra55_open_year(&jra, &mesh, jra_year0);
         use_jra = 1;
         /* Phase 3 step 25 paths from work_core/namelist.forcing. */
         const char *sss_path    = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/PHC2_salx.nc";
@@ -816,8 +854,21 @@ skip_rest_state:
         /* Compute the very-first surface state for this set of bulk inputs
            so the first timestep sees forcing immediately. uvnode is zero at
            IC (UV=0); T_oc from initial T field. */
-        fesom_jra55_step(&jra, &mesh, &mpi, jra55_year, /*daynew=*/1, /*timenew=*/0.0);
-        fesom_compute_vel_nodes(&mesh, &dyn);
+        /* Position the reader on the restart date so the pre-loop diagnostics
+         * below describe the state the run actually resumes from. The loop's
+         * first iteration re-derives all of this from the calendar anyway. */
+        if (rst_active)
+            fesom_jra55_step(&jra, &mesh, &mpi, jra_year0,
+                             fesom_calendar_day_of_year(&rst_cal),
+                             (real_t)(rst_cal.hour * 3600 + rst_cal.minute * 60
+                                      + rst_cal.second));
+        else
+            fesom_jra55_step(&jra, &mesh, &mpi, jra55_year, /*daynew=*/1, /*timenew=*/0.0);
+        /* NOT on a restart: uvnode came out of the file holding the value the
+         * next bulk call is supposed to see, and recomputing it from the saved
+         * uv would advance it by one step. */
+        if (!rst_active)
+            fesom_compute_vel_nodes(&mesh, &dyn);
         fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi);
         real_t tx_min = forcing.stress_surf[0], tx_max = tx_min;
         for (int e = 1; e < mesh.myDim_elem2D; ++e) {
@@ -871,6 +922,7 @@ skip_rest_state:
                                .tke    = use_tke ? &tke : NULL,
                                .jra    = use_jra ? &jra : NULL,
                                .sr     = use_sr  ? &sr  : NULL,
+                               .restarted     = rst_active,
                                .ale_zstar     = fesom_ale_zstar,
                                .use_virt_salt = fesom_use_virt_salt,
                                .is_nonlinfs   = fesom_is_nonlinfs };
@@ -929,14 +981,33 @@ skip_rest_state:
              * de-facto default and avoid confusion when files written by
              * an analytical run sit alongside JRA55-driven output. */
             int start_year = (jra55_year > 0) ? jra55_year : 1958;
+            int start_month = 1, start_day = 1;
+            if (rst_active) {
+                start_year  = rst_cal.year;
+                start_month = rst_cal.month;
+                start_day   = rst_cal.day;
+            }
             const char *io_out = (out_dir != NULL) ? out_dir : ".";
             /* Optional override file: FESOM_IO_CONFIG=<path>. Empty / unset
              * → use compiled-in monthly-only default. */
             const char *cfg_path = getenv("FESOM_IO_CONFIG");
             fesom_io_init(&io, io_out, FESOM_CAL_GREGORIAN,
-                          start_year, 1, 1,
+                          start_year, start_month, start_day,
                           cfg_path,
                           &mesh, &mpi);
+            if (rst_active) {
+                /* fesom_io_init starts the clock at midnight and anchors the CF
+                 * origin to the start date. A restart resumes mid-day and must
+                 * keep the original origin, or the time axis of the continued
+                 * run would not join up with the one before it. */
+                io.calendar.hour         = rst_cal.hour;
+                io.calendar.minute       = rst_cal.minute;
+                io.calendar.second       = rst_cal.second;
+                io.calendar.origin_year  = rst_cal.origin_year;
+                io.calendar.origin_month = rst_cal.origin_month;
+                io.calendar.origin_day   = rst_cal.origin_day;
+                io.prev_calendar         = io.calendar;
+            }
         }
 
         if (out_dir && snap_every > 0) {
@@ -951,6 +1022,10 @@ skip_rest_state:
         }
 
         for (int n = 1; n <= nsteps; ++n) {
+            /* Before the forcing readers and the ice step: the restored state
+             * exactly as the driver loop first sees it. */
+            fesom_restart_probe_state("FESOM_RESTART_PROBE_TOP", n, &ctx, &mesh,
+                                      &dyn, &tracers, &forcing, &aux);
             if (use_jra) {
                 /* Calendar crosses year boundaries cleanly now that
                  * fesom_jra55_step_cal calls open_year on rollover; the
@@ -1070,6 +1145,20 @@ skip_rest_state:
                 fesom_state st = { &mesh, &dyn, &tracers, &aux, &ice, &forcing,
                                    use_tke ? &tke : NULL };
                 fesom_io_step(&io, (double)FESOM_PHASE1_DT, &st, &mpi);
+            }
+
+            /* Restart write. After fesom_io_step, so the clock in the file is
+             * the clock of the state in it. The absolute step continues the
+             * chain rather than restarting at 1. */
+            if (fesom_restart_due(&rst, n, nsteps)) {
+                char rpath[1024];
+                fesom_restart_path(rpath, sizeof rpath, rst.out_dir, &io.calendar);
+                fesom_restart_write(rpath, rst_step + n, (double)FESOM_PHASE1_DT,
+                                    &io.calendar, &mesh, &dyn, &tracers, &ice,
+                                    use_tke ? &tke : NULL, &stiff, &mpi);
+                if (mpi.mype == 0)
+                    printf("[fesom_port] restart: wrote %s (step %d)\n",
+                           rpath, rst_step + n);
             }
             if (n == 1 || n % print_every == 0 || n == nsteps) {
                 /* Iterate myDim only for stat collection — halo entries are
