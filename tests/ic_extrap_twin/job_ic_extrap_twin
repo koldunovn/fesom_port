@@ -1,0 +1,88 @@
+#!/bin/bash
+#SBATCH --job-name=ic_twin
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=32
+#SBATCH --time=01:00:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/ic_extrap_twin.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/ic_extrap_twin.%j.err
+#
+# Task 3's gate. FESOM_RESTART_IC writes the initial condition through the
+# restart writer, which gathers to GLOBAL ids — so the file does not depend on
+# the rank count, and the IC can be compared with no timestep in between and no
+# model behaviour mixed in.
+#
+# Four questions, in the order that makes a failure attributable:
+#
+#   1  legacy @8 vs legacy @16   the DEFECT. The legacy Gauss-Seidel fill is
+#                                order- and partition-dependent, so this is
+#                                EXPECTED TO DIFFER. If it does not, the test
+#                                is not exercising the thing it claims to.
+#   2  det @8    vs det @16      the CLAIM: partition-independent. Must be exact.
+#   3  C det @8  vs Kokkos det @8   the TWIN: the back-port is faithful. Exact.
+#   4  C legacy  vs C legacy       a control: the writer is deterministic. Exact.
+#
+# 8 and 16 ranks on one node; the run stops before the first step, so this costs
+# initialisation only.
+set -u
+CREF=/home/a/a270088/port2/fesom2_port_zstar
+KK=/home/a/a270088/port_kokkos_int
+source /sw/etc/profile.levante
+source "$CREF/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/ic_extrap_twin}
+CMP=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+DIFF="$CREF/tests/restart_roundtrip/compare_restart.py"
+CBIN=$CREF/build/fesom_port
+KBIN=$KK/build-m14serial/fesom_port
+
+export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
+export FESOM_PRINT_EVERY=1000
+rm -rf "$ROOT"; mkdir -p "$ROOT"
+{ echo "C   $(cd "$CREF" && git rev-parse HEAD)"
+  echo "KK  $(cd "$KK"   && git rev-parse HEAD)"; } > "$ROOT/PROVENANCE.txt"
+
+ic () {   # $1 tag, $2 binary, $3 nranks, $4 FESOM_IC_EXTRAP value
+    local out="$ROOT/$1"; mkdir -p "$out"
+    # nsteps=1, NOT 0: the driver reads `0` as "unset" and falls back to its
+    # 500-step default (fesom_main.c: nsteps_cli > 0 ? nsteps_cli : 500), which
+    # the first version of this job walked straight into. One step is harmless
+    # here — FESOM_RESTART_IC writes before the loop, so the file compared is
+    # still the initial condition with no timestep in it.
+    env FESOM_IC_EXTRAP="$4" FESOM_RESTART_IC="$out" \
+        srun -l --ntasks="$3" "$2" "$MESH" "$out" 1800 1 -1 "$PHC" 1958 \
+        > "$out/run.log" 2> "$out/run.err"
+    echo "$1 rc=$? file=$(ls "$out"/fesom.ic.restart.nc 2>/dev/null | wc -l)"
+}
+
+ic c_legacy_8   "$CBIN" 8  legacy
+ic c_legacy_8b  "$CBIN" 8  legacy
+ic c_legacy_16  "$CBIN" 16 legacy
+ic c_det_8      "$CBIN" 8  det
+ic c_det_16     "$CBIN" 16 det
+ic k_det_8      "$KBIN" 8  det
+
+rc=0
+q () {   # $1 $2 = tags, $3 = expectation (same|differ), $4 = headline
+    local a="$ROOT/$1/fesom.ic.restart.nc" b="$ROOT/$2/fesom.ic.restart.nc"
+    echo; echo "=== $4 ==="
+    if "$CMP" "$DIFF" "$a" "$b" > "$ROOT/cmp_$1_$2.txt" 2>&1; then got=same; else got=differ; fi
+    if [ "$got" = "$3" ]; then
+        echo "PASS ($got, as expected)"
+    else
+        echo "FAIL (expected $3, got $got)"; rc=1
+        grep -E 'DIFFERS|max\|A-B\|' "$ROOT/cmp_$1_$2.txt" | head -6
+    fi
+    [ "$3" = differ ] && grep -E '^(temp|salt) ' "$ROOT/cmp_$1_$2.txt" | head -2
+}
+
+q c_legacy_8 c_legacy_8b same   "control: the IC writer is deterministic"
+q c_legacy_8 c_legacy_16 differ "the defect: legacy fill depends on the partition"
+q c_det_8    c_det_16    same   "the claim: det fill does NOT depend on the partition"
+q c_det_8    k_det_8     same   "the twin: C det == Kokkos det"
+echo; echo "ic twin exit $rc"; exit $rc

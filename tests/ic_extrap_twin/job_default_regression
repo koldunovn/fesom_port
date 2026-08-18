@@ -1,0 +1,60 @@
+#!/bin/bash
+#SBATCH --job-name=ic_defreg
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks=8
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/ic_default_regression.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/ic_default_regression.%j.err
+#
+# With every new knob unset, is the model still the model it was?
+#
+# Baseline df8b9a8 is the C reference as it stood before this campaign touched
+# it — before the restart layer, the probes and the deterministic IC fill. All
+# of those are supposed to be inert when unasked for, and "supposed to be" is
+# not evidence: the restart write canonicalises replicated elements, the AB
+# guard gained a term, and the IC gained a branch. Any of the three could have
+# leaked into the default path.
+#
+# 20 steps with snapshots at 0/10/20, zero tolerance, all fields. The 20-step
+# window is the project's standard for this: a change that makes a constant
+# array time-varying is bitwise-equal at cold start and only shows from step 2.
+set -u
+CREF=/home/a/a270088/port2/fesom2_port_zstar
+BASE=${BASE:-/scratch/a/a270088/tmp/claude-24253/-home-a-a270088-port-paper/97079955-c757-4469-8892-0fff215937b1/scratchpad/base_df8b9a8}
+source /sw/etc/profile.levante
+source "$CREF/env.sh"
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/ic_default_regression}
+rm -rf "$ROOT"; mkdir -p "$ROOT"/{base,now}
+
+export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
+export FESOM_PRINT_EVERY=1000
+# Every knob this campaign added, explicitly OFF — grep the environment rather
+# than listing names, so one added later cannot leak in silently.
+while read -r v; do unset "$v"; done < <(env | sed -n 's/^\(FESOM_RESTART[A-Za-z0-9_]*\)=.*/\1/p')
+unset FESOM_IC_EXTRAP FESOM_IC_EXTRAP_TOL FESOM_IO_GATHER_DUPCHECK || true
+
+echo "=== baseline df8b9a8 ==="
+srun -l --ntasks=8 "$BASE/build/fesom_port" "$MESH" "$ROOT/base" 1800 20 10 "$PHC" 1958 \
+     > "$ROOT/base/run.log" 2> "$ROOT/base/run.err"; echo "rc=$?"
+echo "=== current HEAD, all new knobs unset ==="
+srun -l --ntasks=8 "$CREF/build/fesom_port" "$MESH" "$ROOT/now" 1800 20 10 "$PHC" 1958 \
+     > "$ROOT/now/run.log" 2> "$ROOT/now/run.err"; echo "rc=$?"
+
+echo
+echo "=== diff_snap.py, zero tolerance, all fields ==="
+/work/ab0995/a270088/mambaforge/envs/nereus/bin/python \
+    "$CREF/scripts/diff_snap.py" "$ROOT/base" "$ROOT/now"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+    echo "PASS: the default path is byte-identical to df8b9a8"
+else
+    echo "FAIL: something this campaign added is not inert when unset"
+fi
+exit $rc

@@ -816,6 +816,25 @@ skip_rest_state:
         printf("[fesom_port] restart: writing to %s every %d steps (0 = last step only)\n",
                rst.out_dir, rst.every);
 
+    /* FESOM_RESTART_IC: the initial condition as a restart file, before any
+     * step. The restart writer gathers to global ids, so the file does not
+     * depend on the rank count — which is what makes it the instrument for
+     * comparing two IC extrapolations (see the knob's note in the header).
+     * The calendar is not up yet at this point, so the name is fixed rather
+     * than dated: there is exactly one of these per run. */
+    if (rst.ic_dir) {
+        char icpath[1024];
+        snprintf(icpath, sizeof icpath, "%s/fesom.ic.restart.nc", rst.ic_dir);
+        fesom_calendar_t ic_cal;
+        fesom_calendar_init(&ic_cal, FESOM_CAL_GREGORIAN,
+                            (jra55_year > 0) ? jra55_year : 1958, 1, 1);
+        fesom_restart_write(icpath, 0, (double)FESOM_PHASE1_DT, &ic_cal,
+                            &mesh, &dyn, &tracers, &ice,
+                            use_tke ? &tke : NULL, &stiff, &mpi);
+        if (mpi.mype == 0)
+            printf("[fesom_port] restart: wrote the initial condition to %s\n", icpath);
+    }
+
     /* Phase 3 step 24: JRA55-do daily forcing.
        If jra55_year > 0, init JRA55 reader + bulk formulae + SSS restoring +
        CORE2 runoff; the timestep loop below calls fesom_jra55_step,

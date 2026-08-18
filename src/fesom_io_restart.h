@@ -25,7 +25,19 @@
  * Off unless asked for:
  *   FESOM_RESTART_OUT=<dir>    write restarts here
  *   FESOM_RESTART_EVERY=<n>    ... every n steps (0 = only at the last step)
+ *   FESOM_RESTART_AT=<n,...>   ... and at these steps as well
  *   FESOM_RESTART_IN=<file>    start from this file instead of the PHC IC
+ *   FESOM_RESTART_IC=<dir>     write <dir>/fesom.ic.restart.nc once, straight
+ *                              after initialisation and BEFORE the first step
+ *
+ * FESOM_RESTART_IC exists so the initial condition can be compared without the
+ * model in between. The restart writer already gathers to global ids, so the
+ * file it produces is partition-independent by construction — which makes it
+ * the right instrument for two questions the IC extrapolation raises: does the
+ * C fill agree with the Kokkos fill (the twin), and does a fill agree with
+ * itself at a different rank count (what FESOM_IC_EXTRAP=det claims and the
+ * legacy fill does not). Both are answered with compare_restart.py and no
+ * timestep is taken.
  */
 #ifndef FESOM_IO_RESTART_H
 #define FESOM_IO_RESTART_H
@@ -56,6 +68,7 @@ typedef struct fesom_restart_cfg {
      * fixed interval cannot express "at N and at N+M" for arbitrary M. */
     int         at[FESOM_RESTART_MAX_AT];
     int         n_at;
+    const char *ic_dir;     /* FESOM_RESTART_IC — dump the IC, then step on */
 } fesom_restart_cfg;
 
 /* Read the three environment variables. Never fails; an unset knob is off. */

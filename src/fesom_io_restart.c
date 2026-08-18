@@ -423,8 +423,10 @@ void fesom_restart_config(fesom_restart_cfg *cfg)
     const char *in    = getenv("FESOM_RESTART_IN");
     const char *every = getenv("FESOM_RESTART_EVERY");
     const char *at    = getenv("FESOM_RESTART_AT");
+    const char *icd   = getenv("FESOM_RESTART_IC");
     cfg->out_dir = (out && out[0]) ? out : NULL;
     cfg->in_path = (in  && in[0])  ? in  : NULL;
+    cfg->ic_dir  = (icd && icd[0]) ? icd : NULL;
     cfg->every   = (every && every[0]) ? atoi(every) : 0;
     FESOM_CHECK(cfg->every >= 0, "FESOM_RESTART_EVERY must not be negative");
     cfg->n_at = 0;
