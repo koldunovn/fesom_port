@@ -11,8 +11,35 @@
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
 
+#include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ------------------------------------------------------------------ *
+ * Duplicate-write check (FESOM_IO_GATHER_DUPCHECK=1)                  *
+ *                                                                     *
+ * Nodes are owned exclusively, elements are not: in the FESOM
+ * partitioning an element with nodes on two ranks sits in the OWNED
+ * range of both, and both ranks compute it. gather_elem therefore
+ * writes some global element ids more than once and keeps whichever
+ * rank came last. That is only harmless if the replicated copies hold
+ * the same bytes. If they do not, a gather followed by a scatter is
+ * not the identity: it replaces each rank's own copy with one rank's,
+ * which is exactly what a restart round trip would show as a small
+ * difference in the element fields and in nothing else.
+ *
+ * This counts the duplicates and how many of them disagree.
+ * ------------------------------------------------------------------ */
+static const char *g_gather_label = "?";
+
+void gather_set_label(const char *label) { g_gather_label = label ? label : "?"; }
+
+static int dupcheck_on(void)
+{
+    const char *e = getenv("FESOM_IO_GATHER_DUPCHECK");
+    return e && atoi(e);
+}
 
 /* ------------------------------------------------------------------ */
 
@@ -130,13 +157,40 @@ void gather_elem(const real_t *local, int stride,
     MPI_Gatherv((void *)local, gp->myDim_e * stride, MPI_DOUBLE,
                 recv, counts, displs, MPI_DOUBLE, 0, comm);
     if (gp->mype == 0) {
+        /* gid < elem2D <= total_e, so total_e is a safe size for the flag. */
+        char *seen = dupcheck_on() ? calloc((size_t)gp->total_e, 1) : NULL;
+        long ndup = 0, ndiff = 0; double maxd = 0.0;
         for (int r = 0; r < gp->npes; ++r) {
             for (int i = 0; i < gp->all_e[r]; ++i) {
                 int gid = gp->gathered_myList_e[gp->displ_e[r] + i] - 1;
-                memcpy(global + (size_t)gid * stride,
-                       recv + ((size_t)gp->displ_e[r] + i) * stride,
-                       (size_t)stride * sizeof(real_t));
+                const real_t *src = recv + ((size_t)gp->displ_e[r] + i) * stride;
+                real_t       *dst = global + (size_t)gid * stride;
+                if (seen) {
+                    if (seen[gid]) {
+                        ++ndup;
+                        for (int k = 0; k < stride; ++k) {
+                            if (memcmp(&dst[k], &src[k], sizeof(real_t)) != 0) {
+                                double d = fabs((double)dst[k] - (double)src[k]);
+                                if (d > maxd) maxd = d;
+                                ++ndiff;
+                                break;
+                            }
+                        }
+                    }
+                    seen[gid] = 1;
+                }
+                memcpy(dst, src, (size_t)stride * sizeof(real_t));
             }
+        }
+        if (seen) {
+            fprintf(stderr, "[gather-dup] %-10s stride=%-5d duplicates=%ld "
+                            "disagreeing=%ld max|d|=%.3e\n",
+                    g_gather_label, stride, ndup, ndiff, maxd);
+            fflush(stderr);
+            free(seen);
+            /* One label per call: the output writer's gathers do not set one,
+             * and a leftover label there would name the wrong field. */
+            g_gather_label = "?";
         }
         free(recv); free(counts); free(displs);
     }

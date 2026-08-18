@@ -1,0 +1,56 @@
+#!/bin/bash
+#SBATCH --job-name=c_rst_cad
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --time=00:40:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/restart_cadence.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/restart_cadence.%j.err
+#
+# How much does checkpointing perturb the trajectory?
+#
+# Writing a restart canonicalises the replicated element slots (rst_canonicalise
+# in src/fesom_io_restart.c), so the trajectory depends on how often you
+# checkpoint. The port plan claims that dependence is at roundoff. This measures
+# it instead of asserting it.
+#
+#   P: 200 steps, checkpoint every 10   -> 19 extra canonicalisations
+#   Q: 200 steps, checkpoint at the end -> 1
+#   R: like P but FESOM_RESTART_CANONICALIZE=0
+#
+# R vs Q must be EXACT: without the canonicalisation, writing a file changes
+# nothing, so any P-Q difference is the canonicalisation and nothing else.
+set -eu
+REPO=/home/a/a270088/port2/fesom2_port_zstar
+source /sw/etc/profile.levante
+source $REPO/env.sh
+ulimit -s 204800
+BIN=$REPO/build/fesom_port
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=${ROOT:-/work/ab0995/a270088/port_paper_v2/runs/restart_cadence}
+N=${N:-200}; EVERY=${EVERY:-10}; DT=1800
+export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
+export FESOM_PRINT_EVERY=1000
+rm -rf "$ROOT"; mkdir -p "$ROOT"/{P,Q,R}
+CMP=/work/ab0995/a270088/mambaforge/envs/nereus/bin/python
+
+env FESOM_RESTART_OUT="$ROOT/P" FESOM_RESTART_EVERY=$EVERY \
+    srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/P" $DT $N -1 "$PHC" 1958 \
+    > "$ROOT/P/run.log" 2> "$ROOT/P/run.err"
+env FESOM_RESTART_OUT="$ROOT/Q" FESOM_RESTART_EVERY=0 \
+    srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/Q" $DT $N -1 "$PHC" 1958 \
+    > "$ROOT/Q/run.log" 2> "$ROOT/Q/run.err"
+env FESOM_RESTART_OUT="$ROOT/R" FESOM_RESTART_EVERY=$EVERY FESOM_RESTART_CANONICALIZE=0 \
+    srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/R" $DT $N -1 "$PHC" 1958 \
+    > "$ROOT/R/run.log" 2> "$ROOT/R/run.err"
+
+echo "=== R vs Q: writing without canonicalising must change nothing ==="
+$CMP "$REPO/tests/restart_roundtrip/compare_restart.py" \
+     "$(ls "$ROOT"/R/*.restart.nc | tail -1)" "$(ls "$ROOT"/Q/*.restart.nc | tail -1)" | tail -3
+echo
+echo "=== P vs Q: the cost of checkpointing every $EVERY steps over $N ==="
+$CMP "$REPO/tests/restart_roundtrip/compare_restart.py" \
+     "$(ls "$ROOT"/P/*.restart.nc | tail -1)" "$(ls "$ROOT"/Q/*.restart.nc | tail -1)" \
+     | grep -E 'ssh|temp |salt |^u |^v |PASS|FAIL' || true

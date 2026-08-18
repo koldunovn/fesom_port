@@ -378,6 +378,26 @@ static void test_config_and_cadence(void)
     fesom_restart_config(&cfg);
     CHECK(fesom_restart_due(&cfg, 5, 20) == 0);
     CHECK(fesom_restart_due(&cfg, 20, 20) == 1);
+
+    /* FESOM_RESTART_AT — explicit steps, on top of `every` and the last step.
+     * The round-trip gate needs "at N and at N+M", which no interval gives. */
+    setenv("FESOM_RESTART_OUT", "/tmp/x", 1);
+    setenv("FESOM_RESTART_AT", "3, 7,11", 1);
+    fesom_restart_config(&cfg);
+    CHECK(cfg.n_at == 3);
+    CHECK(cfg.at[0] == 3 && cfg.at[1] == 7 && cfg.at[2] == 11);
+    CHECK(fesom_restart_due(&cfg, 3, 20) == 1);
+    CHECK(fesom_restart_due(&cfg, 7, 20) == 1);
+    CHECK(fesom_restart_due(&cfg, 11, 20) == 1);
+    CHECK(fesom_restart_due(&cfg, 4, 20) == 0);
+    CHECK(fesom_restart_due(&cfg, 20, 20) == 1);     /* last step still */
+    setenv("FESOM_RESTART_EVERY", "5", 1);           /* and it composes */
+    fesom_restart_config(&cfg);
+    CHECK(fesom_restart_due(&cfg, 5, 20) == 1);
+    CHECK(fesom_restart_due(&cfg, 7, 20) == 1);
+    unsetenv("FESOM_RESTART_AT");
+    fesom_restart_config(&cfg);
+    CHECK(cfg.n_at == 0);
     unsetenv("FESOM_RESTART_OUT"); unsetenv("FESOM_RESTART_EVERY");
 
     fesom_calendar_t cal = a_calendar();

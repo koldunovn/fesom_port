@@ -57,46 +57,63 @@ static unsigned long long probe_xor(const real_t *a, size_t n)
     return h;
 }
 
+/* Which tag probe_one stamps on its lines. Two things go into the tag rather
+ * than into the message: which gate fired (top of the driver iteration vs
+ * inside the step) and whether the array is state the restart carries or an
+ * array the step rebuilds from scratch anyway. That way the two legs of a
+ * round-trip can be diffed one block at a time, and the block that is
+ * *expected* to differ at the top of a resumed step does not drown the one
+ * that must not. */
+static char g_probe_tag[16] = "probe";
+
 static void probe_one(const char *name, const real_t *a, size_t n, fesom_partit *p)
 {
     unsigned long long h = probe_xor(a, n), g = 0;
     MPI_Allreduce(&h, &g, 1, MPI_UNSIGNED_LONG_LONG, MPI_BXOR, p->MPI_COMM_FESOM);
-    if (p->mype == 0) fprintf(stderr, "[probe] %-12s %016llx\n", name, g);
+    if (p->mype == 0) fprintf(stderr, "[%s] %-12s %016llx\n", g_probe_tag, name, g);
 }
 
-static void restart_probe_gated(const char *gate_env, int step_n, const fesom_step_ctx *ctx,
-                          const struct fesom_mesh *mesh, struct fesom_dyn *dyn,
-                          struct fesom_tracers *tracers,
-                          const struct fesom_forcing *forcing,
-                          const struct fesom_aux *aux)
+/* One pass of the checksum block.
+ *
+ *   owned == 0 : the full local extent, owned entries AND halo copies. A
+ *                difference here that is absent from the owned pass is a halo
+ *                the resumed run has not filled -- harmless if nothing reads
+ *                it, a bug if something does, and the two cases cannot be told
+ *                apart by the checksum alone.
+ *   owned != 0 : owned entries only. This is what the restart file carries, so
+ *                a difference here is unambiguous: the restored state is wrong.
+ */
+static void probe_block(int owned, int top, const fesom_step_ctx *ctx,
+                        const struct fesom_mesh *mesh, struct fesom_dyn *dyn,
+                        struct fesom_tracers *tracers,
+                        const struct fesom_forcing *forcing,
+                        const struct fesom_aux *aux)
 {
-    const char *e = getenv(gate_env);
-    if (!e || atoi(e) != step_n) return;
-    fesom_partit *p = ctx->partit;
-    const size_t N   = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D);
-    const size_t E   = (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D);
+    fesom_partit *p  = ctx->partit;
+    const size_t N   = owned ? (size_t)mesh->myDim_nod2D
+                             : (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D);
+    const size_t E   = owned ? (size_t)mesh->myDim_elem2D
+                             : (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D
+                                        + mesh->eXDim_elem2D);
     const size_t nl  = (size_t)mesh->nl;
-    if (p->mype == 0) fprintf(stderr, "[probe] === step %d ===\n", step_n);
+    snprintf(g_probe_tag, sizeof g_probe_tag, "%s%s",
+             top ? "probeT" : "probe", owned ? "O" : "");
     probe_one("eta_n",     dyn->eta_n,       N, p);
     probe_one("d_eta",     dyn->d_eta,       N, p);
     probe_one("ssh_rhs_o", dyn->ssh_rhs_old, N, p);
     probe_one("hbar",      mesh->hbar,       N, p);
     probe_one("hbar_old",  mesh->hbar_old,   N, p);
     probe_one("hnode",     mesh->hnode,      N * nl, p);
-    probe_one("hnode_new", mesh->hnode_new,  N * nl, p);
     probe_one("zbar_3d_n", mesh->zbar_3d_n,  N * nl, p);
     probe_one("Z_3d_n",    mesh->Z_3d_n,     N * nl, p);
     probe_one("helem",     mesh->helem,      E * nl, p);
     probe_one("dhe",       mesh->dhe,        E, p);
     probe_one("uv",        dyn->uv,          E * nl * 2, p);
     probe_one("uv_rhsAB",  dyn->uv_rhsAB,    E * nl * 2, p);
-    probe_one("uv_rhs",    dyn->uv_rhs,      E * nl * 2, p);
     probe_one("uvnode",    dyn->uvnode,      N * nl * 2, p);
-    probe_one("uvnode_rhs",dyn->uvnode_rhs,  N * nl * 2, p);
     probe_one("w",         dyn->w,           N * nl, p);
     probe_one("w_e",       dyn->w_e,         N * nl, p);
     probe_one("w_i",       dyn->w_i,         N * nl, p);
-    probe_one("cfl_z",     dyn->cfl_z,       N * nl, p);
     probe_one("temp",      tracers->data[FESOM_TRACER_T].values,    N * nl, p);
     probe_one("temp_AB",   tracers->data[FESOM_TRACER_T].valuesAB,  N * nl, p);
     probe_one("temp_M1",   tracers->data[FESOM_TRACER_T].valuesold, N * nl, p);
@@ -115,11 +132,28 @@ static void restart_probe_gated(const char *gate_env, int step_n, const fesom_st
         probe_one("sigma11", ic->work.sigma11, E, p);
         probe_one("sigma12", ic->work.sigma12, E, p);
         probe_one("sigma22", ic->work.sigma22, E, p);
-        probe_one("thdgr",   ic->thermo.thdgr, N, p);
+    }
+    probe_one("stiff",     ctx->stiff->values, (size_t)ctx->stiff->rowptr[ctx->stiff->dim], p);
+
+    /* Below this line nothing is restart-carried state, so at the top of a
+     * resumed step the two legs are expected to differ: the forcing has not
+     * been read yet and the scratch still holds the previous step. The tag
+     * changes so the state block above can be read on its own. */
+    snprintf(g_probe_tag, sizeof g_probe_tag, "%s%sX",
+             top ? "probeT" : "probe", owned ? "O" : "");
+    /* Written every step before they are read, so they are not state -- but
+     * they were in the block above until the round-trip gate made the
+     * distinction matter, and mislabelling them cost a diagnosis. */
+    probe_one("hnode_new", mesh->hnode_new,  N * nl, p);
+    probe_one("uv_rhs",    dyn->uv_rhs,      E * nl * 2, p);
+    probe_one("uvnode_rhs",dyn->uvnode_rhs,  N * nl * 2, p);
+    probe_one("cfl_z",     dyn->cfl_z,       N * nl, p);
+    if (ctx->ice) {
+        const struct fesom_ice *ic = ctx->ice;
+        probe_one("thdgr",       ic->thermo.thdgr,    N, p);
         probe_one("stress_ai_x", ic->stress_atmice_x, N, p);
         probe_one("stress_io_x", ic->stress_iceoce_x, N, p);
     }
-    probe_one("stiff",     ctx->stiff->values, (size_t)ctx->stiff->rowptr[ctx->stiff->dim], p);
     /* The forcing is not model state — it is rebuilt at the top of every
      * iteration — but it is what the step consumes, so a reader positioned
      * differently after a restart shows up here and nowhere else. */
@@ -183,6 +217,21 @@ static void restart_probe_gated(const char *gate_env, int step_n, const fesom_st
     if (p->mype == 0) fflush(stderr);
 }
 
+static void restart_probe_gated(const char *gate_env, int step_n, const fesom_step_ctx *ctx,
+                          const struct fesom_mesh *mesh, struct fesom_dyn *dyn,
+                          struct fesom_tracers *tracers,
+                          const struct fesom_forcing *forcing,
+                          const struct fesom_aux *aux)
+{
+    const char *e = getenv(gate_env);
+    if (!e || atoi(e) != step_n) return;
+    const int top = strstr(gate_env, "TOP") != NULL;
+    if (ctx->partit->mype == 0)
+        fprintf(stderr, "[probe-hdr] %s of step %d\n", top ? "top" : "inside", step_n);
+    probe_block(/*owned=*/1, top, ctx, mesh, dyn, tracers, forcing, aux);
+    probe_block(/*owned=*/0, top, ctx, mesh, dyn, tracers, forcing, aux);
+}
+
 /* Stage checksums inside the step, same gate as restart_probe. Answers "where
  * in the step do the two runs first disagree" without a debugger. */
 static int probe_on(int step_n)
@@ -197,8 +246,10 @@ static void probe_stage(const char *tag, int step_n, const fesom_step_ctx *ctx,
 {
     if (!probe_on(step_n)) return;
     fesom_partit *p = ctx->partit;
-    const size_t N  = (size_t)(mesh->myDim_nod2D + mesh->eDim_nod2D);
-    const size_t E  = (size_t)(mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D);
+    /* Owned entries only, for the same reason probe_block runs an owned pass:
+     * a stale halo is not a divergence and must not read like one. */
+    const size_t N  = (size_t)mesh->myDim_nod2D;
+    const size_t E  = (size_t)mesh->myDim_elem2D;
     const size_t nl = (size_t)mesh->nl;
     if (p->mype == 0) fprintf(stderr, "[stage] --- %s ---\n", tag);
     struct { const char *n; const real_t *a; size_t len; } v[] = {

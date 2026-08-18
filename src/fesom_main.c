@@ -1006,6 +1006,16 @@ skip_rest_state:
                 io.calendar.origin_year  = rst_cal.origin_year;
                 io.calendar.origin_month = rst_cal.origin_month;
                 io.calendar.origin_day   = rst_cal.origin_day;
+                /* prev_calendar is NOT in the restart file, and is set equal to
+                 * calendar rather than one step behind it. That is safe only
+                 * because both of its readers at the top of the loop --
+                 * fesom_sss_runoff_step_cal and the chlorophyll climatology --
+                 * fire on `n == 1` as well as on a month crossing, and both
+                 * then pick their month from io.calendar, which IS restored.
+                 * fesom_io_step overwrites prev_calendar at the end of the
+                 * first resumed step, so nothing downstream sees it either.
+                 * Verified, not assumed; if either `n == 1` guard is ever
+                 * removed, prev_calendar has to go into the file. */
                 io.prev_calendar         = io.calendar;
             }
         }

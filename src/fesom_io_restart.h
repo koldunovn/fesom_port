@@ -43,10 +43,19 @@ struct fesom_ssh_stiff;
 
 #define FESOM_RESTART_FORMAT_VERSION 1
 
+#define FESOM_RESTART_MAX_AT 64
+
 typedef struct fesom_restart_cfg {
     const char *out_dir;    /* NULL when writing is off  */
     const char *in_path;    /* NULL for a cold start     */
     int         every;      /* steps between restarts; 0 = last step only */
+    /* FESOM_RESTART_AT=<n1,n2,...> — explicit step numbers, in addition to
+     * `every` and to the last step. The round-trip gate needs it: with the
+     * write canonicalising the replicated elements, the uninterrupted leg has
+     * to checkpoint at exactly the same step as the interrupted one, and a
+     * fixed interval cannot express "at N and at N+M" for arbitrary M. */
+    int         at[FESOM_RESTART_MAX_AT];
+    int         n_at;
 } fesom_restart_cfg;
 
 /* Read the three environment variables. Never fails; an unset knob is off. */

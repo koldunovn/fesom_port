@@ -11,12 +11,23 @@
 # The round-trip byte gate for the C restart port
 # (docs/plans/20260818-restart-io-port.md §5).
 #
-#   leg A: N+M steps in one go, restart written at the end
+#   leg A: N+M steps in one go, checkpointing at N and at N+M
 #   leg B: N steps, restart; then a fresh process resumes from it for M more
 #
 # The two final restart files must be identical field by field. They are the
 # right object to compare because the restart file IS the model's persistent
 # state; comparing output snapshots would only cover what the streams write.
+#
+# Leg A checkpoints at N as well, and that is not a formality. Elements that
+# straddle a partition boundary are owned -- and computed -- on more than one
+# rank, and the edge-loop viscosity gives them the same sum in a different
+# order on each, so their copies drift apart at roundoff. No
+# partition-independent file can record which rank held which rounding, so
+# "resumed run == run that never stopped" is not attainable. What is attainable,
+# and is what a checkpointed hindcast actually needs, is "resumed run == run
+# that checkpointed at the same step and carried on": writing a restart pushes
+# the gathered element values back into the live arrays, so both legs continue
+# from the same bits. See rst_canonicalise in src/fesom_io_restart.c.
 #
 # Configuration is the paper's: zstar + cvmix_TKE + mEVP, dt=1800, JRA55 1958.
 set -eu
@@ -43,8 +54,8 @@ rm -rf "$ROOT"; mkdir -p "$ROOT"/{A,B1,B2}
 ( cd "$REPO" && git rev-parse HEAD && git status --short ) > "$ROOT/PROVENANCE.txt"
 echo "N=$N M=$M dt=$DT ntasks=$SLURM_NTASKS" >> "$ROOT/PROVENANCE.txt"
 
-echo "=== leg A: $((N+M)) steps uninterrupted ==="
-env FESOM_RESTART_OUT="$ROOT/A" FESOM_RESTART_EVERY=0 \
+echo "=== leg A: $((N+M)) steps uninterrupted, checkpointing at $N ==="
+env FESOM_RESTART_OUT="$ROOT/A" FESOM_RESTART_EVERY=0 FESOM_RESTART_AT=$N \
     srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/A" $DT $((N+M)) -1 "$PHC" 1958 \
     > "$ROOT/A/run.log" 2> "$ROOT/A/run.err"
 
@@ -59,8 +70,8 @@ env FESOM_RESTART_IN="$MID" FESOM_RESTART_OUT="$ROOT/B2" FESOM_RESTART_EVERY=0 \
     srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/B2" $DT $M -1 "$PHC" 1958 \
     > "$ROOT/B2/run.log" 2> "$ROOT/B2/run.err"
 
-FA=$(ls "$ROOT"/A/*.restart.nc)
-FB=$(ls "$ROOT"/B2/*.restart.nc)
+FA=$(ls "$ROOT"/A/*.restart.nc | tail -1)   # leg A writes at N and at N+M
+FB=$(ls "$ROOT"/B2/*.restart.nc | tail -1)
 echo "=== comparing ==="
 echo "A : $FA"
 echo "B : $FB"

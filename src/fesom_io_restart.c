@@ -50,8 +50,9 @@ typedef struct {
 /* halo == -1: the readers of this field loop owned entries only, so its halo
  * copies are never read and exchanging them would be a lie about what the
  * continuous run holds there. That is true of the EVP stresses (the mEVP
- * element loop is bounded by myDim_elem2D) and of dhe (filled over owned
- * elements and consumed by update_stiff_mat_ale over the same range). */
+ * element loop is bounded by myDim_elem2D), of dhe (filled over owned
+ * elements and consumed by update_stiff_mat_ale over the same range) and of
+ * tke (see its entry below). */
 static int rst_build(rst_var *v,
                      const struct fesom_mesh *mesh,
                      struct fesom_dyn        *dyn,
@@ -101,8 +102,14 @@ static int rst_build(rst_var *v,
     v[n++] = (rst_var){ {"w_expl",  NULL}, dyn->w_e, 0, nl, 1, FESOM_HALO_NOD3D };
     v[n++] = (rst_var){ {"w_impl",  NULL}, dyn->w_i, 0, nl, 1, FESOM_HALO_NOD3D };
     /* tke is present only under FESOM_MIX_SCHEME=TKE, exactly as the Fortran
-     * restart registers it only for mix_scheme_nmb 5 or 56. */
-    v[n++] = (rst_var){ {"tke", NULL}, tke ? tke->tke : NULL, 0, nl, 1, FESOM_HALO_NOD3D };
+     * restart registers it only for mix_scheme_nmb 5 or 56.
+     * halo == -1: calc_cvmix_tke runs over myDim_nod2D and tke is never
+     * exchanged (see the header of fesom_tke.c), so its halo is zero for the
+     * life of an uninterrupted run. Exchanging it here would fill it with real
+     * values and leave the resumed run holding something the continuous run
+     * never held — harmless, since nothing reads it, but a difference for no
+     * reason, and the full-extent probe reported it as one. */
+    v[n++] = (rst_var){ {"tke", NULL}, tke ? tke->tke : NULL, 0, nl, 1, -1 };
 
     /* --- ocean, element ---------------------------------------------- */
     v[n++] = (rst_var){ {"helem", NULL}, ((struct fesom_mesh *)mesh)->helem,
@@ -130,6 +137,51 @@ static int rst_build(rst_var *v,
 
     FESOM_CHECK(n <= RST_MAX, "restart: field table overflow (%d)", n);
     return n;
+}
+
+/* ------------------------------------------------------------------ *
+ * Canonicalising the replicated elements (FESOM_RESTART_CANONICALIZE)  *
+ *                                                                     *
+ * Nodes are owned exclusively; elements are not. gen_comm.F90:264-270
+ * puts an element in myList_elem2D of EVERY rank that owns one of its
+ * nodes, and each of those ranks then computes it redundantly. For a
+ * quantity assembled from its own three nodes that is harmless -- same
+ * inputs, same result. It is not harmless for one assembled by an edge
+ * loop: visc_filt_bcksct sums into U_b over myDim_edge2D+eDim_edge2D
+ * (oce_dyn.F90:330-360, mirrored in fesom_momentum.c), and two ranks
+ * reach the same element's three edges in a different order, so they get
+ * the same sum with different rounding. exchange_elem does not repair
+ * it: the element is owned on both ranks, so it is in neither one's halo.
+ *
+ * The disagreement is real and it grows. Measured on CORE2 at 128 ranks
+ * (FESOM_IO_GATHER_DUPCHECK=1): uv agrees on all owners after one step,
+ * differs on 167 of 15348 replicated slots after two (max 7e-18) and on
+ * 3311 after twenty (max 4e-16); uv_rhsAB reaches 3e-11. It is inherited
+ * from the Fortran, not introduced by the port.
+ *
+ * The consequence for a restart is unavoidable. The state of a running
+ * model is not a function of the global fields alone -- it includes which
+ * rank holds which rounding of those 15348 slots -- and a
+ * partition-independent file cannot carry that. No file can reproduce an
+ * uninterrupted run bit for bit, whatever is added to it.
+ *
+ * What CAN be exact is the case that matters operationally: a run that
+ * checkpoints at step N and carries on, against a run resumed from that
+ * checkpoint. Writing the restart pushes the gathered values back into
+ * the live arrays, so the writer leaves the model in exactly the state
+ * the reader will produce and every owner of a replicated element agrees
+ * from then on. The cost is one extra scatter per element field per
+ * checkpoint, and a perturbation of the trajectory the size of the
+ * disagreement being removed.
+ *
+ * It does mean the trajectory depends on the checkpoint interval, at
+ * roundoff. Set FESOM_RESTART_CANONICALIZE=0 to measure that, or to see
+ * the raw disagreement; the round-trip gate then fails by design.
+ * ------------------------------------------------------------------ */
+static int rst_canonicalise(void)
+{
+    const char *e = getenv("FESOM_RESTART_CANONICALIZE");
+    return e ? atoi(e) != 0 : 1;
 }
 
 /* ------------------------------------------------------------------ *
@@ -356,16 +408,31 @@ void fesom_restart_config(fesom_restart_cfg *cfg)
     const char *out   = getenv("FESOM_RESTART_OUT");
     const char *in    = getenv("FESOM_RESTART_IN");
     const char *every = getenv("FESOM_RESTART_EVERY");
+    const char *at    = getenv("FESOM_RESTART_AT");
     cfg->out_dir = (out && out[0]) ? out : NULL;
     cfg->in_path = (in  && in[0])  ? in  : NULL;
     cfg->every   = (every && every[0]) ? atoi(every) : 0;
     FESOM_CHECK(cfg->every >= 0, "FESOM_RESTART_EVERY must not be negative");
+    cfg->n_at = 0;
+    for (const char *p = at; p && *p; ) {
+        char *end;
+        long v = strtol(p, &end, 10);
+        FESOM_CHECK(end != p, "FESOM_RESTART_AT: not a number at \"%s\"", p);
+        FESOM_CHECK(v > 0, "FESOM_RESTART_AT: step %ld is not positive", v);
+        FESOM_CHECK(cfg->n_at < FESOM_RESTART_MAX_AT,
+                    "FESOM_RESTART_AT: more than %d steps", FESOM_RESTART_MAX_AT);
+        cfg->at[cfg->n_at++] = (int)v;
+        while (*end == ',' || *end == ' ') ++end;
+        p = end;
+    }
 }
 
 int fesom_restart_due(const fesom_restart_cfg *cfg, int step, int nsteps)
 {
     if (!cfg->out_dir) return 0;
     if (step == nsteps) return 1;
+    for (int i = 0; i < cfg->n_at; ++i)
+        if (cfg->at[i] == step) return 1;
     return cfg->every > 0 && step % cfg->every == 0;
 }
 
@@ -483,6 +550,8 @@ void fesom_restart_write(const char                 *path,
         NC_CHECK(nc_enddef(ncid));
     }
 
+    const int canon = rst_canonicalise();
+
     for (int i = 0; i < nvars; ++i) {
         if (!vars[i].base) continue;
         const size_t count  = rst_count(&vars[i], mesh);
@@ -494,10 +563,21 @@ void fesom_restart_write(const char                 *path,
             FESOM_CHECK(global && plane, "restart: gather buffer alloc for %s",
                         vars[i].name[0]);
         }
+        gather_set_label(vars[i].name[0]);
         if (vars[i].is_elem)
             gather_elem(vars[i].base, stride, &gp, global, partit->MPI_COMM_FESOM);
         else
             gather_node(vars[i].base, stride, &gp, global, partit->MPI_COMM_FESOM);
+
+        /* Push the gathered element field straight back into the live arrays
+         * (see rst_canonicalise above). Node fields are owned exclusively, so
+         * for them this would be the identity; skipped. */
+        if (vars[i].is_elem && canon) {
+            scatter_elem(global, stride, &gp, vars[i].base, partit->MPI_COMM_FESOM);
+            if (vars[i].halo >= 0)
+                fesom_halo_exchange(vars[i].base, (fesom_halo_kind)vars[i].halo,
+                                    vars[i].levels, vars[i].ncomp, partit);
+        }
 
         if (partit->mype == 0) {
             for (int c = 0; c < vars[i].ncomp; ++c) {

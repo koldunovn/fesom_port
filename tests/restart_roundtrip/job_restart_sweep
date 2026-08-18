@@ -1,0 +1,34 @@
+#!/bin/bash
+#SBATCH --job-name=c_rst_sweep
+#SBATCH -p compute
+#SBATCH --nodes=1
+#SBATCH --ntasks=128
+#SBATCH --time=01:30:00
+#SBATCH -A ab0995
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/logs/restart_sweep.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/logs/restart_sweep.%j.err
+#
+# job_restart_roundtrip at several (N, M), so the gate is not one lucky pair.
+# N=1 is the trivial case that passed before any of the fixes; N=137/M=91 puts
+# the interruption at an arbitrary point with no relation to the output or the
+# forcing cadence; N=200/M=200 crosses several JRA55 3-hourly brackets.
+set -eu
+REPO=/home/a/a270088/port2/fesom2_port_zstar
+JOB=$REPO/tests/restart_roundtrip/job_restart_roundtrip
+BASE=/work/ab0995/a270088/port_paper_v2/runs/restart_sweep
+rm -rf "$BASE"; mkdir -p "$BASE"
+rc=0
+for pair in "1 20" "20 1" "137 91" "200 200"; do
+    set -- $pair
+    n=$1; m=$2
+    echo; echo "################ N=$n M=$m ################"
+    # Not `| tail`: a pipeline reports the LAST command's status, so piping
+    # here would report tail's success and never see a failed pair.
+    if N=$n M=$m ROOT="$BASE/N${n}_M${m}" bash "$JOB" > "$BASE/N${n}_M${m}.log" 2>&1; then
+        echo "PASS N=$n M=$m"
+    else
+        echo "FAIL N=$n M=$m"; rc=1
+    fi
+    tail -3 "$BASE/N${n}_M${m}.log"
+done
+echo; echo "sweep exit $rc"; exit $rc

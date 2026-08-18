@@ -10,7 +10,19 @@
 #
 # Diagnostic companion to job_restart_roundtrip: print the bitwise state
 # checksum at the first step AFTER the interruption in both legs, so the array
-# whose halo does not survive the restart can be named rather than guessed.
+# that does not survive the restart can be named rather than guessed.
+#
+# Both gates fire in the same run and tag their lines differently:
+#
+#   [probeT]  state, top of the driver iteration   -- before the forcing
+#             readers and the ice step. MUST match: this is the restored
+#             state exactly as the loop first sees it.
+#   [probe]   state, entry to the timestep         -- after them. A difference
+#             here with [probeT] clean means the forcing or the ice step
+#             computed something different at the same model time.
+#   [probeTX] / [probeX]  the arrays the step rebuilds anyway. [probeTX] is
+#             EXPECTED to differ (the forcing has not been read yet on the
+#             resumed leg); it is printed for context, not as a verdict.
 set -eu
 REPO=/home/a/a270088/port2/fesom2_port_zstar
 source /sw/etc/profile.levante
@@ -28,9 +40,11 @@ export FESOM_ALE=zstar FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1
 export FESOM_PRINT_EVERY=1000
 rm -rf "$ROOT"; mkdir -p "$ROOT"/{A,B1,B2}
 
-# leg A: N+2 steps, probe at the TOP of step N+2 — i.e. the complete state
-# after one post-restart step, every array, halos included.
-env FESOM_RESTART_PROBE=$((N+1)) FESOM_RESTART_OUT="$ROOT/A" FESOM_RESTART_EVERY=$((N+1)) \
+# leg A: the uninterrupted run, checkpointing at N like leg B1 does (see the
+# header of job_restart_roundtrip for why that is required, not cosmetic),
+# probed at step N+1.
+env FESOM_RESTART_PROBE=$((N+1)) FESOM_RESTART_PROBE_TOP=$((N+1)) \
+    FESOM_RESTART_OUT="$ROOT/A" FESOM_RESTART_EVERY=$((N+1)) FESOM_RESTART_AT=$N \
     srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/A" $DT $((N+1)) -1 "$PHC" 1958 \
     > "$ROOT/A/run.log" 2> "$ROOT/A/run.err"
 
@@ -39,31 +53,54 @@ env FESOM_RESTART_OUT="$ROOT/B1" FESOM_RESTART_EVERY=0 \
     srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/B1" $DT $N -1 "$PHC" 1958 \
     > "$ROOT/B1/run.log" 2> "$ROOT/B1/run.err"
 
-# leg B2: resume and run two steps, probing at the top of step 2 — the same
-# model time as A's step N+2.
+# leg B2: resume and run one step -- its local step 1 is A's step N+1.
 MID=$(ls "$ROOT"/B1/*.restart.nc)
-env FESOM_RESTART_IN="$MID" FESOM_RESTART_PROBE=1 FESOM_RESTART_OUT="$ROOT/B2" FESOM_RESTART_EVERY=1 \
+env FESOM_RESTART_IN="$MID" FESOM_RESTART_PROBE=1 FESOM_RESTART_PROBE_TOP=1 \
+    FESOM_RESTART_OUT="$ROOT/B2" FESOM_RESTART_EVERY=1 \
     srun -l --ntasks=$SLURM_NTASKS "$BIN" "$MESH" "$ROOT/B2" $DT 1 -1 "$PHC" 1958 \
     > "$ROOT/B2/run.log" 2> "$ROOT/B2/run.err"
 
 # srun -l prefixes every line with "  <rank>: ", so anchor on the tag itself,
 # not on the start of the line. Anchoring on ^ silently produced two EMPTY
 # files and an empty diff, which reads exactly like "no differences".
-grep -o '\[probe\].*' "$ROOT/A/run.err"  | sort > "$ROOT/probe_A.txt"
-grep -o '\[probe\].*' "$ROOT/B2/run.err" | sort > "$ROOT/probe_B.txt"
-test -s "$ROOT/probe_A.txt" || { echo "ERROR: probe produced no output in leg A"; exit 1; }
-test -s "$ROOT/probe_B.txt" || { echo "ERROR: probe produced no output in leg B2"; exit 1; }
-echo "=== arrays whose full-extent state differs at the first resumed step ==="
-diff "$ROOT/probe_A.txt" "$ROOT/probe_B.txt" | grep '^[<>]' || echo "(none — every array matches, halos included)"
+block () {   # $1 = tag, $2 = leg dir, $3 = out file
+    grep -o "\[$1\] .*" "$2/run.err" | sort > "$3"
+    test -s "$3" || { echo "ERROR: tag [$1] produced no output in $2"; exit 1; }
+}
+for tag in probeTO probeO probeT probe probeTOX probeOX probeTX probeX; do
+    block "$tag" "$ROOT/A"  "$ROOT/${tag}_A.txt"
+    block "$tag" "$ROOT/B2" "$ROOT/${tag}_B.txt"
+done
 
-grep -o '\[stage\].*' "$ROOT/A/run.err"  > "$ROOT/stage_A.txt"
-grep -o '\[stage\].*' "$ROOT/B2/run.err" > "$ROOT/stage_B.txt"
+report () {  # $1 = tag, $2 = headline
+    echo
+    echo "=== $2  ([$1]) ==="
+    if diff "$ROOT/${1}_A.txt" "$ROOT/${1}_B.txt" > /dev/null; then
+        echo "(identical)"
+    else
+        diff "$ROOT/${1}_A.txt" "$ROOT/${1}_B.txt" | grep '^[<>]' | awk '{print $3}' | sort -u | tr '\n' ' '; echo
+    fi
+}
+# The owned passes are the verdict; the full-extent passes are context. A name
+# that appears only in the full-extent list is a halo the resumed run has not
+# filled, which matters only if something reads it.
+report probeTO  "OWNED restored state, top of the resumed step -- MUST be identical"
+report probeO   "OWNED state at entry to the timestep -- differs only if the forcing/ice step did"
+report probeT   "  (same, full extent incl. halo)"
+report probe    "  (same, full extent incl. halo)"
+report probeTOX "OWNED rebuilt arrays, top of the step -- expected to differ, context only"
+report probeOX  "OWNED rebuilt arrays, entry to the timestep -- should be identical once the state is"
+report probeTX  "  (same, full extent incl. halo)"
+report probeX   "  (same, full extent incl. halo)"
+
 echo
 echo "=== first stage inside the step where they diverge ==="
+grep -o '\[stage\].*' "$ROOT/A/run.err"  > "$ROOT/stage_A.txt"
+grep -o '\[stage\].*' "$ROOT/B2/run.err" > "$ROOT/stage_B.txt"
 diff "$ROOT/stage_A.txt" "$ROOT/stage_B.txt" | head -20 || true
 
 echo
 echo "=== and the files written at that same moment ==="
 /work/ab0995/a270088/mambaforge/envs/nereus/bin/python \
     "$REPO/tests/restart_roundtrip/compare_restart.py" \
-    "$(ls "$ROOT"/A/*.restart.nc | head -1)" "$(ls "$ROOT"/B2/*.restart.nc | head -1)" | tail -5 || true
+    "$(ls "$ROOT"/A/*.restart.nc | tail -1)" "$(ls "$ROOT"/B2/*.restart.nc | tail -1)" | tail -5 || true

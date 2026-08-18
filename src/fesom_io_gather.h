@@ -49,6 +49,10 @@ void gather_plan_free(gather_plan *gp);
 /* Gather a [myDim_n × stride] node-indexed buffer to rank 0's
  * [total_n × stride] global buffer indexed by global node id (0-based).
  * No-op on non-zero ranks (rank 0 is the only writer in this IO model). */
+/* Diagnostic label used by the duplicate check in gather_elem (see the .c).
+ * Costs nothing when FESOM_IO_GATHER_DUPCHECK is unset. */
+void gather_set_label(const char *label);
+
 void gather_node(const real_t *local, int stride,
                  const gather_plan *gp,
                  real_t *global,

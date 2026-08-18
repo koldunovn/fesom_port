@@ -1,9 +1,11 @@
 # Restart I/O for the C port (and then for Kokkos)
 
-> **Revision 2, 2026-08-18, after the first round-trip gates.** §2 below was written from a static
-> reading of the code and was incomplete: the gate found four further pieces of persistent state,
-> all of them consumed before they are written and none of them in the Fortran restart. They are
-> listed in §2b. The gate is not yet green — see §7 for exactly where it stands.
+> **Revision 3, 2026-08-18, gate green.** §2 was written from a static reading of the code and was
+> incomplete: running the gate found four further pieces of persistent state (§2b) and then one
+> thing that is not state at all — elements on a partition boundary are computed redundantly on
+> several ranks and their copies drift apart at roundoff, so no partition-independent file can
+> reproduce an uninterrupted run (§2c). §5 restates the gate accordingly and §7 records where it
+> now stands: exact at four (N, M) pairs.
 
 Paper plan: `~/port_paper/docs/plans/20260818-port-paper-v2-63yr-and-optimisation.md`, Task 2.
 
@@ -128,6 +130,58 @@ and a resumed run build it from the base matrix and no extra state is needed. Ha
 lazily at the first solve, as the Fortran comment at `fesom_ssh.c:233` describes, it would have had
 to be saved too.
 
+## 2c. The thing that is not state: replicated elements
+
+The four items above are all *state*, and adding them to the file removed most of the difference.
+What was left was 3.6e-12 on `Z_3d_n` after a single resumed step, and no missing field explains it,
+because the last piece is not a field.
+
+`gen_comm.F90:264-270` puts an element into `myList_elem2D` of **every** rank that owns one of its
+nodes, and each of those ranks computes it. For a quantity assembled from an element's own three
+nodes that is harmless: same inputs, same arithmetic, same bits. It is not harmless for a quantity
+assembled by an edge loop. `visc_filt_bcksct` sums into `U_b` over `myDim_edge2D + eDim_edge2D`
+(`oce_dyn.F90:330-360`, mirrored in `fesom_momentum.c:535-568`), and two ranks reach the same
+element's three edges in a different order, so they get the same sum with different rounding.
+`exchange_elem` cannot repair it — the element is *owned* on both ranks, so it is in neither one's
+halo list, and a halo exchange never touches it.
+
+Measured on CORE2 at 128 ranks with `FESOM_IO_GATHER_DUPCHECK=1`, which counts, per gathered field,
+how many global element ids are written more than once and how many of those writes disagree:
+
+| after step | replicated slots | `uv` disagreeing | max &#124;Δ&#124; | `uv_rhsAB` disagreeing | max &#124;Δ&#124; |
+|---|---|---|---|---|---|
+| 1  | 15348 | 0    | 0      | 0    | 0 |
+| 2  | 15348 | 167  | 6.9e-18 | 0    | 0 |
+| 5  | 15348 | 688  | 1.1e-16 | 489  | 1.8e-12 |
+| 20 | 15348 | 3311 | 4.2e-16 | 2994 | 2.9e-11 |
+
+This is inherited from the Fortran, not introduced by the port: the Fortran loop has the same shape
+and the same missing reduction.
+
+The consequence is that **the state of a running model is not a function of the global fields**. It
+also includes which rank happens to hold which rounding of those 15348 slots, and a
+partition-independent file cannot record that. "A resumed run reproduces a run that never stopped"
+is therefore unattainable, and no amount of extra fields would have reached it. It also explains why
+the first gates passed at N = 1 and failed at N = 20: after one step the copies still agree.
+
+What *is* attainable is the case a checkpointed hindcast actually needs. Writing a restart pushes the
+gathered element values back into the live arrays (`rst_canonicalise`, `fesom_io_restart.c`), so the
+writer leaves the model in exactly the state the reader will produce, and every owner of a replicated
+element agrees from then on. Cost: one extra scatter per element field per checkpoint, and a
+perturbation of the trajectory the size of the disagreement being removed (4e-16 on `uv` at step 20).
+`FESOM_RESTART_CANONICALIZE=0` turns it off, to measure that or to see the raw disagreement.
+
+Two things follow that have to be said out loud rather than buried:
+
+- **The trajectory now depends on the checkpoint cadence, at roundoff.** Every production run in the
+  campaign must use the same cadence, and the cadence belongs in the run manifest.
+- **The alternative is open, not rejected.** Making the model itself keep replicated elements
+  consistent — an owner-wins broadcast after every update of `uv` and `uv_rhsAB` — would remove the
+  dependence and make the element state genuinely partition-consistent. It is a per-step
+  communication and a change to a validated model's arithmetic everywhere rather than only at
+  checkpoints, so it is a decision about the model and not about restart I/O. Not taken here; see
+  §8.4.
+
 ## 3. What is *not* saved, and the argument for each
 
 Everything below is rebuilt from the saved state, the mesh, or the calendar. Each was checked, not
@@ -179,11 +233,17 @@ Env-gated, off by default, so an existing run is unchanged:
 
 ## 5. The gate
 
-**Round trip, maximum absolute difference 0.** Run N + M steps continuously and write a restart at
-the end. Separately run N steps, write a restart, start a second executable from it, run M more,
+**Round trip, maximum absolute difference 0.** Run N + M steps continuously, checkpointing at N and
+at N + M. Separately run N steps, write a restart, start a second executable from it, run M more,
 write a restart. The two final restart files must agree bit for bit, field by field. The restart
 file is the right object to compare because it *is* the model's persistent state — a snapshot
 comparison would only cover the subset that gets written to the output streams.
+
+The uninterrupted leg checkpoints at N as well, and that is load-bearing, not cosmetic: for the
+reason in §2c the comparison against a leg that never wrote anything at step N is not attainable by
+any file. The gate as stated is the operationally meaningful one — a 63-year hindcast checkpoints
+anyway, and what has to be true is that resuming from a checkpoint continues the run that wrote it.
+`FESOM_RESTART_AT=<n1,n2,...>` exists for this: a fixed interval cannot express "at N and at N + M".
 
 Then, in order:
 
@@ -206,47 +266,73 @@ Then, in order:
 
 ## 7. Where the gate stands (2026-08-18)
 
+**Green.**
+
 **Control first.** `tests/restart_roundtrip/job_restart_control` runs the identical configuration
 twice, no restart anywhere, and the two restart files agree bit for bit. The model is reproducible
 run to run at 128 ranks, so any round-trip difference is real and attributable to the restart.
 
 | case | result |
 |---|---|
-| unit tests, `test_restart_format` | 79 checks, green (round trip, component order, optional TKE, four guard cases) |
-| write twice in one run, compare against a second run's file at the same step | exact |
-| restart after 1 step, then 1 step | exact |
-| restart after 1 step, then 20 steps | exact |
-| restart after 20 steps, then 1 step | **differs at roundoff**: max 3.6e-12 on `Z_3d_n`, 1.2e-14 on `d_eta`, 2.3e-14 on `hbar` |
-| restart after 20 steps, then 20 steps | differs at ~1e-3, i.e. the roundoff above amplified |
+| unit tests, `test_restart_format` | 89 checks green (round trip, component order, optional TKE, cadence incl. `FESOM_RESTART_AT`, four guard cases) |
+| control: the same run twice, no restart | exact |
+| write twice in one run vs a second run's file at the same step | exact |
+| round trip, N = 1, M = 20 | exact, all 38 fields |
+| round trip, N = 20, M = 1 | exact |
+| round trip, N = 20, M = 20 | exact |
+| round trip, N = 137, M = 91 | exact |
+| round trip, N = 200, M = 200 | exact |
+| probe: owned state at the top of the first resumed step | identical |
+| probe: owned state at entry to the timestep | identical |
 
-So something small is still missing, and it is present at step 20 but not at step 1 — which is what
-a state variable that is still zero after one step looks like.
+`tests/restart_roundtrip/job_restart_sweep` runs the four pairs. N = 1 is the trivial case that
+passed before any of the fixes and is kept as a floor; N = 137 / 91 puts the interruption at a step
+with no relation to the output or forcing cadence; N = 200 / 200 crosses several JRA55 3-hourly
+brackets.
 
-**Diagnosis tooling in place.** `FESOM_RESTART_PROBE=<step>` dumps a bitwise checksum (XOR of the
-IEEE patterns, reduced with `MPI_BXOR`, so it is independent of partitioning and reduction order) of
-every array the restart carries plus the forcing and the scratch, over the FULL local extent —
-owned *and* halo — at the top of that step. `FESOM_RESTART_PROBE_TOP=<step>` does the same at the
-top of the driver iteration, before the forcing readers and the ice step, which separates "the
-restored state is wrong" from "the forcing computed at that time is wrong".
-`tests/restart_roundtrip/job_restart_probe` runs both legs and diffs them.
+The remaining probe differences are all in arrays the step rebuilds before it reads them — at the
+top of a resumed step the forcing has not been read yet and the scratch still holds the previous
+step. They are printed under their own tags so they cannot be mistaken for state. Inside the step
+the stage probes show `pgf_x`, `Kv`, `Av` differing at `1-eos` and `uv_rhs`, `ssh_rhs` at `1-eos`
+and `3-mixing` — in every case before the stage that writes them — and nothing beyond that.
 
-⚠️ **A trap in that tooling, already paid for once.** `srun -l` prefixes every line with the rank,
-so `grep '^\[probe\]'` matches nothing and produces two empty files — and an empty diff reads
-exactly like "no differences". The job now uses `grep -o` and refuses to continue on an empty probe
-file. Any conclusion of the form "everything matches" is worthless unless the probe files are
+### The diagnosis tooling, and two traps in it
+
+`FESOM_RESTART_PROBE=<step>` dumps a bitwise checksum (XOR of the IEEE patterns reduced with
+`MPI_BXOR`, so it is independent of partitioning and reduction order) of every array the restart
+carries plus the forcing and the scratch, at the entry to that step.
+`FESOM_RESTART_PROBE_TOP=<step>` does the same at the top of the driver iteration, before the
+forcing readers and the ice step, which separates "the restored state is wrong" from "the forcing
+computed at that time is wrong". Each runs twice, once over owned entries and once over the full
+local extent including halo, under separate tags. `tests/restart_roundtrip/job_restart_probe` runs
+both legs and diffs all eight blocks.
+
+`FESOM_IO_GATHER_DUPCHECK=1` counts, per gathered field, how many global element ids the gather
+writes more than once and how many of those writes disagree. That is what identified §2c.
+
+⚠️ **Trap 1, already paid for once.** `srun -l` prefixes every line with the rank, so
+`grep '^\[probe\]'` matches nothing and produces two empty files — and an empty diff reads exactly
+like "no differences". The job now uses `grep -o` and refuses to continue on an empty probe file.
+No conclusion of the form "everything matches" is worth anything unless the probe files are
 non-empty.
+
+⚠️ **Trap 2.** The full-extent probe flags every stale halo, and most stale halos are read by
+nothing. Reading it as a list of bugs sends you after arrays that are fine. Read the owned block
+first; the full-extent block only says whether a difference is in the halo, and whether that matters
+is a question about the reader, not about the checksum.
 
 ## 8. Next
 
-1. Run `job_restart_probe` with `FESOM_RESTART_PROBE_TOP` and read the *first* differing array at
-   the top of the first resumed iteration. That single answer decides everything below.
-2. Candidates not yet excluded, in order of suspicion:
-   - `io.prev_calendar`. On a restart it is set equal to `io.calendar`; in the uninterrupted run it
-     is one step behind. It feeds `fesom_sss_runoff_step_cal` and the monthly-crossing tests. It
-     cannot explain a difference at 10:00 on 1 January — no boundary is crossed either way — but it
-     is wrong and should be saved in the file regardless.
-   - The JRA55 reader's bracket. `fesom_jra55_step` refreshes coefficients only when `rdate` leaves
-     `[t_indx, t_indx_p1]`, so a resumed run picks its bracket from scratch. The coefficients depend
-     on the two records and not on `rdate`, so this *should* be identical — verify rather than assume.
-   - Anything reached through `mesh` that the step writes and that is not in the file.
-3. Then the Kokkos port, the cross-backend read, and the calendar-continuity check (§5.1, 5.2, 5.4).
+1. **Kokkos.** Port the restart to `port_kokkos_int`, then gate Kokkos-Serial restarted as
+   byte-identical to the C reference restarted, the same way the two are already certified without
+   restarts (§5.1).
+2. **Cross-backend read** (§5.2): a restart written by the CPU build read by the CUDA build and the
+   reverse. State it as a restriction if it does not hold rather than papering over it.
+3. **Calendar continuity** (§5.4): a run restarted at a year boundary must load the same JRA55
+   records and the same monthly SSS as the uninterrupted run at that step. The 400-step sweep does
+   not cross a month, so this is untested. Note that `io.prev_calendar` is deliberately not in the
+   file — see the comment at the restart patch site in `fesom_main.c` for why that is safe and what
+   would make it unsafe.
+4. **Decide about §2c's alternative.** Keeping replicated elements consistent inside the model would
+   remove the checkpoint-cadence dependence at the cost of a per-step communication. It is a
+   decision about the model, not about restart I/O.
