@@ -358,18 +358,67 @@ nothing. Reading it as a list of bugs sends you after arrays that are fine. Read
 first; the full-extent block only says whether a difference is in the halo, and whether that matters
 is a question about the reader, not about the checksum.
 
-## 8. Next
+## 8. The Kokkos port (2026-08-18)
 
-1. **Kokkos.** Port the restart to `port_kokkos_int`, then gate Kokkos-Serial restarted as
-   byte-identical to the C reference restarted, the same way the two are already certified without
-   restarts (§5.1).
-2. **Cross-backend read** (§5.2): a restart written by the CPU build read by the CUDA build and the
-   reverse. State it as a restriction if it does not hold rather than papering over it.
-3. **Calendar continuity** (§5.4): a run restarted at a year boundary must load the same JRA55
+Done, and its byte gate is green. The code lives in `port_kokkos_int` on `m14-integrate`:
+`src/fesom_io_restart.{cpp,h}`, `scatter_node`/`scatter_elem` + the duplicate check added next to the
+gathers in `src/fesom_io.cpp`, and the same three driver hooks as the C.
+
+**What is the same, on purpose.** The format, the field list, the guards and the canonicalisation are
+the C reference's, so the two trees write interchangeable files — which is what lets
+Kokkos-Serial-restarted be compared byte for byte against C-restarted rather than merely "closely".
+`tests/restart_roundtrip/check_table_drift.py` compares the two tables directly and fails on any
+divergence; it takes a second and should be run after touching either tree.
+
+**What is new: the sync discipline.** Every array is a `fesom::Field`, so the host pointer the gather
+reads is one of two copies. The table therefore carries the Field beside the host pointer:
+`sync_host()` before the gather on write, `modify_host()` + `sync_device()` after the scatter on
+read. Pairing them in the table rather than at the call site is deliberate — a field added without
+its Field is then a visible hole rather than a CUDA-only wrong answer, and
+`check_table_drift.py` also asserts that every entry's Field is the one belonging to its host
+pointer. Nothing else can see that: on Serial the two views alias and every sync is a no-op.
+
+**The case that makes it load-bearing** is the stiffness matrix. `fesom_update_stiff_mat_ale_kk` is a
+device kernel ending in `modify_device()`, so under zstar the accumulated matrix lives on the device
+from step 1 and the host mirror still holds the base matrix. Without the pull, a CUDA checkpoint
+would carry the cold-start matrix and a resumed run would lose every accumulated increment — the
+same failure §2b.2 describes, arriving by a different route. It also fixes the order of the restart
+read in the driver: it must come after `fesom_ssh_preconditioner`, which pushes the base matrix to
+the device.
+
+**The C's cold-start bug was here too.** `fesom_step.cpp` passed `is_first_step = (step_n == 1)`;
+`fesom_step_ctx` now carries `restarted` and the guard is `(step_n == 1 && !ctx->restarted)`.
+
+### Gate: `jobs/job_restart_gate_kk`, 8 ranks, dt=1800, N = M = 10, zstar + cvmix_TKE + mEVP
+
+Four legs, four comparisons, one job — the first two make a failure of the last two attributable.
+
+| comparison | result |
+|---|---|
+| C round trip, A@20 vs B@20 | exact |
+| Kokkos round trip, C@20 vs D@20 | exact |
+| C == Kokkos-Serial, no restart, A@20 vs C@20 | exact |
+| **C == Kokkos-Serial across a restart, B@20 vs D@20** | **exact** |
+
+8 ranks and `OMPI_MCA_btl_vader_single_copy_mechanism=none` to match the established Kokkos-Serial
+certification (`jobs/job_m14_gate_serial`), physics the paper's rather than that gate's default.
+
+### CUDA: `jobs/job_restart_gate_cuda`
+
+CUDA is not run-to-run reproducible on Levante A100, so a restart round trip cannot be gated on byte
+identity there. The project's standing convention applies instead: the change is accepted when it
+moves the answer no more than the binary moves against itself, with the noise floor measured from
+two control legs **in the same allocation**. The job also reads a Serial-written restart with the
+CUDA build and the reverse; those two legs are pass/fail on the reader's own guards, not on numbers,
+because a CUDA trajectory and a Serial one are not the same trajectory.
+
+## 9. Still open
+
+1. **Calendar continuity** (§5.4): a run restarted at a year boundary must load the same JRA55
    records and the same monthly SSS as the uninterrupted run at that step. The 400-step sweep does
    not cross a month, so this is untested. Note that `io.prev_calendar` is deliberately not in the
    file — see the comment at the restart patch site in `fesom_main.c` for why that is safe and what
    would make it unsafe.
-4. **Decide about §2c's alternative.** Keeping replicated elements consistent inside the model would
+2. **Decide about §2c's alternative.** Keeping replicated elements consistent inside the model would
    remove the checkpoint-cadence dependence at the cost of a per-step communication. It is a
    decision about the model, not about restart I/O.
