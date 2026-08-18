@@ -168,13 +168,48 @@ What *is* attainable is the case a checkpointed hindcast actually needs. Writing
 gathered element values back into the live arrays (`rst_canonicalise`, `fesom_io_restart.c`), so the
 writer leaves the model in exactly the state the reader will produce, and every owner of a replicated
 element agrees from then on. Cost: one extra scatter per element field per checkpoint, and a
-perturbation of the trajectory the size of the disagreement being removed (4e-16 on `uv` at step 20).
-`FESOM_RESTART_CANONICALIZE=0` turns it off, to measure that or to see the raw disagreement.
+perturbation of one ulp. `FESOM_RESTART_CANONICALIZE=0` turns it off.
+
+### What one ulp costs, measured
+
+`tests/restart_roundtrip/job_restart_cadence` runs 200 steps three ways: checkpointing every 10
+(P), checkpointing only at the end (Q), and checkpointing every 10 with the canonicalisation off
+(R). **R and Q are bit-identical**, so writing a file changes nothing by itself and every P–Q
+difference is the canonicalisation and nothing else. Comparing P against R at each of the 20
+checkpoints gives what one ulp buys:
+
+| step | `temp` max &#124;Δ&#124; | nodes differing (of 6.09 M) | `u` max &#124;Δ&#124; |
+|---|---|---|---|
+| 10  | 0        | 0         | 0        |
+| 20  | 1.3e-05  | 3 641 408 | 3.5e-05  |
+| 40  | 6.5e-04  | 3 698 823 | 4.3e-03  |
+| 100 | 5.5e-03  | 3 705 549 | 3.8e-02  |
+| 200 | 4.6e-01  | 3 705 863 | 4.9e-02  |
+
+⚠️ **Read that carefully, because the obvious reading is wrong.** Essentially the whole wet domain
+differs ten steps after the first kick, and the maximum then wanders around 1e-2–1e-1 instead of
+growing exponentially. That is not chaos spreading from 15348 boundary elements. It is the SSH
+solve: `FESOM_PHASE1_SOLTOL = 1e-5` (the Fortran's `solver.F90` value), so the CG is converged only
+to 1e-5 relative and is global, and *any* perturbation makes it land on a different point inside its
+own tolerance, everywhere, in one step. A one-ulp kick therefore produces a difference of order the
+solver tolerance immediately, not eventually. The same is true of the Fortran and of any other
+perturbation of the same kind.
+
+The flip side is what makes the gate worth having: an **exact** round trip means the CG took a
+bitwise identical path at every step, which happens only if the whole state — `d_eta` included — was
+restored exactly. There is no "close enough" version of this test.
 
 Two things follow that have to be said out loud rather than buried:
 
-- **The trajectory now depends on the checkpoint cadence, at roundoff.** Every production run in the
-  campaign must use the same cadence, and the cadence belongs in the run manifest.
+- **The trajectory depends on the checkpoint cadence**, and at the level of the SSH solver tolerance
+  rather than of roundoff. Every production run in the campaign must use the same cadence, and the
+  cadence belongs in the run manifest.
+- **Turning the canonicalisation off does not avoid the cost, it only moves it.** Without it the
+  *write* perturbs nothing but the *resume* does, by the same mechanism and the same amount — that
+  is what the 3.6e-12 on `Z_3d_n` at the top of this section was. Production always resumes, so the
+  number of kicks is the same either way. What changes is that with it on there is a reference run
+  the chain is bit-identical to, and a gate that can find a missing field; with it off there is
+  neither. That is why it is the default.
 - **The alternative is open, not rejected.** Making the model itself keep replicated elements
   consistent — an owner-wins broadcast after every update of `uv` and `uv_rhsAB` — would remove the
   dependence and make the element state genuinely partition-consistent. It is a per-step
@@ -284,6 +319,8 @@ run to run at 128 ranks, so any round-trip difference is real and attributable t
 | round trip, N = 200, M = 200 | exact |
 | probe: owned state at the top of the first resumed step | identical |
 | probe: owned state at entry to the timestep | identical |
+| cadence: 200 steps checkpointing every 10, canonicalisation off, vs checkpointing once | exact |
+| cadence: the same with it on | differs at the SSH solver tolerance — see §2c |
 
 `tests/restart_roundtrip/job_restart_sweep` runs the four pairs. N = 1 is the trivial case that
 passed before any of the fixes and is kept as a floor; N = 137 / 91 puts the interruption at a step

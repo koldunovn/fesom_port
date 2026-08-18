@@ -171,12 +171,26 @@ static int rst_build(rst_var *v,
  * the live arrays, so the writer leaves the model in exactly the state
  * the reader will produce and every owner of a replicated element agrees
  * from then on. The cost is one extra scatter per element field per
- * checkpoint, and a perturbation of the trajectory the size of the
- * disagreement being removed.
+ * checkpoint, and a perturbation of one ulp.
  *
- * It does mean the trajectory depends on the checkpoint interval, at
- * roundoff. Set FESOM_RESTART_CANONICALIZE=0 to measure that, or to see
- * the raw disagreement; the round-trip gate then fails by design.
+ * One ulp is not as small as it sounds, and the reason is worth knowing:
+ * FESOM_PHASE1_SOLTOL is 1e-5, so the global SSH conjugate-gradient solve
+ * is converged only to 1e-5 relative, and any perturbation makes it land
+ * on a different point inside its own tolerance -- everywhere, in one
+ * step. Measured (job_restart_cadence): checkpointing every 10 steps
+ * instead of once over 200 moves temp by 1.3e-5 K after ten more steps
+ * and by 0.46 K after two hundred, over essentially the whole wet domain.
+ * So the trajectory depends on the checkpoint interval, and at the level
+ * of the solver tolerance rather than of roundoff. Every run that is to
+ * be compared bit for bit against another must checkpoint identically.
+ *
+ * Turning this off does not avoid that cost, it only moves it: without
+ * the canonicalisation the write perturbs nothing but the RESUME does, by
+ * the same mechanism and the same amount, and production always resumes.
+ * What is lost is the reference run the chain is bit-identical to, and a
+ * gate sharp enough to find a missing field. Hence the default.
+ * FESOM_RESTART_CANONICALIZE=0 turns it off; the round-trip gate then
+ * fails by design.
  * ------------------------------------------------------------------ */
 static int rst_canonicalise(void)
 {
