@@ -796,3 +796,187 @@ void fesom_restart_read(const char           *path,
     gather_plan_free(&gp);
     MPI_Barrier(partit->MPI_COMM_FESOM);
 }
+
+/* ================================================================== *
+ * fesom_restart_import_fortran — start from a FESOM2 (Fortran) restart *
+ *                                                                     *
+ * Drift investigation, 2026-09-18 (docs/plans/20260918-longrun-drift-  *
+ * strategy.md, Track B). The two codes cannot be compared at the FP    *
+ * floor from a cold start for more than a few days; this puts the C    *
+ * into the EXACT state the Fortran is in after it reads one of its own *
+ * yearly restarts, so a step-by-step comparison can be made from a     *
+ * realistic mid-run (winter) state.                                    *
+ *                                                                     *
+ * <prefix>.oce.restart/<var>.nc and <prefix>.ice.restart/<var>.nc are  *
+ * one netCDF file per field, (time=1[, nz|nz_1], node|elem), global    *
+ * numbering. What the Fortran carries is read; what it re-derives after *
+ * reading (oce_ale.F90 restart_thickness_ale: zbar_3d_n, Z_3d_n, helem, *
+ * dhe = mean hbar so that the first update_stiff_mat_ale lifts the base *
+ * matrix to the current thickness) is re-derived here the same way;    *
+ * what it does NOT carry and simply leaves at its allocation value      *
+ * (t_skin, the EVP stresses, d_eta, the thermo growth rates) is zeroed. *
+ * uvnode is computed from uv as the Fortran's compute_vel_nodes does at *
+ * the top of every step.                                                *
+ * ================================================================== */
+
+static void frst_read_global(const char *prefix, const char *sub, const char *name,
+                             int levels_in_file, size_t count_in_file,
+                             real_t *global, int stride, int comp, int ncomp)
+{
+    char path[1024];
+    snprintf(path, sizeof path, "%s.%s.restart/%s.nc", prefix, sub, name);
+    int ncid, vid;
+    int ec = nc_open(path, NC_NOWRITE, &ncid);
+    if (ec != NC_NOERR) FESOM_DIE("fortran restart: cannot open %s: %s", path, nc_strerror(ec));
+    NC_CHECK(nc_inq_varid(ncid, name, &vid));
+    int ndims; int dimids[4]; size_t dlen[4];
+    NC_CHECK(nc_inq_varndims(ncid, vid, &ndims));
+    NC_CHECK(nc_inq_vardimid(ncid, vid, dimids));
+    for (int d = 0; d < ndims; ++d) NC_CHECK(nc_inq_dimlen(ncid, dimids[d], &dlen[d]));
+    size_t nlev = (ndims == 3) ? dlen[1] : 1;
+    size_t cnt  = dlen[ndims - 1];
+    FESOM_CHECK((int)nlev == levels_in_file && cnt == count_in_file,
+                "fortran restart: %s has (%zu levels, %zu entries), expected (%d, %zu)",
+                path, nlev, cnt, levels_in_file, count_in_file);
+    real_t *plane = malloc(nlev * cnt * sizeof(real_t));
+    FESOM_CHECK(plane, "fortran restart: alloc");
+    size_t start[3] = {0, 0, 0}, edge[3] = {1, nlev, cnt};
+    if (ndims == 2) { edge[1] = cnt; }
+    NC_CHECK(nc_get_vara_double(ncid, vid, start, edge, plane));
+    NC_CHECK(nc_close(ncid));
+    for (size_t e = 0; e < cnt; ++e)
+        for (size_t lev = 0; lev < nlev; ++lev)
+            global[e * (size_t)stride + lev * (size_t)ncomp + (size_t)comp] = plane[lev * cnt + e];
+    free(plane);
+}
+
+/* Read one field (1 or 2 components) into a local array with `levels` levels
+ * of stride levels*ncomp, zero-padding levels beyond the file's. */
+static void frst_load(const char *prefix, const char *sub, const char *n0, const char *n1,
+                      int levels_in_file, int levels, int ncomp, int is_elem,
+                      real_t *local, int halo,
+                      const gather_plan *gp, const struct fesom_mesh *mesh,
+                      struct fesom_partit *partit)
+{
+    const int    stride = levels * ncomp;
+    const size_t count  = is_elem ? (size_t)mesh->elem2D : (size_t)mesh->nod2D;
+    real_t *global = NULL;
+    if (partit->mype == 0) {
+        global = calloc(count * (size_t)stride, sizeof(real_t));
+        FESOM_CHECK(global, "fortran restart: global alloc");
+        frst_read_global(prefix, sub, n0, levels_in_file, count, global, stride, 0, ncomp);
+        if (ncomp == 2)
+            frst_read_global(prefix, sub, n1, levels_in_file, count, global, stride, 1, ncomp);
+    }
+    if (is_elem) scatter_elem(global, stride, gp, local, partit->MPI_COMM_FESOM);
+    else         scatter_node(global, stride, gp, local, partit->MPI_COMM_FESOM);
+    if (partit->mype == 0) free(global);
+    if (halo >= 0)
+        fesom_halo_exchange(local, (fesom_halo_kind)halo, levels, ncomp, partit);
+    if (partit->mype == 0) printf("[fesom_port] fortran restart: read %s%s%s\n",
+                                  n0, ncomp == 2 ? "," : "", ncomp == 2 ? n1 : "");
+}
+
+void fesom_restart_import_fortran(const char           *prefix,
+                                  int                   year_written,
+                                  fesom_calendar_t     *cal,
+                                  struct fesom_mesh    *mesh,
+                                  struct fesom_dyn     *dyn,
+                                  struct fesom_tracers *tracers,
+                                  struct fesom_ice     *ice,
+                                  struct fesom_tke     *tke,
+                                  struct fesom_partit  *partit)
+{
+    const int nl  = mesh->nl;
+    const int nl1 = nl - 1;
+    const int N   = mesh->myDim_nod2D + mesh->eDim_nod2D;
+    gather_plan gp;
+    gather_plan_init(&gp, mesh, partit);
+
+    /* --- what the Fortran restart carries (io_restart.F90 def_node_var) --- */
+    frst_load(prefix, "oce", "ssh",         NULL, 1,   1,  1, 0, dyn->eta_n,       FESOM_HALO_NOD2D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "ssh_rhs_old", NULL, 1,   1,  1, 0, dyn->ssh_rhs_old, FESOM_HALO_NOD2D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "hbar",        NULL, 1,   1,  1, 0, mesh->hbar,       FESOM_HALO_NOD2D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "hnode",       NULL, nl1, nl, 1, 0, mesh->hnode,      FESOM_HALO_NOD3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "temp",    NULL, nl1, nl, 1, 0, tracers->data[FESOM_TRACER_T].values,    FESOM_HALO_NOD3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "temp_AB", NULL, nl1, nl, 1, 0, tracers->data[FESOM_TRACER_T].valuesAB,  FESOM_HALO_NOD3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "temp_M1", NULL, nl1, nl, 1, 0, tracers->data[FESOM_TRACER_T].valuesold, FESOM_HALO_NOD3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "salt",    NULL, nl1, nl, 1, 0, tracers->data[FESOM_TRACER_S].values,    FESOM_HALO_NOD3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "salt_AB", NULL, nl1, nl, 1, 0, tracers->data[FESOM_TRACER_S].valuesAB,  FESOM_HALO_NOD3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "salt_M1", NULL, nl1, nl, 1, 0, tracers->data[FESOM_TRACER_S].valuesold, FESOM_HALO_NOD3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "w",       NULL, nl,  nl, 1, 0, dyn->w,   FESOM_HALO_NOD3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "w_expl",  NULL, nl,  nl, 1, 0, dyn->w_e, FESOM_HALO_NOD3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "w_impl",  NULL, nl,  nl, 1, 0, dyn->w_i, FESOM_HALO_NOD3D, &gp, mesh, partit);
+    if (tke)
+        frst_load(prefix, "oce", "tke", NULL, nl, nl, 1, 0, tke->tke, -1, &gp, mesh, partit);
+    frst_load(prefix, "oce", "u",       "v",       nl1, nl, 2, 1, dyn->uv,       FESOM_HALO_ELEM3D, &gp, mesh, partit);
+    frst_load(prefix, "oce", "urhs_AB", "vrhs_AB", nl1, nl, 2, 1, dyn->uv_rhsAB, FESOM_HALO_ELEM3D, &gp, mesh, partit);
+    if (ice) {
+        frst_load(prefix, "ice", "area",  NULL, 1, 1, 1, 0, ice->data[FESOM_ICE_AICE].values,  FESOM_HALO_NOD2D, &gp, mesh, partit);
+        frst_load(prefix, "ice", "hice",  NULL, 1, 1, 1, 0, ice->data[FESOM_ICE_MICE].values,  FESOM_HALO_NOD2D, &gp, mesh, partit);
+        frst_load(prefix, "ice", "hsnow", NULL, 1, 1, 1, 0, ice->data[FESOM_ICE_MSNOW].values, FESOM_HALO_NOD2D, &gp, mesh, partit);
+        frst_load(prefix, "ice", "uice",  NULL, 1, 1, 1, 0, ice->uice, FESOM_HALO_NOD2D, &gp, mesh, partit);
+        frst_load(prefix, "ice", "vice",  NULL, 1, 1, 1, 0, ice->vice, FESOM_HALO_NOD2D, &gp, mesh, partit);
+    }
+    gather_plan_free(&gp);
+
+    /* --- what the Fortran re-derives after reading: restart_thickness_ale --- */
+    for (int n = 0; n < N; ++n) {
+        const int nzmin_f = mesh->ulevels_nod2D[n];      /* 1-based */
+        const int nzmax_f = mesh->nlevels_nod2D[n] - 1;  /* 1-based bottom layer */
+        if (nzmin_f > 1) continue;
+        mesh->hnode[FESOM_NODE3D(n, nzmax_f - 1, nl)] = mesh->bottom_node_thickness[n];
+        for (int nz_f = nzmax_f - 1; nz_f >= nzmin_f; --nz_f) {     /* Fortran nz = nzmax-1 .. nzmin */
+            const size_t k  = FESOM_NODE3D(n, nz_f - 1, nl);
+            const size_t k1 = FESOM_NODE3D(n, nz_f,     nl);
+            mesh->zbar_3d_n[k] = mesh->zbar_3d_n[k1] + mesh->hnode[k];
+            mesh->Z_3d_n[k]    = mesh->zbar_3d_n[k1] + mesh->hnode[k] / 2.0;
+        }
+    }
+    for (int e = 0; e < mesh->myDim_elem2D; ++e) {
+        const int nzmin_f = mesh->ulevels[e];
+        const int nzmax_f = mesh->nlevels[e] - 1;
+        if (nzmin_f > 1) continue;
+        const int n0 = mesh->elem_nodes[3*e + 0], n1 = mesh->elem_nodes[3*e + 1], n2 = mesh->elem_nodes[3*e + 2];
+        for (int nz_f = nzmin_f; nz_f <= nzmax_f - 1; ++nz_f)
+            mesh->helem[FESOM_ELEM3D(e, nz_f - 1, nl)] =
+                (mesh->hnode[FESOM_NODE3D(n0, nz_f - 1, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n1, nz_f - 1, nl)] +
+                 mesh->hnode[FESOM_NODE3D(n2, nz_f - 1, nl)]) / 3.0;
+        mesh->helem[FESOM_ELEM3D(e, nzmax_f - 1, nl)] = mesh->bottom_elem_thickness[e];
+        mesh->dhe[e] = (mesh->hbar[n0] + mesh->hbar[n1] + mesh->hbar[n2]) / 3.0;
+    }
+    fesom_halo_exchange(mesh->helem, FESOM_HALO_ELEM3D, nl, 1, partit);
+    memcpy(mesh->hnode_new, mesh->hnode, (size_t)N * (size_t)nl * sizeof(real_t));
+
+    /* --- what the Fortran leaves at its allocation value --- */
+    memcpy(mesh->hbar_old, mesh->hbar, (size_t)N * sizeof(real_t));   /* overwritten before use */
+    memset(dyn->d_eta, 0, (size_t)N * sizeof(real_t));
+    if (ice) {
+        memset(ice->thermo.t_skin,  0, (size_t)N * sizeof(real_t));
+        memset(ice->thermo.thdgr,   0, (size_t)N * sizeof(real_t));
+        memset(ice->thermo.thdgrsn, 0, (size_t)N * sizeof(real_t));
+        memset(ice->thermo.thdgra,  0, (size_t)N * sizeof(real_t));
+        const int E = mesh->myDim_elem2D + mesh->eDim_elem2D + mesh->eXDim_elem2D;
+        memset(ice->work.sigma11, 0, (size_t)E * sizeof(real_t));
+        memset(ice->work.sigma12, 0, (size_t)E * sizeof(real_t));
+        memset(ice->work.sigma22, 0, (size_t)E * sizeof(real_t));
+        ice->ice_steps_since_upd = 0;
+        ice->ice_update          = 1;
+    }
+
+    /* uvnode (what the Fortran computes at the top of every step) is left to
+     * the caller: fesom_compute_vel_nodes lives in a physics TU this IO TU
+     * does not link against in the unit test. */
+
+    /* The Fortran names a yearly restart by the year it CLOSES: fesom.Y.oce.restart
+     * is the state at 00:00 on 1 January Y+1. */
+    memset(cal, 0, sizeof *cal);
+    cal->kind = FESOM_CAL_GREGORIAN;
+    cal->year = year_written + 1; cal->month = 1; cal->day = 1;
+    cal->hour = 0; cal->minute = 0; cal->second = 0.0;
+    cal->origin_year = 1958; cal->origin_month = 1; cal->origin_day = 1;
+    if (partit->mype == 0)
+        printf("[fesom_port] fortran restart: imported %s -> %04d-01-01 00:00\n", prefix, year_written + 1);
+    MPI_Barrier(partit->MPI_COMM_FESOM);
+}

@@ -1,0 +1,41 @@
+#!/bin/bash
+#SBATCH --job-name=drift_gate
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:40:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/runs/drift_gate/slurm.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/runs/drift_gate/slurm.%j.err
+#
+# Byte-gate + magnitude probe for the two drift fixes (docs/plans/20260918-longrun-drift-strategy.md):
+#   A  reference binary (fesom2_port_zstar/build, md5 deb889e5), 96 steps, snapshots every 48
+#   B  drift-fix binary, BOTH knobs set to the legacy behaviour  -> must be byte-identical to A
+#   C  drift-fix binary, defaults (both fixes on)
+#   D  fix 1 only (bulk sees the current step's surface current)
+#   E  fix 2 only (forcing interpolated to mid-step)
+set -u
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos_int/env.sh
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+REF=/home/a/a270088/port2/fesom2_port_zstar/build/fesom_port
+NEW=/home/a/a270088/port2/fesom2_port_drift/build/fesom_port
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+ROOT=/work/ab0995/a270088/port_paper_v2/runs/drift_gate
+export FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar FESOM_IC_EXTRAP=det FESOM_PRINT_EVERY=48
+run() {  # name binary [env...]
+    local name=$1 bin=$2; shift 2
+    local out=$ROOT/$name; mkdir -p "$out"
+    echo "=== $name  $(date -Is)  $* ==="
+    env "$@" srun -l --ntasks=128 "$bin" "$MESH" "$out" 1800 96 48 "$PHC" 1958 > "$out/run.log" 2> "$out/run.err"
+    echo "exit $?"; ls "$out"/snap_*.nc | tr '\n' ' '; echo
+}
+run A "$REF"
+run B "$NEW" FESOM_BULK_UVNODE_LAG=1 FESOM_FORCING_MIDSTEP=0
+run C "$NEW"
+run D "$NEW" FESOM_FORCING_MIDSTEP=0
+run E "$NEW" FESOM_BULK_UVNODE_LAG=1
+echo "=== md5 of snapshots ==="
+for r in A B C D E; do for f in $ROOT/$r/snap_000096.nc; do echo "$r $(md5sum < $f | cut -c1-32)"; done; done

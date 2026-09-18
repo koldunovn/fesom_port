@@ -797,7 +797,25 @@ skip_rest_state:
     double           rst_dt     = 0.0;
     fesom_calendar_t rst_cal;
     memset(&rst_cal, 0, sizeof(rst_cal));
-    if (rst.in_path) {
+    const char *rst_fortran = getenv("FESOM_RESTART_FORTRAN");
+    if (rst_fortran && rst_fortran[0]) {
+        /* Drift investigation: start from a Fortran yearly restart. The year
+         * is the last 4 digits of the prefix (fesom.YYYY). */
+        size_t L = strlen(rst_fortran);
+        FESOM_CHECK(L >= 4, "FESOM_RESTART_FORTRAN: prefix too short: %s", rst_fortran);
+        int ywr = atoi(rst_fortran + L - 4);
+        FESOM_CHECK(ywr > 1000 && ywr < 3000, "FESOM_RESTART_FORTRAN: prefix must end in fesom.YYYY: %s", rst_fortran);
+        fesom_restart_import_fortran(rst_fortran, ywr, &rst_cal, &mesh, &dyn, &tracers, &ice,
+                                     use_tke ? &tke : NULL, &mpi);
+        /* what the Fortran computes at the top of every step (compute_vel_nodes) */
+        fesom_compute_vel_nodes(&mesh, &dyn);
+        fesom_halo_exchange(dyn.uvnode, FESOM_HALO_NOD3D, mesh.nl, 2, &mpi);
+        rst_step = 0; rst_dt = (double)FESOM_PHASE1_DT;
+        rst_active = 1;
+        if (mpi.mype == 0)
+            printf("[fesom_port] restart: imported FORTRAN restart %s, resuming %04d-%02d-%02d\n",
+                   rst_fortran, rst_cal.year, rst_cal.month, rst_cal.day);
+    } else if (rst.in_path) {
         fesom_restart_read(rst.in_path, &rst_step, &rst_dt, &rst_cal,
                            &mesh, &dyn, &tracers, &ice,
                            use_tke ? &tke : NULL, &stiff, &mpi);
@@ -1061,6 +1079,32 @@ skip_rest_state:
                  * old "cal.year == jra55_year" safety overlap from Task 2
                  * was retired with multi-year support. */
                 fesom_jra55_step_cal(&jra, &mesh, &mpi, &io.calendar);
+                /* Drift fix 1 (2026-09-18): the Fortran runloop calls
+                 * compute_vel_nodes at the top of EVERY step (fesom_module.F90,
+                 * right after `call clock`), so update_atm_forcing's bulk
+                 * formulae see the surface current of the step that just
+                 * ended (ocean2ice -> ice%srfoce_u from UV(:,1,:)). The C used
+                 * to leave uvnode as fesom_timestep computed it one step
+                 * earlier, i.e. the bulk saw a current one step OLD. Not an
+                 * FP-floor difference: |U_a - u_w| with a lagged u_w is
+                 * systematically biased. FESOM_BULK_UVNODE_LAG=1 restores the
+                 * old order for bisection. */
+                {
+                    static int s_lag_checked = 0, s_lag = 0;
+                    if (!s_lag_checked) {
+                        const char *e = getenv("FESOM_BULK_UVNODE_LAG");
+                        s_lag = (e && atoi(e));
+                        s_lag_checked = 1;
+                        if (mpi.mype == 0)
+                            printf("[fesom_port] bulk surface current: %s\n",
+                                   s_lag ? "one-step LAG (legacy C order)"
+                                         : "recomputed each step (Fortran order)");
+                    }
+                    if (!s_lag) {
+                        fesom_compute_vel_nodes(&mesh, &dyn);
+                        fesom_halo_exchange(dyn.uvnode, FESOM_HALO_NOD3D, mesh.nl, 2, &mpi);
+                    }
+                }
                 fesom_bulk_compute(&jra, &mesh, &dyn, &tracers, &forcing, &ice, &mpi);
             }
             if (use_sr) {

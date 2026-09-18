@@ -118,4 +118,22 @@ void fesom_restart_read(const char           *path,
                         struct fesom_ssh_stiff *stiff,
                         struct fesom_partit  *partit);
 
+/* Drift investigation (2026-09-18): start from a FESOM2 Fortran yearly restart
+ * (<prefix>.oce.restart/, <prefix>.ice.restart/), reproducing the state the
+ * Fortran itself is in after reading it. Selected by
+ *   FESOM_RESTART_FORTRAN=<prefix>   e.g. .../fortran_ref/fesom.1970
+ * The calendar is set to 1 January of the year after the one in the name.
+ * The stiffness matrix is left at its base (cold-start) value with dhe set to
+ * the element-mean hbar, which is exactly what restart_thickness_ale does so
+ * that the first update_stiff_mat_ale lifts the base to the current state. */
+void fesom_restart_import_fortran(const char           *prefix,
+                                  int                   year_written,
+                                  fesom_calendar_t     *cal,
+                                  struct fesom_mesh    *mesh,
+                                  struct fesom_dyn     *dyn,
+                                  struct fesom_tracers *tracers,
+                                  struct fesom_ice     *ice,
+                                  struct fesom_tke     *tke,
+                                  struct fesom_partit  *partit);
+
 #endif /* FESOM_IO_RESTART_H */
