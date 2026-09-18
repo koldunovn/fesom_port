@@ -34,7 +34,14 @@
 #include <string.h>
 
 #ifndef FESOM_ICE_SCALE_AREA
-#define FESOM_ICE_SCALE_AREA 2.0e8   /* oce_modules.F90:29 — global, used by ice_diff scaling */
+/* scale_area is a NAMELIST parameter (&oce_dyn, oce_modules.F90:193), not a
+ * constant: the CORE2 reference runs set scale_area = 5.8e9, and the ice FCT is
+ * its only live consumer (diff = ice_diff*sqrt(elem_area/scale_area),
+ * ice_fct.F90:175). The port used the module default 2.0e8 until 2026-09-18,
+ * i.e. an ice diffusion sqrt(5.8e9/2e8) = 5.4x the reference's — the
+ * systematic ice loss behind the 63-yr deep-ocean drift (docs/plans/
+ * 20260918-longrun-drift-strategy.md). FESOM_SCALE_AREA overrides the default. */
+#define FESOM_ICE_SCALE_AREA 5.8e9
 #endif
 
 /* Logical tracer index used by ice_fem_fct — mirrors Fortran tr_array_id
@@ -148,8 +155,6 @@ void fesom_ice_tg_rhs(fesom_ice                *ice,
                       struct fesom_partit      *partit,
                       const struct fesom_mesh  *mesh)
 {
-    (void)partit;
-
     real_t *u_ice  = ice->uice;
     real_t *v_ice  = ice->vice;
     real_t *a_ice  = ice->data[FESOM_ICE_AICE].values;
@@ -161,7 +166,14 @@ void fesom_ice_tg_rhs(fesom_ice                *ice,
 
     const real_t dt   = ice->ice_dt;
     const real_t idiff = ice->ice_diff;
-    const real_t scale = (real_t)FESOM_ICE_SCALE_AREA;
+    static real_t scale = -1.0;
+    if (scale < 0.0) {
+        const char *e = getenv("FESOM_SCALE_AREA");
+        scale = (e && e[0]) ? (real_t)atof(e) : (real_t)FESOM_ICE_SCALE_AREA;
+        if (partit->mype == 0)
+            printf("[fesom_ice_fct] scale_area = %.4e (namelist.oce &oce_dyn; reference 5.8e9)\n",
+                   (double)scale);
+    }
 
     /* zero rhs (ice_fct.F90:137-144) — bound: myDim_nod2D only.
      * Halo rhs entries are intentionally NOT zeroed — Fortran does the same;

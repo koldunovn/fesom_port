@@ -1,0 +1,24 @@
+#!/bin/bash
+#SBATCH --job-name=rst_inj
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:20:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/runs/rst_gate/slurmI.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/runs/rst_gate/slurmI.%j.err
+# C legacy arm, 2 steps, with the Fortran's post-EVP ice velocities injected before the FCT.
+G=/work/ab0995/a270088/port_paper_v2/runs/rst_gate
+source /sw/etc/profile.levante
+source /home/a/a270088/port_kokkos_int/env.sh
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+BIN=/home/a/a270088/port2/fesom2_port_drift/build/fesom_port
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+export FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar FESOM_IC_EXTRAP=det FESOM_PRINT_EVERY=1
+export FESOM_RESTART_FORTRAN=/work/ab0995/a270088/port_paper_v2/runs/fortran_ref/fesom.1970
+export FESOM_BULK_UVNODE_LAG=1 FESOM_FORCING_MIDSTEP=0
+out=$G/csub_inject_sa; mkdir -p $out
+FESOM_GATE_INJECT_VEL=$G FESOM_GATE_DUMP_DIR=$out srun -l --ntasks=128 "$BIN" "$MESH" "$out" 1800 2 0 "$PHC" 1971 > $out/run.log 2> $out/run.err
+echo "exit $?"; grep -c "injected" $out/run.log

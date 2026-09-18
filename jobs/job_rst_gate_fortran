@@ -1,0 +1,19 @@
+#!/bin/bash
+#SBATCH --job-name=rst_gateF
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/runs/rst_gate/slurmF.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/runs/rst_gate/slurmF.%j.err
+# Fortran arm of the matched-state gate (see job_rst_gate). No `set -u`: the Intel env script trips on it.
+G=/work/ab0995/a270088/port_paper_v2/runs/rst_gate
+SRC=/work/ab0995/a270088/fortran_ref/fesom2
+source /sw/etc/profile.levante
+source "$SRC/env/levante.dkrz.de/shell.intel"
+ulimit -s unlimited
+cd $G/fortran
+echo "=== fortran $(date -Is)"
+srun -l --ntasks=128 "$SRC/bin/fesom.x" > fesom.out 2>&1
+echo "exit $?"; ls *.nc | tr '\n' ' '; echo

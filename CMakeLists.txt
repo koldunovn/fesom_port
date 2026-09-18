@@ -66,6 +66,7 @@ add_executable(fesom_port
   src/fesom_io.c
   src/fesom_io_gather.c
   src/fesom_io_restart.c
+  src/fesom_io_gate.c
   src/fesom_constants.c
   src/fesom_phc.c
   src/fesom_jra55.c

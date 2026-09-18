@@ -22,6 +22,7 @@
 #include "fesom_momentum.h"
 #include "fesom_mpi.h"
 #include "fesom_io_restart.h"
+#include "fesom_io_gate.h"
 #include "fesom_phc.h"
 #include "fesom_pp.h"
 #include "fesom_ssh.h"
@@ -1057,6 +1058,9 @@ skip_rest_state:
             }
         }
 
+        /* gate dump of the initial (or imported) state, step 0 */
+        fesom_io_write_gate(0, &mesh, &dyn, &tracers, &aux, &ice, &forcing,
+                            use_jra ? &jra : NULL, &mpi);
         if (out_dir && snap_every > 0) {
             char path[1024];
             snprintf(path, sizeof(path), "%s/snap_%06d.nc", out_dir, 0);
@@ -1210,6 +1214,10 @@ skip_rest_state:
             if (mpi.mype == 0) {
                 fprintf(stderr, "[step %d] done — %d CG iters\n", n, iters);
             }
+            /* Matched-state C-vs-Fortran gate (drift investigation): full-field
+             * dump after every step when FESOM_GATE_DUMP_DIR is set. */
+            fesom_io_write_gate(n, &mesh, &dyn, &tracers, &aux, &ice, &forcing,
+                                use_jra ? &jra : NULL, &mpi);
 
             /* Drive output streams + advance calendar. Per-step cost is
              * a local-only sum into accumulators (no MPI on hot path);

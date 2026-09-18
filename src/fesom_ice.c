@@ -5,6 +5,7 @@
 #include "fesom_ice_evp.h"
 #include "fesom_ice_fct.h"
 #include "fesom_ice_maevp.h"
+#include "fesom_io_gate.h"   /* DRIFT GATE per-substep dumps */
 #include "fesom_ice_thermo.h"
 #include "fesom_mesh.h"
 #include "fesom_partit.h"
@@ -361,7 +362,6 @@ void fesom_ice_step(int                            step,
                     const struct fesom_sss_runoff *sr,
                     const struct fesom_ssh_stiff  *stiff)
 {
-    (void)step;
     load_ice_env_once();
 
     int N = mesh->myDim_nod2D + mesh->eDim_nod2D;
@@ -385,6 +385,24 @@ void fesom_ice_step(int                            step,
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
     }
+    /* DRIFT GATE (2026-09-18): per-substep ice state, mirrors the Fortran gate shim ids 20-23 */
+    if (fesom_gate_dir()) {
+        const char *nm[] = {"srfoce_u","srfoce_v","srfoce_t","srfoce_s","uice_evp","vice_evp","a_pre","m_pre","ms_pre"};
+        const real_t *pp[] = {ice->srfoce_u, ice->srfoce_v, ice->srfoce_temp, ice->srfoce_salt, ice->uice, ice->vice,
+                              ice->data[FESOM_ICE_AICE].values, ice->data[FESOM_ICE_MICE].values, ice->data[FESOM_ICE_MSNOW].values};
+        fesom_io_write_gate_2d(step, 20, 9, nm, pp, mesh, partit);
+        /* Controlled replay of the FCT: FESOM_GATE_INJECT_VEL=<dir> holds
+         * inject_uice_step<N>.nc (uice, vice) = the Fortran's post-EVP velocities. */
+        const char *inj = getenv("FESOM_GATE_INJECT_VEL");
+        if (inj && inj[0]) {
+            char path[1024]; snprintf(path, sizeof path, "%s/inject_uice_step%d.nc", inj, step);
+            FILE *fp = fopen(path, "r");
+            if (fp) { fclose(fp);
+                fesom_gate_inject_node(path, "uice", ice->uice, mesh, partit);
+                fesom_gate_inject_node(path, "vice", ice->vice, mesh, partit);
+            }
+        }
+    }
     /* Phase E — FCT advection. Mirrors Fortran ice_setup_step.F90:258-261:
      * call ice_TG_rhs; call ice_fct_solve. cut_off (line 295) follows
      * unconditionally below. */
@@ -395,12 +413,28 @@ void fesom_ice_step(int                            step,
     /* cut_off (Fortran line 295): runs after FCT and BEFORE thermodynamics
      * regardless of NO_ICE_ADV — Fortran does not gate it. Clamps tracers
      * before thermo reads them. */
+    if (fesom_gate_dir()) {
+        const char *nm[] = {"a_fct","m_fct","ms_fct"};
+        const real_t *pp[] = {ice->data[FESOM_ICE_AICE].values, ice->data[FESOM_ICE_MICE].values, ice->data[FESOM_ICE_MSNOW].values};
+        fesom_io_write_gate_2d(step, 21, 3, nm, pp, mesh, partit);
+    }
     fesom_ice_cut_off(ice, partit, mesh);
+    if (fesom_gate_dir()) {
+        const char *nm[] = {"a_cut","m_cut","ms_cut"};
+        const real_t *pp[] = {ice->data[FESOM_ICE_AICE].values, ice->data[FESOM_ICE_MICE].values, ice->data[FESOM_ICE_MSNOW].values};
+        fesom_io_write_gate_2d(step, 22, 3, nm, pp, mesh, partit);
+    }
 
     /* Thermodynamics + ice→ocean flux update. Both need forcing+jra+sr; without
      * them (e.g. pi-mesh smoke test) the step is silently a no-op. */
     if (!s_no_ice_thermo && forcing && jra && sr) {
         fesom_ice_thermodynamics(ice, partit, mesh, forcing, jra, sr);
+        if (fesom_gate_dir()) {
+            const char *nm[] = {"a_th","m_th","ms_th","flx_h","flx_fw","thdgr","thdgrsn","thdgra","t_skin","ustar"};
+            const real_t *pp[] = {ice->data[FESOM_ICE_AICE].values, ice->data[FESOM_ICE_MICE].values, ice->data[FESOM_ICE_MSNOW].values,
+                                  ice->flx_h, ice->flx_fw, ice->thermo.thdgr, ice->thermo.thdgrsn, ice->thermo.thdgra, ice->thermo.t_skin, ice->thermo.ustar};
+            fesom_io_write_gate_2d(step, 23, 10, nm, pp, mesh, partit);
+        }
         /* Phase C2/C3: oce_fluxes overwrites heat_flux/water_flux with the
          * ice-mediated flx_h/flx_fw and computes virtual_salt + relax_salt
          * (+ the zstar freshwater balancing, Z2 — needs jra for prec). */

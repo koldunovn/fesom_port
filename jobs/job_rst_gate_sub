@@ -1,0 +1,32 @@
+#!/bin/bash
+#SBATCH --job-name=rst_gsub
+#SBATCH -p compute
+#SBATCH -A ab0995
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=128
+#SBATCH --time=00:30:00
+#SBATCH -o /work/ab0995/a270088/port_paper_v2/runs/rst_gate/slurmS.%j.out
+#SBATCH -e /work/ab0995/a270088/port_paper_v2/runs/rst_gate/slurmS.%j.err
+# Per-substep ice gate: instrumented Fortran (gate_ref worktree, FESOM_DUMP_ALL) + C arms with substep dumps, 5 steps.
+G=/work/ab0995/a270088/port_paper_v2/runs/rst_gate
+source /sw/etc/profile.levante
+SRC=/work/ab0995/a270088/gate_ref/fesom2
+( source "$SRC/env/levante.dkrz.de/shell.intel"; ulimit -s unlimited; cd $G/fortran_sub
+  echo "=== fortran_sub $(date -Is)"
+  FESOM_DUMP_FILE=$G/fortran_sub/dump/ice FESOM_DUMP_ALL=1 FESOM_DUMP_MAXSTEPS=5 srun -l --ntasks=128 "$SRC/bin/fesom.x" > fesom.out 2>&1
+  echo "exit $?"; ls dump | wc -l )
+source /home/a/a270088/port_kokkos_int/env.sh
+export OMPI_MCA_btl_vader_single_copy_mechanism=none
+ulimit -s 204800
+BIN=/home/a/a270088/port2/fesom2_port_drift/build/fesom_port
+MESH=/work/ab0995/a270088/port2/mesh/core2
+PHC=/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc
+export FESOM_MIX_SCHEME=TKE FESOM_WHICH_EVP=1 FESOM_ALE=zstar FESOM_IC_EXTRAP=det FESOM_PRINT_EVERY=1
+export FESOM_RESTART_FORTRAN=/work/ab0995/a270088/port_paper_v2/runs/fortran_ref/fesom.1970
+for arm in none; do
+    [ $arm = none ] && break; out=$G/csub_$arm; mkdir -p $out
+    if [ $arm = legacy ]; then export FESOM_BULK_UVNODE_LAG=1 FESOM_FORCING_MIDSTEP=0; else unset FESOM_BULK_UVNODE_LAG FESOM_FORCING_MIDSTEP; fi
+    echo "=== C $arm $(date -Is)"
+    FESOM_GATE_DUMP_DIR=$out srun -l --ntasks=128 "$BIN" "$MESH" "$out" 1800 5 0 "$PHC" 1971 > $out/run.log 2> $out/run.err
+    echo "exit $?"; ls $out/gate_*.nc | wc -l
+done
