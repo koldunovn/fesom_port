@@ -3,6 +3,7 @@
 #include "fesom_halo.h"
 #include "fesom_partit.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <mpi.h>
 #include <stddef.h>
@@ -384,6 +385,18 @@ static int count_lines(const char *path)
     return lines;
 }
 
+/* Some mesh generators write "a,  b" (comma-separated), others "a b". Read one
+ * integer skipping whitespace and commas, so both formats parse (after
+ * fesom_kokkos PR #1, Sebastian Beyer). Returns fscanf's count. */
+static int next_int(FILE *fp, int *out)
+{
+    int c;
+    do { c = fgetc(fp); } while (c != EOF && (isspace((unsigned char)c) || c == ','));
+    if (c == EOF) return 0;
+    ungetc(c, fp);
+    return fscanf(fp, "%d", out);
+}
+
 static void read_edges(fesom_mesh *m, const char *mesh_dir)
 {
     char path_e[1024], path_t[1024];
@@ -403,13 +416,13 @@ static void read_edges(fesom_mesh *m, const char *mesh_dir)
     FESOM_CHECK(fe && ft, "edges/edge_tri: cannot reopen");
     for (int i = 0; i < ne; ++i) {
         int a, b;
-        FESOM_CHECK(fscanf(fe, "%d %d", &a, &b) == 2,
+        FESOM_CHECK(next_int(fe, &a) == 1 && next_int(fe, &b) == 1,
                     "edges.out: parse error at row %d", i + 1);
         m->edges[2*i + 0] = a - 1;
         m->edges[2*i + 1] = b - 1;
 
         int e1, e2;
-        FESOM_CHECK(fscanf(ft, "%d %d", &e1, &e2) == 2,
+        FESOM_CHECK(next_int(ft, &e1) == 1 && next_int(ft, &e2) == 1,
                     "edge_tri.out: parse error at row %d", i + 1);
         /* Fortran stores -1 (or sometimes 0) for boundary edges; keep -1 in C */
         m->edge_tri[2*i + 0] = (e1 > 0) ? e1 - 1 : -1;
