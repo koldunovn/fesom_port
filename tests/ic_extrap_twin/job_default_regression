@@ -22,7 +22,7 @@
 # array time-varying is bitwise-equal at cold start and only shows from step 2.
 set -u
 CREF=/home/a/a270088/port2/fesom2_port_zstar
-BASE=${BASE:-/scratch/a/a270088/tmp/claude-24253/-home-a-a270088-port-paper/97079955-c757-4469-8892-0fff215937b1/scratchpad/base_df8b9a8}
+BASE=${BASE:?set BASE to the build directory of the baseline commit (df8b9a8)}
 source /sw/etc/profile.levante
 source "$CREF/env.sh"
 export OMPI_MCA_btl_vader_single_copy_mechanism=none
