@@ -525,17 +525,12 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
 {
     memset(jra, 0, sizeof(*jra));
 
-    /* Namelist defaults from work_core/namelist.forcing */
-    static const char *prefixes[FESOM_JRA_NFLD] = {
-        "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/uas.",
-        "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/vas.",
-        "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/huss.",
-        "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/rsds.",
-        "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/rlds.",
-        "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/tas.",
-        "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/prra.",
-        "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/prsn.",
-    };
+    /* Namelist defaults from work_core/namelist.forcing. The directory is
+     * overridable (FESOM_FORCING_DIR, no trailing slash) so the port runs
+     * off Levante without a source edit; the default reproduces the
+     * historical literal byte for byte. */
+    const char *fdir = getenv("FESOM_FORCING_DIR");
+    if (!fdir || !fdir[0]) fdir = "/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0";
     static const char *vars[FESOM_JRA_NFLD] = {
         "uas", "vas", "huss", "rsds", "rlds", "tas", "prra", "prsn"
     };
@@ -544,8 +539,7 @@ void fesom_jra55_init(fesom_jra55 *jra, const struct fesom_mesh *mesh)
     int N    = mesh->myDim_nod2D + mesh->eDim_nod2D;   /* physics arrays cover halo */
     for (int f = 0; f < FESOM_JRA_NFLD; ++f) {
         fesom_jra55_field *flf = &jra->fld[f];
-        strncpy(flf->path_prefix, prefixes[f], sizeof(flf->path_prefix) - 1);
-        flf->path_prefix[sizeof(flf->path_prefix) - 1] = '\0';
+        snprintf(flf->path_prefix, sizeof(flf->path_prefix), "%s/%s.", fdir, vars[f]);
         strncpy(flf->var_name, vars[f], sizeof(flf->var_name) - 1);
         flf->var_name[sizeof(flf->var_name) - 1] = '\0';
         flf->year_loaded = -1;
