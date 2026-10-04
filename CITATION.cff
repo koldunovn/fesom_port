@@ -1,0 +1,43 @@
+cff-version: 1.2.0
+title: "fesom_port: a C port of the FESOM2 ocean and sea-ice model"
+message: "If you use this software, please cite it, together with the FESOM2 model it ports."
+type: software
+authors:
+  - family-names: Koldunov
+    given-names: Nikolay
+    orcid: "https://orcid.org/0000-0002-3365-8146"
+    affiliation: Alfred Wegener Institute, Helmholtz Centre for Polar and Marine Research
+version: 1.0.0
+repository-code: "https://github.com/koldunovn/fesom_port"
+license: Apache-2.0
+abstract: >-
+  A line-by-line translation into C of the ocean and sea-ice core of the FESOM2
+  unstructured-mesh model: z* vertical coordinate, cvmix_TKE, KPP and
+  Pacanowski-Philander mixing, Gent-McWilliams/Redi, flux-corrected tracer
+  transport, EVP and mEVP sea-ice dynamics, sea-ice thermodynamics, and JRA55-do
+  bulk forcing. It serves as the reference implementation for the C++/Kokkos port
+  (fesom_kokkos), which reproduces it byte for byte on the Serial back-end.
+keywords:
+  - ocean model
+  - sea ice
+  - FESOM2
+  - unstructured mesh
+  - C
+references:
+  - type: article
+    title: "The Finite-volumE Sea ice-Ocean Model (FESOM2)"
+    authors:
+      - family-names: Danilov
+        given-names: Sergey
+      - family-names: Sidorenko
+        given-names: Dmitry
+      - family-names: Wang
+        given-names: Qiang
+      - family-names: Jung
+        given-names: Thomas
+    journal: Geoscientific Model Development
+    volume: 10
+    start: 765
+    end: 789
+    year: 2017
+    doi: 10.5194/gmd-10-765-2017

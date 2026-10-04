@@ -11,6 +11,10 @@ been validated against the Fortran model over multi-year runs
 integration with global SST/SSS RMS differences vs the Fortran climate
 at the O(10⁻³) °C / PSU level. See **Validation status** below.
 
+## Version 1.0.0
+
+Version 1.0.0 is the code of the paper *An Ocean Model Ported by a Large Language Model: Experience and Lessons from FESOM2 (Fortran to C to C++/Kokkos)* (Koldunov et al.). Its 1958–2020 hindcast against the Fortran FESOM2 was run with commit `21da79e`; version 1.0.0 differs from that commit only in how input paths can be set (the defaults are unchanged), in accepting more mesh-file formats, in one test script, and in documentation. To run the model on your own machine with the CORE2 input data archived on Zenodo, see [docs/RUNNING.md](docs/RUNNING.md).
+
 Currently included physics (out of the FESOM2 superset):
 
 - **Ocean**: linfs ALE, JM-EOS, hydrostatic PGF, AB2 Coriolis,
@@ -36,14 +40,16 @@ Currently included physics (out of the FESOM2 superset):
   (the deliberate non-port redesign — see below). Per-variable cadence
   override via `FESOM_IO_CONFIG`. Debug snapshots still available.
 
-Not yet included: restart I/O (cold start only), `zlevel` / `zstar` ALE
-(linfs only), and the rest of the FESOM2 superset not exercised by
-CORE2.
+Added since this summary was first written: the `zstar` vertical coordinate
+(`FESOM_ALE=zstar`), cvmix_TKE mixing (`FESOM_MIX_SCHEME=TKE`), mEVP sea-ice
+dynamics (`FESOM_WHICH_EVP=1`) and restart files (`FESOM_RESTART_*`); see
+[docs/RUNNING.md](docs/RUNNING.md). Not included: the `zlevel` coordinate and
+the rest of the FESOM2 superset not exercised by CORE2.
 
-The model is **Levante-only**. The build script and `env.sh` source the
-gcc-11 / openmpi-4.1.2 / netcdf-c modules and set the OpenMPI runtime
-knobs that DKRZ's `fesom2/env/levante.dkrz.de/shell.gnu` uses. Other
-clusters would need their own equivalents.
+The build script and `env.sh` load Levante's gcc-11 / openmpi-4.1.2 / netcdf-c
+modules and its OpenMPI runtime settings. On another machine, build with CMake
+directly and set the input paths through environment variables, as described in
+[docs/RUNNING.md](docs/RUNNING.md).
 
 ## Build
 
@@ -61,20 +67,21 @@ shell, `module --force purge` in `env.sh` clears it.
 
 ## Data on Levante
 
-Hard-coded in the job templates. To run elsewhere, change the paths in
-the `.sh` files.
+The job templates use these Levante paths. The forcing, salinity-restoring
+and runoff files can be moved with `FESOM_FORCING_DIR`, `FESOM_SSS_PATH` and
+`FESOM_RUNOFF_PATH` (see [docs/RUNNING.md](docs/RUNNING.md)).
 
 | Asset | Path |
 |---|---|
 | CORE2 mesh | `/pool/data/AWICM/FESOM2/MESHES_FESOM2.1/core2` |
 | PHC3.0 winter IC | `/home/a/a270088/FESOM_port/fesom2/tests/data/INITIAL/phc3.0/phc3.0_winter.nc` |
-| JRA55-do forcing | reader hard-codes the `/pool/data/.../JRA55-do/` layout for the requested year |
+| JRA55-do forcing | `/pool/data/AWICM/FESOM2/FORCING/JRA55-do-v1.4.0/<var>.<year>.nc`, or `$FESOM_FORCING_DIR/<var>.<year>.nc` |
 | Output | `/work/ab0995/a270088/port/...` (or `--out_dir`) |
 
 Mesh layout the model expects under `<mesh_dir>`:
 
 - `nod2d.out`, `elem2d.out`, `aux3d.out`, `nlvls.out`, `elvls.out`,
-  `edges.out`, `edge_tri.out`, `depth.out` — global mesh files.
+  `edges.out`, `edge_tri.out` — global mesh files.
 - `dist_<NPES>/my_list*.out` + `com_info*.out` — partitioning files
   per rank count. The model picks `dist_<npes>` based on the SLURM
   `--ntasks` value. **Multi-rank runs need pre-generated partitions
@@ -474,3 +481,7 @@ Used throughout for cross-checking: `/home/a/a270088/port2/fesom2/src/`.
 Every function in this port has a `Fortran <file>:<line>` comment
 pointing back at the producer routine. Search for `Mirror of` or
 `Fortran` to navigate.
+
+## License and citation
+
+[Apache-2.0](LICENSE). The model is a port of [FESOM2](https://github.com/FESOM/fesom2) (Danilov et al., 2017, [doi:10.5194/gmd-10-765-2017](https://doi.org/10.5194/gmd-10-765-2017)). If you use it, please cite this software ([CITATION.cff](CITATION.cff)), FESOM2, and the datasets you ran it with.
